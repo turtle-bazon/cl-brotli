@@ -172,16 +172,25 @@ Long runs are split with a literal reset between repeat codes so consecutive
 
 (defun write-complex-code (w lengths size)
   "Write a complex prefix-code description for code LENGTHS (>= 2 symbols)."
-  (b:wbits w 0 2)                                        ; KIND=0 -> complex, HSKIP=0
   (let* ((m (loop for s from (1- size) downto 0 when (plusp (aref lengths s)) return s))
          (rle (cl-lengths-rle lengths m))
          (clfreq (make-array 18 :initial-element 0)))
     (dolist (r rle) (incf (aref clfreq (first r))))
     (let* ((cll (clcl-lengths clfreq))
            (clcodes (canonical-codes cll 18))
+           (first-nz (loop for i from 0 below 18
+                           when (plusp (aref cll (aref +clcl-order+ i)))
+                             return i))
+           ;; The 2-bit field is both kind and HSKIP.  HSKIP=1 means
+           ;; "simple code", so complex blocks skip 0, 2, or 3 entries.
+           (hskip (cond ((<= first-nz 1) 0)
+                        ((= first-nz 2) 2)
+                        (t 3)))
            (lastL (loop for i from 17 downto 0
                         when (plusp (aref cll (aref +clcl-order+ i))) return i)))
-      (loop for i from 0 to lastL do (write-clcl-len w (aref cll (aref +clcl-order+ i))))
+      (b:wbits w hskip 2)
+      (loop for i from hskip to lastL
+            do (write-clcl-len w (aref cll (aref +clcl-order+ i))))
       (dolist (r rle)
         (emit-bits-msb w (aref clcodes (first r)) (aref cll (first r)))
         (when (plusp (third r))
