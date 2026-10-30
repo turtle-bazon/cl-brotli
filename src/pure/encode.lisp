@@ -304,7 +304,7 @@ dictionary is worth consulting."
           (incf text))))
     (> text (/ (* 9 (max 1 sample)) 10))))
 
-(defun lz77 (data window &optional (use-dict (text-like-data-p data)))
+(defun lz77 (data window &optional (use-dict (text-like-data-p data)) dict-limit)
   "Return commands (insert-len lit-start copy-len distance dict-p); copy-len 0
 marks a trailing insert-only command."
   (declare (type (simple-array (unsigned-byte 8) (*)) data)
@@ -317,7 +317,7 @@ marks a trailing insert-only command."
                (head (make-array (ash 1 hbits) :initial-element -1))
                (prev (make-array n :initial-element -1))
                (cmds '()) (lit-start 0) (p 0) (max-chain 128) (last (- n min-match))
-               )
+               (dict-used 0))
           (flet ((ins (q) (let ((h (%hash4 data q hmask)))
                             (setf (aref prev q) (aref head h) (aref head h) q))))
             (loop while (<= p last) do
@@ -336,13 +336,15 @@ marks a trailing insert-only command."
                                  (loop for q from (1+ p) below (min (+ p best-len) (1+ last)) do (ins q))
                                  (incf p best-len) (setf lit-start p))
                                (incf p))))
-                  (if use-dict
+                  (if (and use-dict
+                           (or (null dict-limit) (< dict-used dict-limit)))
                       (multiple-value-bind (dict-len dict-idx)
                           (dict-match-at data p n)
-                        (if (and (>= dict-len min-match)
+                        (if (and (>= dict-len 9)
                                  (> dict-len best-len))
                             (let ((dist (+ (min window p) 1 dict-idx)))
                               (push (list (- p lit-start) lit-start dict-len dist t) cmds)
+                              (incf dict-used)
                               (ins p)
                               (loop for q from (1+ p) below (min (+ p dict-len) (1+ last)) do (ins q))
                               (incf p dict-len) (setf lit-start p))
@@ -395,7 +397,7 @@ Returns (values records litfreq cmdfreq distfreq)."
     (b:wbits w m1 (* 4 nib))                             ; MLEN-1
     (unless last (b:wbits w 0 1))))                      ; ISUNCOMPRESSED=0
 
-(defun compress-entropy (input &key (use-dict nil))
+(defun compress-entropy (input &key (use-dict nil) (dict-limit nil))
   "Entropy-coded brotli stream for INPUT (single meta-block, n <= 2^24).
 Returns OCTETS, or NIL if INPUT is too large for one meta-block."
   (let* ((data (b:to-octets input)) (n (length data)))
@@ -407,7 +409,7 @@ Returns OCTETS, or NIL if INPUT is too large for one meta-block."
           (progn (b:wbits w 1 1) (b:wbits w 1 1))        ; empty last meta-block
           (let ((*cmpdata* data)
                 (window (- (ash 1 (min 24 (max 10 (integer-length (max 1 n))))) 16)))
-            (multiple-value-bind (recs litf cmdf distf) (plan-commands (lz77 data window use-dict))
+            (multiple-value-bind (recs litf cmdf distf) (plan-commands (lz77 data window use-dict dict-limit))
               (let ((lit (build-etree litf 256 15))
                     (cmd (build-etree cmdf 704 15))
                     (dist (build-etree distf 64 15)))
@@ -457,8 +459,8 @@ Huffman), falling back to stored meta-blocks when that wouldn't be smaller."
     (if (incompressible-p data)
         stored
         (let* ((plain (compress-entropy data :use-dict nil))
-               (dict (and (text-like-data-p data)
-                          (compress-entropy data :use-dict t)))
-               (best (first (sort (remove nil (list plain dict stored))
+               (variants (and (text-like-data-p data)
+                              (list (compress-entropy data :use-dict t :dict-limit 1))))
+               (best (first (sort (remove nil (list* plain stored variants))
                                   #'< :key #'length))))
           best))))
