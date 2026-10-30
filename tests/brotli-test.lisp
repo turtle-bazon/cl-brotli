@@ -17,3 +17,6 @@
   (let* ((b (make-array 1000 :element-type '(unsigned-byte 8) :initial-element #xAB))
          (d (cl-brotli:decompress (cl-brotli:compress b))))
     (is (equalp d b))))
+
+(test pure-empty-roundtrip
+  (is (zerop (length (cl-brotli:decompress-pure (cl-brotli:compress ""))))))

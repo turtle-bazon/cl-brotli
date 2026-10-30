@@ -8,4 +8,5 @@
   :components ((:module "src"
                 :serial t
                 :components ((:file "package")
-                             (:file "brotli")))))
+                             (:file "brotli")
+                             (:file "pure-decoder")))))

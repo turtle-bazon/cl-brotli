@@ -5,4 +5,7 @@
            #:brotli-encoder-compress
            #:brotli-decoder-decompress
            #:brotli-encoder-max-compressed-size
-           #:brotli-decoder-estimate-decompressed-size))
+           #:brotli-decoder-estimate-decompressed-size
+           #:decompress-pure))
+
+;; Pure-Lisp work-in-progress exports
