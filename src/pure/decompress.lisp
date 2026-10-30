@@ -80,9 +80,22 @@
     (when (> need (array-dimension out 0)) (adjust-array out (max need (* 2 (array-dimension out 0)))))))
 (defun out-push (out byte) (%ensure out 1) (vector-push byte out))
 (defun out-copy (out distance len)
+  (declare (optimize (speed 3) (safety 0)))
   (let ((src (- (fill-pointer out) distance)) (fp (fill-pointer out)))
-    (%ensure out len) (setf (fill-pointer out) (+ fp len))
-    (dotimes (i len) (setf (aref out (+ fp i)) (aref out (+ src i))))))
+    (%ensure out len)
+    (setf (fill-pointer out) (+ fp len))
+    (if (>= distance len)
+        (replace out out :start1 fp :start2 src :end2 (+ src len))
+        ;; Copy the seed, then double the written pattern.  This is O(log len)
+        ;; replace calls even for distance 1 (a long run of one byte).
+        (progn
+          (replace out out :start1 fp :start2 src :end2 (+ src distance))
+          (loop with copied = distance
+                while (< copied len)
+                for n = (min copied (- len copied))
+                do (replace out out :start1 (+ fp copied) :start2 fp
+                            :end2 (+ fp n))
+                   (incf copied n))))))
 (defun out-append-vec (out v)
   (let ((fp (fill-pointer out)) (n (length v)))
     (%ensure out n) (setf (fill-pointer out) (+ fp n)) (replace out v :start1 fp)))
