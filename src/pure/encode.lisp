@@ -171,19 +171,30 @@ each symbol length emitted directly (no 16/17 repeats)."
 
 ;;; ---- LZ77 (greedy hash-chain match finder) ----------------------------
 
+(declaim (inline %hash4 %match-len))
 (defun %hash4 (data i hmask)
-  (let ((v (logior (aref data i) (ash (aref data (+ i 1)) 8)
+  (declare (type (simple-array (unsigned-byte 8) (*)) data)
+           (type fixnum i hmask)
+           (optimize (speed 3) (safety 0)))
+  (let ((v (logior (aref data i) (ash (aref data (1+ i)) 8)
                    (ash (aref data (+ i 2)) 16) (ash (aref data (+ i 3)) 24))))
     (logand (ash (logand (* v 2654435761) #xffffffff) -15) hmask)))
 
 (defun %match-len (data a b n)
+  (declare (type (simple-array (unsigned-byte 8) (*)) data)
+           (type fixnum a b n)
+           (optimize (speed 3) (safety 0)))
   (let ((len 0) (maxl (- n b)))
+    (declare (type fixnum len maxl))
     (loop while (and (< len maxl) (= (aref data (+ a len)) (aref data (+ b len)))) do (incf len))
     len))
 
 (defun lz77 (data window)
   "Return a list of commands (insert-len lit-start copy-len distance); copy-len 0
 marks a trailing insert-only command."
+  (declare (type (simple-array (unsigned-byte 8) (*)) data)
+           (type fixnum window)
+           (optimize (speed 3) (safety 0)))
   (let* ((n (length data)) (min-match 4))
     (if (< n min-match)
         (if (zerop n) '() (list (list n 0 0 0)))
