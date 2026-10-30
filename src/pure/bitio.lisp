@@ -1,0 +1,43 @@
+;;;; src/bitio.lisp — brotli bit I/O: LSB-first (low bit of each byte first),
+;;;; same convention as DEFLATE.
+(in-package #:cl-brotli.pure.bitio)
+(deftype octets () '(simple-array (unsigned-byte 8) (*)))
+(defun to-octets (s)
+  (cond ((typep s 'octets) s)
+        ((stringp s)
+         (map '(simple-array (unsigned-byte 8) (*)) #'char-code s))
+        (t (coerce s '(simple-array (unsigned-byte 8) (*))))))
+
+(defstruct (brd (:constructor make-brd (bytes &optional (pos 0) (end (length bytes)))))
+  (bytes nil :type octets) (pos 0 :type fixnum) (end 0 :type fixnum) (bit 0 :type fixnum))
+(defun r-eof-p (r) (and (>= (brd-pos r) (brd-end r)) (zerop (brd-bit r))))
+(defun rbits (r n)
+  "Read N bits, LSB-first, as an integer."
+  (let ((v 0) (got 0))
+    (loop while (< got n) do
+      (when (>= (brd-pos r) (brd-end r)) (error "brotli: end of input"))
+      (let* ((avail (- 8 (brd-bit r))) (take (min avail (- n got)))
+             (chunk (ldb (byte take (brd-bit r)) (aref (brd-bytes r) (brd-pos r)))))
+        (setf v (logior v (ash chunk got))) (incf got take) (incf (brd-bit r) take)
+        (when (= (brd-bit r) 8) (setf (brd-bit r) 0) (incf (brd-pos r)))))
+    v))
+(defun rbit (r) (rbits r 1))
+(defun r-align (r) (when (plusp (brd-bit r)) (setf (brd-bit r) 0) (incf (brd-pos r))))
+(defun r-bytes (r n)
+  (let ((out (make-array n :element-type '(unsigned-byte 8))))
+    (dotimes (i n out) (setf (aref out i) (aref (brd-bytes r) (brd-pos r))) (incf (brd-pos r)))))
+
+(defstruct (bwr (:constructor make-bwr))
+  (out (make-array 64 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0))
+  (acc 0 :type integer) (nbits 0 :type fixnum))
+(defun wbits (w v n)
+  (setf (bwr-acc w) (logior (bwr-acc w) (ash (logand v (1- (ash 1 n))) (bwr-nbits w))))
+  (incf (bwr-nbits w) n)
+  (loop while (>= (bwr-nbits w) 8) do
+    (vector-push-extend (logand (bwr-acc w) #xff) (bwr-out w))
+    (setf (bwr-acc w) (ash (bwr-acc w) -8)) (decf (bwr-nbits w) 8)))
+(defun w-align (w)
+  (when (plusp (bwr-nbits w))
+    (vector-push-extend (logand (bwr-acc w) #xff) (bwr-out w))
+    (setf (bwr-acc w) 0 (bwr-nbits w) 0)))
+(defun w-bytes (w vec) (loop for x across vec do (vector-push-extend x (bwr-out w))))

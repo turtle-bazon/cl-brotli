@@ -1,0 +1,299 @@
+;;;; src/encode.lisp — Brotli compressed encoder (entropy-coded meta-blocks).
+;;;;
+;;;; A real compressor: greedy LZ77 (hash-chain match finder) producing
+;;;; insert-and-copy commands, then canonical (length-limited) Huffman coding of
+;;;; the literal / command / distance alphabets.  One literal/command/distance
+;;;; tree each (NBLTYPES = 1, no context maps, NPOSTFIX = NDIRECT = 0); distances
+;;;; use the ring buffer's "last distance" (code 0) when they repeat.  The output
+;;;; is a standard brotli stream, decodable by the reference (node/python).
+;;;; COMPRESS falls back to stored meta-blocks when entropy coding wouldn't help.
+(in-package #:cl-brotli.pure)
+
+;;; ---- canonical code construction --------------------------------------
+
+(defun canonical-codes (lengths n)
+  "Codes per symbol for code LENGTHS, matching BUILD-HUFF/READ-HUFF (codes are
+emitted MSB-first; DEFLATE canonical assignment)."
+  (let ((count (make-array (1+ +max-bits+) :initial-element 0))
+        (next (make-array (1+ +max-bits+) :initial-element 0))
+        (codes (make-array n :initial-element 0)))
+    (dotimes (s n) (let ((l (aref lengths s))) (when (plusp l) (incf (aref count l)))))
+    (let ((code 0))
+      (loop for bits from 1 to +max-bits+ do
+        (setf code (ash (+ code (aref count (1- bits))) 1)
+              (aref next bits) code)))
+    (dotimes (s n)
+      (let ((l (aref lengths s)))
+        (when (plusp l) (setf (aref codes s) (aref next l)) (incf (aref next l)))))
+    codes))
+
+(defun limit-lengths (lengths freqs n maxlen)
+  "Clamp code LENGTHS to <= MAXLEN, restoring the Kraft equality, then reassign
+lengths to symbols by frequency (most frequent -> shortest)."
+  (let ((count (make-array 64 :initial-element 0)) (maxl 0))
+    (dotimes (s n) (let ((ll (aref lengths s))) (when (plusp ll) (incf (aref count ll)) (setf maxl (max maxl ll)))))
+    (when (> maxl maxlen)
+      (loop for ll from (1+ maxlen) to maxl do
+        (incf (aref count maxlen) (aref count ll)) (setf (aref count ll) 0))
+      (let ((total 0))
+        (loop for ll from 1 to maxlen do (incf total (ash (aref count ll) (- maxlen ll))))
+        (loop while (> total (ash 1 maxlen)) do
+          (decf (aref count maxlen))
+          (let ((bits (1- maxlen)))
+            (loop while (zerop (aref count bits)) do (decf bits))
+            (decf (aref count bits))
+            (incf (aref count (1+ bits)) 2))
+          (decf total)))
+      (let ((syms (sort (loop for s below n when (plusp (aref lengths s)) collect s)
+                        (lambda (x y) (or (> (aref freqs x) (aref freqs y))
+                                          (and (= (aref freqs x) (aref freqs y)) (< x y))))))
+            (idx 0))
+        (setf syms (coerce syms 'vector))
+        (loop for ll from 1 to maxlen do
+          (dotimes (i (aref count ll))
+            (setf (aref lengths (aref syms idx)) ll) (incf idx)))))))
+
+(defun build-code-lengths (freqs n maxlen)
+  "Optimal canonical code lengths (<= MAXLEN) for FREQS.  Assumes >= 2 nonzero."
+  (let* ((sv (coerce (loop for s below n when (plusp (aref freqs s)) collect s) 'vector))
+         (k (length sv))
+         (cap (max 2 (1- (* 2 k))))
+         (fr (make-array cap :initial-element 0))
+         (lf (make-array cap :initial-element -1))
+         (rg (make-array cap :initial-element -1))
+         (lengths (make-array n :initial-element 0))
+         (cnt k))
+    (dotimes (i k) (setf (aref fr i) (aref freqs (aref sv i))))
+    (let ((active (loop for i below k collect i)))
+      (loop while (> (length active) 1) do
+        (let (a b)
+          (dolist (x active)
+            (cond ((or (null a) (< (aref fr x) (aref fr a))) (setf b a a x))
+                  ((or (null b) (< (aref fr x) (aref fr b))) (setf b x))))
+          (let ((p cnt))
+            (setf (aref fr p) (+ (aref fr a) (aref fr b)) (aref lf p) a (aref rg p) b)
+            (incf cnt)
+            (setf active (cons p (remove a (remove b active)))))))
+      (labels ((dfs (node d)
+                 (if (< node k)
+                     (setf (aref lengths (aref sv node)) (max 1 d))
+                     (progn (dfs (aref lf node) (1+ d)) (dfs (aref rg node) (1+ d))))))
+        (dfs (car active) 0)))
+    (limit-lengths lengths freqs n maxlen)
+    lengths))
+
+;;; ---- encoder tree (single-symbol -> simple code, else complex) --------
+
+(defstruct etree lengths codes single)
+
+(defun build-etree (freqs size maxbits)
+  (let ((nz (loop for s below size when (plusp (aref freqs s)) collect s)))
+    (if (<= (length nz) 1)
+        (make-etree :single (if nz (first nz) 0))
+        (let ((lengths (build-code-lengths freqs size maxbits)))
+          (make-etree :lengths lengths :codes (canonical-codes lengths size))))))
+
+(defun emit-bits-msb (w code len)
+  (loop for i from (1- len) downto 0 do (b:wbits w (logand (ash code (- i)) 1) 1)))
+
+(defun etree-emit (w et sym)
+  (unless (etree-single et)
+    (emit-bits-msb w (aref (etree-codes et) sym) (aref (etree-lengths et) sym))))
+
+;;; ---- prefix-code description writer (inverse of READ-PREFIX-CODE) ------
+
+(defun write-clcl-len (w v)
+  "Emit one code-length-code length V (0-5) with the fixed code (inverse of
+READ-CLCL): bits written in read order."
+  (ecase v
+    (0 (b:wbits w 0 1) (b:wbits w 0 1))
+    (3 (b:wbits w 0 1) (b:wbits w 1 1))
+    (4 (b:wbits w 1 1) (b:wbits w 0 1))
+    (2 (b:wbits w 1 1) (b:wbits w 1 1) (b:wbits w 0 1))
+    (1 (b:wbits w 1 1) (b:wbits w 1 1) (b:wbits w 1 1) (b:wbits w 0 1))
+    (5 (b:wbits w 1 1) (b:wbits w 1 1) (b:wbits w 1 1) (b:wbits w 1 1))))
+
+(defun clcl-lengths (clfreq)
+  "Code-length-code lengths (0-5) forming a COMPLETE code with >= 2 symbols."
+  (let ((nz (loop for s below 18 when (plusp (aref clfreq s)) collect s))
+        (l (make-array 18 :initial-element 0)))
+    (cond
+      ((null nz) (setf (aref l 0) 1 (aref l 1) 1))
+      ((= 1 (length nz))
+       (let ((s (first nz))) (setf (aref l s) 1 (aref l (if (= s 0) 1 0)) 1)))
+      (t (setf l (build-code-lengths clfreq 18 5))))
+    l))
+
+(defun write-complex-code (w lengths size)
+  "Write a complex prefix-code description for code LENGTHS (>= 2 symbols), with
+each symbol length emitted directly (no 16/17 repeats)."
+  (b:wbits w 0 2)                                        ; KIND=0 -> complex, HSKIP=0
+  (let ((m (loop for s from (1- size) downto 0 when (plusp (aref lengths s)) return s))
+        (clfreq (make-array 18 :initial-element 0)))
+    (loop for s from 0 to m do (incf (aref clfreq (aref lengths s))))
+    (let* ((cll (clcl-lengths clfreq))
+           (clcodes (canonical-codes cll 18))
+           (lastL (loop for i from 17 downto 0
+                        when (plusp (aref cll (aref +clcl-order+ i))) return i)))
+      (loop for i from 0 to lastL do (write-clcl-len w (aref cll (aref +clcl-order+ i))))
+      (loop for s from 0 to m do
+        (emit-bits-msb w (aref clcodes (aref lengths s)) (aref cll (aref lengths s)))))))
+
+(defun write-etree (w et size)
+  (if (etree-single et)
+      (progn (b:wbits w 1 2) (b:wbits w 0 2) (b:wbits w (etree-single et) (alphabet-bits size)))
+      (write-complex-code w (etree-lengths et) size)))
+
+;;; ---- command / distance code computation ------------------------------
+
+(defparameter +celltab+ #(#(2 3 6) #(4 5 8) #(7 9 10)))   ; [ins-range][copy-range] -> cmd cell
+
+(defun length-code (len base bits)
+  "Largest code C with BASE[C] <= LEN; returns (values C extra-val extra-bits)."
+  (loop for c from (1- (length base)) downto 0
+        when (>= len (aref base c))
+          do (return (values c (- len (aref base c)) (aref bits c)))))
+
+(defun cmd-symbol (icode ccode)
+  (let* ((ir (cond ((< icode 8) 0) ((< icode 16) 1) (t 2)))
+         (cr (cond ((< ccode 8) 0) ((< ccode 16) 1) (t 2)))
+         (cell (aref (aref +celltab+ ir) cr)))
+    (+ (* cell 64) (ash (- icode (* ir 8)) 3) (- ccode (* cr 8)))))
+
+(defun encode-distance (d)
+  "Distance D (>=1) -> (values dcode dextra-val dextra-bits) for NPOSTFIX=NDIRECT=0."
+  (loop for nbits from 1 do
+    (dotimes (b 2)
+      (let ((offset (- (ash (+ 2 b) nbits) 4)))
+        (when (<= (1+ offset) d (+ offset (ash 1 nbits)))
+          (return-from encode-distance
+            (values (+ 16 (* 2 (1- nbits)) b) (- d offset 1) nbits)))))))
+
+;;; ---- LZ77 (greedy hash-chain match finder) ----------------------------
+
+(defun %hash4 (data i hmask)
+  (let ((v (logior (aref data i) (ash (aref data (+ i 1)) 8)
+                   (ash (aref data (+ i 2)) 16) (ash (aref data (+ i 3)) 24))))
+    (logand (ash (logand (* v 2654435761) #xffffffff) -15) hmask)))
+
+(defun %match-len (data a b n)
+  (let ((len 0) (maxl (- n b)))
+    (loop while (and (< len maxl) (= (aref data (+ a len)) (aref data (+ b len)))) do (incf len))
+    len))
+
+(defun lz77 (data window)
+  "Return a list of commands (insert-len lit-start copy-len distance); copy-len 0
+marks a trailing insert-only command."
+  (let* ((n (length data)) (min-match 4))
+    (if (< n min-match)
+        (if (zerop n) '() (list (list n 0 0 0)))
+        (let* ((hbits 17) (hmask (1- (ash 1 hbits)))
+               (head (make-array (ash 1 hbits) :initial-element -1))
+               (prev (make-array n :initial-element -1))
+               (cmds '()) (lit-start 0) (p 0) (max-chain 128) (last (- n min-match)))
+          (flet ((ins (q) (let ((h (%hash4 data q hmask)))
+                            (setf (aref prev q) (aref head h) (aref head h) q))))
+            (loop while (<= p last) do
+              (let* ((h (%hash4 data p hmask)) (cand (aref head h))
+                     (best-len 0) (best-dist 0) (chain max-chain))
+                (loop while (and (>= cand 0) (> chain 0)) do
+                  (when (> (- p cand) window) (return))
+                  (let ((ml (%match-len data cand p n)))
+                    (when (> ml best-len) (setf best-len ml best-dist (- p cand))))
+                  (setf cand (aref prev cand)) (decf chain))
+                (ins p)
+                (if (>= best-len min-match)
+                    (progn
+                      (push (list (- p lit-start) lit-start best-len best-dist) cmds)
+                      (loop for q from (1+ p) below (min (+ p best-len) (1+ last)) do (ins q))
+                      (incf p best-len) (setf lit-start p))
+                    (incf p)))))
+          (when (< lit-start n) (push (list (- n lit-start) lit-start 0 0) cmds))
+          (nreverse cmds)))))
+
+;;; ---- compressed meta-block --------------------------------------------
+
+(defstruct cmdrec ins lit-start cpy csym ixv ixb cxv cxb has-dist dcode dxv dxb)
+
+(defvar *cmpdata*)   ; the input being compressed (bound during PLAN-COMMANDS / emit)
+
+(defun plan-commands (cmds)
+  "Turn raw LZ77 commands into CMDRECs and tally literal/command/distance freqs.
+Returns (values records litfreq cmdfreq distfreq)."
+  (let ((litfreq (make-array 256 :initial-element 0))
+        (cmdfreq (make-array 704 :initial-element 0))
+        (distfreq (make-array 64 :initial-element 0))
+        (recs '()) (last-dist 0))
+    (dolist (c cmds)
+      (destructuring-bind (ins lit-start cpy dist) c
+        (multiple-value-bind (icode ixv ixb) (length-code ins +ins-base+ +ins-bits+)
+          (let ((copyp (plusp cpy)))
+            (multiple-value-bind (ccode cxv cxb)
+                (if copyp (length-code cpy +cpy-base+ +cpy-bits+) (values 0 0 0))
+              (let ((csym (cmd-symbol icode ccode)) (dcode 0) (dxv 0) (dxb 0) (has-dist nil))
+                (incf (aref cmdfreq csym))
+                (loop for i from lit-start below (+ lit-start ins)
+                      do (incf (aref litfreq (aref *cmpdata* i))))
+                (when copyp
+                  (setf has-dist t)
+                  (if (= dist last-dist)
+                      (setf dcode 0)
+                      (progn (multiple-value-setq (dcode dxv dxb) (encode-distance dist))
+                             (setf last-dist dist)))
+                  (incf (aref distfreq dcode)))
+                (push (make-cmdrec :ins ins :lit-start lit-start :cpy cpy :csym csym
+                                   :ixv ixv :ixb ixb :cxv cxv :cxb cxb
+                                   :has-dist has-dist :dcode dcode :dxv dxv :dxb dxb)
+                      recs)))))))
+    (values (nreverse recs) litfreq cmdfreq distfreq)))
+
+(defun write-mlen-header (w n last)
+  (let* ((m1 (1- n)) (nib (cond ((<= m1 #xFFFF) 4) ((<= m1 #xFFFFF) 5) (t 6))))
+    (b:wbits w (if last 1 0) 1)                          ; ISLAST
+    (when last (b:wbits w 0 1))                          ; ISLASTEMPTY=0
+    (b:wbits w (- nib 4) 2)                              ; MNIBBLES
+    (b:wbits w m1 (* 4 nib))                             ; MLEN-1
+    (unless last (b:wbits w 0 1))))                      ; ISUNCOMPRESSED=0
+
+(defun compress-entropy (input)
+  "Entropy-coded brotli stream for INPUT (single meta-block, n <= 2^24).
+Returns OCTETS, or NIL if INPUT is too large for one meta-block."
+  (let* ((data (b:to-octets input)) (n (length data)))
+    (when (> n #.(ash 1 24)) (return-from compress-entropy nil))
+    (let ((w (b:make-bwr))
+          (wbits (min 24 (max 10 (integer-length (max 1 n))))))
+      (write-wbits w wbits)
+      (if (zerop n)
+          (progn (b:wbits w 1 1) (b:wbits w 1 1))        ; empty last meta-block
+          (let ((*cmpdata* data)
+                (window (- (ash 1 (min 24 (max 10 (integer-length (max 1 n))))) 16)))
+            (multiple-value-bind (recs litf cmdf distf) (plan-commands (lz77 data window))
+              (let ((lit (build-etree litf 256 15))
+                    (cmd (build-etree cmdf 704 15))
+                    (dist (build-etree distf 64 15)))
+                (write-mlen-header w n t)
+                (b:wbits w 0 1) (b:wbits w 0 1) (b:wbits w 0 1)   ; NBLTYPES L/I/D = 1
+                (b:wbits w 0 2)                                   ; NPOSTFIX=0
+                (b:wbits w 0 4)                                   ; NDIRECT=0
+                (b:wbits w 0 2)                                   ; context mode (literal type 0)
+                (b:wbits w 0 1) (b:wbits w 0 1)                   ; NTREESL=1, NTREESD=1
+                (write-etree w lit 256)
+                (write-etree w cmd 704)
+                (write-etree w dist 64)
+                (dolist (r recs)
+                  (etree-emit w cmd (cmdrec-csym r))
+                  (b:wbits w (cmdrec-ixv r) (cmdrec-ixb r))
+                  (b:wbits w (cmdrec-cxv r) (cmdrec-cxb r))
+                  (loop for i from (cmdrec-lit-start r) below (+ (cmdrec-lit-start r) (cmdrec-ins r))
+                        do (etree-emit w lit (aref data i)))
+                  (when (cmdrec-has-dist r)
+                    (etree-emit w dist (cmdrec-dcode r))
+                    (b:wbits w (cmdrec-dxv r) (cmdrec-dxb r))))))))
+      (b:w-align w)
+      (b:to-octets (b:bwr-out w)))))
+
+(defun compress (input)
+  "Compress INPUT to a brotli stream.  Uses entropy-coded meta-blocks (LZ77 +
+Huffman), falling back to stored meta-blocks when that wouldn't be smaller."
+  (let ((c (compress-entropy input)) (s (compress-stored input)))
+    (if (and c (<= (length c) (length s))) c s)))

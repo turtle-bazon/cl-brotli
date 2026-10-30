@@ -1,12 +1,20 @@
 (defsystem "cl-brotli"
-  :description "Common Lisp bindings and convenience API for Brotli compression"
+  :description "Pure Common Lisp Brotli codec (RFC 7932)"
   :version "0.0.1.0"
   :author "pesekey"
   :license "GPL-3.0"
-  :depends-on ("cffi" "flexi-streams")
+  :depends-on ()
   :serial t
   :components ((:module "src"
                 :serial t
-                :components ((:file "package")
-                             (:file "brotli")
-                             (:file "pure-decoder")))))
+                :components ((:module "pure"
+                              :serial t
+                              :components ((:file "packages")
+                                           (:file "bitio")
+                                           (:file "tables")
+                                           (:file "huffman")
+                                           (:file "dict")
+                                           (:file "decompress")
+                                           (:file "brotli")
+                                           (:file "encode")))
+                             (:file "package")))))

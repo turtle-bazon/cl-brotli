@@ -1,11 +1,9 @@
 (defpackage #:cl-brotli
-  (:use #:cl #:cffi)
+  (:use #:cl)
+  (:import-from #:cl-brotli.pure
+                #:compress
+                #:decompress
+                #:brotli-error)
   (:export #:compress
            #:decompress
-           #:brotli-encoder-compress
-           #:brotli-decoder-decompress
-           #:brotli-encoder-max-compressed-size
-           #:brotli-decoder-estimate-decompressed-size
-           #:decompress-pure))
-
-;; Pure-Lisp work-in-progress exports
+           #:brotli-error))
