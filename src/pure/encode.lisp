@@ -84,14 +84,24 @@ lengths to symbols by frequency (most frequent -> shortest)."
 
 ;;; ---- encoder tree (single-symbol -> simple code, else complex) --------
 
-(defstruct etree lengths codes single)
+(defstruct etree lengths codes single simple)
 
 (defun build-etree (freqs size maxbits)
   (let ((nz (loop for s below size when (plusp (aref freqs s)) collect s)))
-    (if (<= (length nz) 1)
-        (make-etree :single (if nz (first nz) 0))
-        (let ((lengths (build-code-lengths freqs size maxbits)))
-          (make-etree :lengths lengths :codes (canonical-codes lengths size))))))
+    (cond
+      ((<= (length nz) 1)
+       (make-etree :single (if nz (first nz) 0)))
+      ((<= (length nz) 4)
+       (let* ((lengths (make-array size :initial-element 0))
+              (n (length nz)))
+         (loop for s in nz for i from 0 do
+           (setf (aref lengths s)
+                 (case n (2 1) (3 (if (zerop i) 1 2)) (t 2))))
+         (make-etree :lengths lengths :codes (canonical-codes lengths size)
+                     :simple nz)))
+      (t
+       (let ((lengths (build-code-lengths freqs size maxbits)))
+         (make-etree :lengths lengths :codes (canonical-codes lengths size)))))))
 
 (defun emit-bits-msb (w code len)
   (loop for i from (1- len) downto 0 do (b:wbits w (logand (ash code (- i)) 1) 1)))
@@ -177,10 +187,25 @@ Long runs are split with a literal reset between repeat codes so consecutive
         (when (plusp (third r))
           (b:wbits w (second r) (third r)))))))
 
+(defun write-simple-code (w symbols size)
+  "Write a simple prefix code for 2-4 SYMBOLS."
+  (b:wbits w 1 2)
+  (b:wbits w (1- (length symbols)) 2)
+  (let ((ab (alphabet-bits size)))
+    (dolist (s symbols) (b:wbits w s ab)))
+  (when (= (length symbols) 4)
+    (b:wbits w 0 1)))                    ; all four lengths = 2
+
 (defun write-etree (w et size)
-  (if (etree-single et)
-      (progn (b:wbits w 1 2) (b:wbits w 0 2) (b:wbits w (etree-single et) (alphabet-bits size)))
-      (write-complex-code w (etree-lengths et) size)))
+  (cond
+    ((etree-single et)
+     (b:wbits w 1 2)
+     (b:wbits w 0 2)
+     (b:wbits w (etree-single et) (alphabet-bits size)))
+    ((etree-simple et)
+     (write-simple-code w (etree-simple et) size))
+    (t
+     (write-complex-code w (etree-lengths et) size))))
 
 ;;; ---- command / distance code computation ------------------------------
 
@@ -279,7 +304,7 @@ dictionary is worth consulting."
           (incf text))))
     (> text (/ (* 9 (max 1 sample)) 10))))
 
-(defun lz77 (data window)
+(defun lz77 (data window &optional (use-dict (text-like-data-p data)))
   "Return commands (insert-len lit-start copy-len distance dict-p); copy-len 0
 marks a trailing insert-only command."
   (declare (type (simple-array (unsigned-byte 8) (*)) data)
@@ -292,7 +317,7 @@ marks a trailing insert-only command."
                (head (make-array (ash 1 hbits) :initial-element -1))
                (prev (make-array n :initial-element -1))
                (cmds '()) (lit-start 0) (p 0) (max-chain 128) (last (- n min-match))
-               (use-dict (text-like-data-p data)))
+               )
           (flet ((ins (q) (let ((h (%hash4 data q hmask)))
                             (setf (aref prev q) (aref head h) (aref head h) q))))
             (loop while (<= p last) do
@@ -370,7 +395,7 @@ Returns (values records litfreq cmdfreq distfreq)."
     (b:wbits w m1 (* 4 nib))                             ; MLEN-1
     (unless last (b:wbits w 0 1))))                      ; ISUNCOMPRESSED=0
 
-(defun compress-entropy (input)
+(defun compress-entropy (input &key (use-dict nil))
   "Entropy-coded brotli stream for INPUT (single meta-block, n <= 2^24).
 Returns OCTETS, or NIL if INPUT is too large for one meta-block."
   (let* ((data (b:to-octets input)) (n (length data)))
@@ -382,7 +407,7 @@ Returns OCTETS, or NIL if INPUT is too large for one meta-block."
           (progn (b:wbits w 1 1) (b:wbits w 1 1))        ; empty last meta-block
           (let ((*cmpdata* data)
                 (window (- (ash 1 (min 24 (max 10 (integer-length (max 1 n))))) 16)))
-            (multiple-value-bind (recs litf cmdf distf) (plan-commands (lz77 data window))
+            (multiple-value-bind (recs litf cmdf distf) (plan-commands (lz77 data window use-dict))
               (let ((lit (build-etree litf 256 15))
                     (cmd (build-etree cmdf 704 15))
                     (dist (build-etree distf 64 15)))
@@ -427,8 +452,13 @@ entropy coder is unlikely to beat a stored meta-block."
 (defun compress (input)
   "Compress INPUT to a brotli stream.  Uses entropy-coded meta-blocks (LZ77 +
 Huffman), falling back to stored meta-blocks when that wouldn't be smaller."
-  (let ((data (b:to-octets input)))
+  (let* ((data (b:to-octets input))
+         (stored (compress-stored data)))
     (if (incompressible-p data)
-        (compress-stored data)
-        (let ((c (compress-entropy data)) (s (compress-stored data)))
-          (if (and c (<= (length c) (length s))) c s)))))
+        stored
+        (let* ((plain (compress-entropy data :use-dict nil))
+               (dict (and (text-like-data-p data)
+                          (compress-entropy data :use-dict t)))
+               (best (first (sort (remove nil (list plain dict stored))
+                                  #'< :key #'length))))
+          best))))
