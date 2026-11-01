@@ -1,0 +1,88 @@
+=== cl-brotli vs C Brotli ===
+Lisp:  SBCL 2.6.9.roswell
+C Brotli: 1.0.9
+Sizes: 1.00 MiB   Datasets: TEXT, HTML, JSON
+Levels: 11   Windows: 22   Modes: 0, 1, 2
+Samples: 2   Target: 0.10s   Consing: off
+CPU:   Intel Xeon Processor (Skylake, IBRS, no TSX)
+
+## TEXT — /usr/share/common-licenses/GPL-3 (1.00 MiB)
+
+### compression
+
+| C q | lgwin | mode | C size | pure size | pure/C size | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+|----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
+| 11 | 22 | 0 | 9702 | 12218 | 1.259 | 6.6 | 6.0 | 5.4 | 0.83x | 0.91x |
+| 11 | 22 | 1 | 9702 | 12218 | 1.259 | 6.4 | 5.8 | 5.4 | 0.85x | 0.93x |
+| 11 | 22 | 2 | 9704 | 12218 | 1.259 | 6.6 | 6.6 | 5.4 | 0.83x | 0.83x |
+
+### decompression of the C stream
+
+| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+|----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
+| 11 | 22 | 0 | 468.1 | 60.0 | 125.0 | 0.27x | 2.08x |
+| 11 | 22 | 1 | 400.0 | 62.5 | 168.9 | 0.42x | 2.70x |
+| 11 | 22 | 2 | 416.6 | 52.6 | 135.9 | 0.33x | 2.58x |
+
+### pure-encoded stream: decoder comparison
+
+| C decode MiB/s | pure decode MiB/s | pure/C |
+|---------------:|-------------------:|--------:|
+| 446.4 | 125.0 | 0.28x |
+
+## HTML — /usr/share/doc/rclone/MANUAL.html (1.00 MiB)
+
+### compression
+
+| C q | lgwin | mode | C size | pure size | pure/C size | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+|----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
+| 11 | 22 | 0 | 169361 | 198383 | 1.171 | 0.3 | 0.3 | 0.6 | 1.91x | 1.78x |
+| 11 | 22 | 1 | 169361 | 198383 | 1.171 | 0.3 | 0.3 | 0.6 | 1.75x | 1.96x |
+| 11 | 22 | 2 | 169362 | 198383 | 1.171 | 0.3 | 0.3 | 0.6 | 2.01x | 2.21x |
+
+### decompression of the C stream
+
+| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+|----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
+| 11 | 22 | 0 | 285.7 | 66.7 | 12.5 | 0.04x | 0.19x |
+| 11 | 22 | 1 | 312.5 | 65.2 | 12.5 | 0.04x | 0.19x |
+| 11 | 22 | 2 | 230.8 | 55.6 | 9.3 | 0.04x | 0.17x |
+
+### pure-encoded stream: decoder comparison
+
+| C decode MiB/s | pure decode MiB/s | pure/C |
+|---------------:|-------------------:|--------:|
+| 381.7 | 12.5 | 0.03x |
+
+## JSON — real JSON document or generated records (1.00 MiB)
+
+### compression
+
+| C q | lgwin | mode | C size | pure size | pure/C size | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+|----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
+| 11 | 22 | 0 | 47684 | 57985 | 1.216 | 0.3 | 0.3 | 1.6 | 5.28x | 5.12x |
+| 11 | 22 | 1 | 47684 | 57985 | 1.216 | 0.3 | 0.3 | 1.6 | 5.01x | 4.80x |
+| 11 | 22 | 2 | 47695 | 57985 | 1.216 | 0.3 | 0.3 | 1.6 | 4.73x | 4.94x |
+
+### decompression of the C stream
+
+| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+|----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
+| 11 | 22 | 0 | 712.2 | 95.2 | 37.5 | 0.05x | 0.39x |
+| 11 | 22 | 1 | 741.8 | 93.7 | 27.8 | 0.04x | 0.30x |
+| 11 | 22 | 2 | 661.3 | 83.3 | 25.0 | 0.04x | 0.30x |
+
+### pure-encoded stream: decoder comparison
+
+| C decode MiB/s | pure decode MiB/s | pure/C |
+|---------------:|-------------------:|--------:|
+| 836.1 | 26.3 | 0.03x |
+
+## Summary (geometric mean pure/C, grouped by size/mode/lgwin/q)
+
+| size | mode | lgwin | C q | size (pure/C) | comp core (pure/C) | comp 1-shot (pure/C) | decomp core (pure/C) | decomp 1-shot (pure/C) |
+|-----:|-----:|------:|----:|--------------:|-------------------:|---------------------:|---------------------:|-----------------------:|
+| 1.00 MiB | 0 | 22 | 11 | 1.215 | 2.03x | 2.03x | 0.09x | 0.54x |
+| 1.00 MiB | 1 | 22 | 11 | 1.215 | 1.95x | 2.06x | 0.09x | 0.54x |
+| 1.00 MiB | 2 | 22 | 11 | 1.215 | 1.99x | 2.08x | 0.08x | 0.51x |
+

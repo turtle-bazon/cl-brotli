@@ -8,4 +8,6 @@
   :components ((:module "tests"
                 :serial t
                 :components ((:file "package")
-                             (:file "brotli-test")))))
+                             (:file "brotli-test"))))
+  :perform (test-op (op c)
+             (uiop:symbol-call "CL-BROTLI/TESTS" "RUN-TESTS")))

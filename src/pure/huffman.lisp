@@ -3,34 +3,85 @@
 (in-package #:cl-brotli.pure)
 
 (defconstant +max-bits+ 15)
+(defconstant +huff-table-bits+ 10)
 
-(defstruct huff (count nil) (symbol nil) (single nil))
+(defstruct huff (count nil) (symbol nil) (single nil) (table nil) (table-bits 0))
+
+(defun %reverse-bits (value bits)
+  (let ((result 0))
+    (dotimes (i bits result)
+      (setf result (logior (ash result 1) (logand value 1)))
+      (setf value (ash value -1)))))
 
 (defun build-huff (lengths n)
-  "Canonical Huffman from code LENGTHS[0:n-1] (0 = absent), Mark-Adler style."
-  (let ((count (make-array (1+ +max-bits+) :initial-element 0)) (nonzero 0) (last -1))
+  "Canonical Huffman from code LENGTHS[0:n-1] (0 = absent), Mark-Adler style.
+Also builds a small lookup table for fast decoding of short codes."
+  (let ((count (make-array (1+ +max-bits+) :initial-element 0))
+        (nonzero 0) (last -1) (maxlen 0))
     (dotimes (s n)
       (let ((l (aref lengths s)))
-        (when (plusp l) (incf (aref count l)) (incf nonzero) (setf last s))))
-    (when (<= nonzero 1) (return-from build-huff (make-huff :single (if (= nonzero 1) last 0))))
+        (when (plusp l)
+          (incf (aref count l))
+          (incf nonzero)
+          (setf last s)
+          (when (> l maxlen) (setf maxlen l)))))
+    (when (<= nonzero 1)
+      (return-from build-huff (make-huff :single (if (= nonzero 1) last 0))))
     (let ((offs (make-array (+ 2 +max-bits+) :initial-element 0))
           (symbol (make-array n :initial-element 0)))
-      (loop for l from 1 to +max-bits+ do (setf (aref offs (1+ l)) (+ (aref offs l) (aref count l))))
+      (loop for l from 1 to +max-bits+ do
+        (setf (aref offs (1+ l)) (+ (aref offs l) (aref count l))))
       (dotimes (s n)
         (let ((l (aref lengths s)))
-          (when (plusp l) (setf (aref symbol (aref offs l)) s) (incf (aref offs l)))))
-      (make-huff :count count :symbol symbol))))
+          (when (plusp l)
+            (setf (aref symbol (aref offs l)) s)
+            (incf (aref offs l)))))
+      (let* ((table-bits (min +huff-table-bits+ maxlen))
+             (table (make-array (ash 1 table-bits) :initial-element 0))
+             (next (make-array (1+ +max-bits+) :initial-element 0)))
+        (let ((code 0))
+          (loop for bits from 1 to +max-bits+ do
+            (setf code (ash (+ code (aref count (1- bits))) 1)
+                  (aref next bits) code)))
+        (loop for len from 1 to maxlen do
+          (let ((start (- (aref offs len) (aref count len))))
+            (dotimes (k (aref count len))
+              (let* ((sym (aref symbol (+ start k)))
+                     (code (aref next len)))
+                (incf (aref next len))
+                (when (<= len table-bits)
+                  (let ((rev (%reverse-bits code len))
+                        (entry (logior (ash sym 4) len))
+                        (stride (ash 1 len)))
+                    (loop for base from rev below (ash 1 table-bits) by stride
+                          do (setf (aref table base) entry))))))))
+        (make-huff :count count :symbol symbol :table table
+                   :table-bits table-bits)))))
 
-(defun read-huff (r h)
-  "Decode one symbol from R using canonical code H (zlib decode, LSB-first)."
-  (when (huff-single h) (return-from read-huff (huff-single h)))
-  (let ((code 0) (first 0) (index 0) (count (huff-count h)) (sym (huff-symbol h)))
+(defun read-huff-slow (r h)
+  (let ((code 0) (first 0) (index 0)
+        (count (huff-count h)) (sym (huff-symbol h)))
     (loop for len from 1 to +max-bits+ do
       (setf code (logior code (b:rbit r)))
       (let ((c (aref count len)))
-        (when (< (- code first) c) (return-from read-huff (aref sym (+ index (- code first)))))
+        (when (< (- code first) c)
+          (return-from read-huff-slow (aref sym (+ index (- code first)))))
         (incf index c) (incf first c) (setf first (ash first 1) code (ash code 1))))
     (berr "invalid prefix code")))
+
+(defun read-huff (r h)
+  "Decode one symbol from R using canonical code H.  Short codes use the
+lookup table; longer codes fall back to the bit-by-bit decoder."
+  (when (huff-single h) (return-from read-huff (huff-single h)))
+  (let ((table (huff-table h)) (table-bits (huff-table-bits h)))
+    (if (and table (>= (b:bits-available r) table-bits))
+        (let ((entry (aref table (b:peek-bits r table-bits))))
+          (if (plusp entry)
+              (let ((len (logand entry 15)))
+                (b:rbits r len)
+                (ash entry -4))
+              (read-huff-slow r h)))
+        (read-huff-slow r h))))
 
 (defun alphabet-bits (size) (max 1 (integer-length (1- size))))
 

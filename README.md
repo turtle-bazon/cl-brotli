@@ -11,9 +11,21 @@ License: GPL-3.0
   codes, context maps, distance ring buffer, static dictionary, and word
   transforms
 - Entropy-coded encoder: LZ77 + length-limited Huffman, with stored
-  meta-block fallback
+  meta-block fallback and multi-meta-block support for inputs larger than
+  16 MiB
 - Standard Brotli streams, interoperable with the reference implementation
 - Differential tests against the CFFI reference bindings
+- Benchmark harness comparing ratio and throughput against the system C Brotli
+  library (see `bench/README.md`)
+
+## Tests
+
+```lisp
+(asdf:test-system "cl-brotli")
+```
+
+The suite passes on Roswell SBCL 2.6.9 and CCL 1.13. Benchmarks are run on
+Roswell SBCL 2.6.9 via `bench/run.sh`.
 
 ## Usage
 ```lisp

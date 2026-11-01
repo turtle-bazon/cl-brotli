@@ -4,6 +4,7 @@
   :author "pesekey"
   :license "GPL-3.0"
   :depends-on ()
+  :in-order-to ((test-op (test-op "cl-brotli-tests")))
   :serial t
   :components ((:module "src"
                 :serial t

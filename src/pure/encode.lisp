@@ -232,6 +232,11 @@ Long runs are split with a literal reset between repeat codes so consecutive
          (cell (aref (aref +celltab+ ir) cr)))
     (+ (* cell 64) (ash (- icode (* ir 8)) 3) (- ccode (* cr 8)))))
 
+(defun cmd-symbol-dist0 (icode ccode)
+  "Command symbol for the implicit-distance form.  Only valid for insert
+codes 0..7 and copy codes 0..15 (command symbols 0..127)."
+  (+ (* (ash ccode -3) 64) (* icode 8) (logand ccode 7)))
+
 (defun encode-distance (d)
   "Distance D (>=1) -> (values dcode dextra-val dextra-bits) for NPOSTFIX=NDIRECT=0."
   (loop for nbits from 1 do
@@ -240,6 +245,25 @@ Long runs are split with a literal reset between repeat codes so consecutive
         (when (<= (1+ offset) d (+ offset (ash 1 nbits)))
           (return-from encode-distance
             (values (+ 16 (* 2 (1- nbits)) b) (- d offset 1) nbits)))))))
+
+(defun special-distance-code (rb d)
+  "If D is one of the short distance-ring codes, return (values CODE 0 0).
+RB is the 4-slot ring plus a write index in slot 4."
+  (flet ((try (code offset delta)
+           (let ((candidate (+ (aref rb (logand (+ (aref rb 4) offset) 3))
+                               delta)))
+             (when (and (> candidate 0) (= candidate d))
+               (return-from special-distance-code (values code 0 0))))))
+    (try 1 2 0)                       ; second-to-last
+    (try 2 1 0)                       ; third-to-last
+    (try 3 0 0)                       ; fourth-to-last
+    (try 4 3 -1) (try 5 3 1)          ; last -/+ 1
+    (try 6 3 -2) (try 7 3 2)          ; last -/+ 2
+    (try 8 3 -3) (try 9 3 3)          ; last -/+ 3
+    (try 10 2 -1) (try 11 2 1)        ; second-to-last -/+ 1
+    (try 12 2 -2) (try 13 2 2)        ; second-to-last -/+ 2
+    (try 14 2 -3) (try 15 2 3)        ; second-to-last -/+ 3
+    (values nil 0 0)))
 
 ;;; ---- static dictionary index (base words, no transforms) ---------------
 
@@ -313,11 +337,13 @@ dictionary is worth consulting."
           (incf text))))
     (> text (/ (* 9 (max 1 sample)) 10))))
 
-(defun lz77 (data window &optional (use-dict (text-like-data-p data)) dict-limit)
+(defun lz77 (data window &optional (use-dict (text-like-data-p data)) dict-limit (base-pos 0))
   "Return commands (insert-len lit-start copy-len distance dict-p); copy-len 0
-marks a trailing insert-only command."
+marks a trailing insert-only command.  BASE-POS is the number of bytes already
+produced before DATA; it is needed to encode dictionary distances correctly
+when DATA is one chunk of a multi-meta-block stream."
   (declare (type (simple-array (unsigned-byte 8) (*)) data)
-           (type fixnum window)
+           (type fixnum window base-pos)
            (optimize (speed 3) (safety 0)))
   (let* ((n (length data)) (min-match 4))
     (if (< n min-match)
@@ -351,7 +377,7 @@ marks a trailing insert-only command."
                           (dict-match-at data p n)
                         (if (and (>= dict-len 9)
                                  (> dict-len best-len))
-                            (let ((dist (+ (min window p) 1 dict-idx)))
+                            (let ((dist (+ (min window (+ base-pos p)) 1 dict-idx)))
                               (push (list (- p lit-start) lit-start dict-len dist t) cmds)
                               (incf dict-used)
                               (ins p)
@@ -368,34 +394,55 @@ marks a trailing insert-only command."
 
 (defvar *cmpdata*)   ; the input being compressed (bound during PLAN-COMMANDS / emit)
 
-(defun plan-commands (cmds)
+(defun plan-commands (cmds &optional (rb (make-array 5 :initial-contents '(16 15 11 4 4))))
   "Turn raw LZ77 commands into CMDRECs and tally literal/command/distance freqs.
-Returns (values records litfreq cmdfreq distfreq)."
+Returns (values records litfreq cmdfreq distfreq).  RB is the distance ring
+shared by all meta-blocks of the stream; it must persist across chunks just
+like the decoder's ring."
   (let ((litfreq (make-array 256 :initial-element 0))
         (cmdfreq (make-array 704 :initial-element 0))
         (distfreq (make-array 64 :initial-element 0))
-        (recs '()) (last-dist 0))
-    (dolist (c cmds)
-      (destructuring-bind (ins lit-start cpy dist dictp) c
-        (multiple-value-bind (icode ixv ixb) (length-code ins +ins-base+ +ins-bits+)
-          (let ((copyp (plusp cpy)))
-            (multiple-value-bind (ccode cxv cxb)
-                (if copyp (length-code cpy +cpy-base+ +cpy-bits+) (values 0 0 0))
-              (let ((csym (cmd-symbol icode ccode)) (dcode 0) (dxv 0) (dxb 0) (has-dist nil))
-                (incf (aref cmdfreq csym))
-                (loop for i from lit-start below (+ lit-start ins)
-                      do (incf (aref litfreq (aref *cmpdata* i))))
-                (when copyp
-                  (setf has-dist t)
-                  (if (and (not dictp) (= dist last-dist))
-                      (setf dcode 0)
-                      (progn (multiple-value-setq (dcode dxv dxb) (encode-distance dist))
-                             (unless dictp (setf last-dist dist))))
-                  (incf (aref distfreq dcode)))
-                (push (make-cmdrec :ins ins :lit-start lit-start :cpy cpy :csym csym
-                                   :ixv ixv :ixb ixb :cxv cxv :cxb cxb
-                                   :has-dist has-dist :dcode dcode :dxv dxv :dxb dxb)
-                      recs)))))))
+        (recs '()))
+    (flet ((ring (offset)
+             (aref rb (logand (+ (aref rb 4) offset) 3)))
+           (push-distance (d)
+             (setf (aref rb (logand (aref rb 4) 3)) d)
+             (incf (aref rb 4))))
+      (dolist (c cmds)
+        (destructuring-bind (ins lit-start cpy dist dictp) c
+          (multiple-value-bind (icode ixv ixb) (length-code ins +ins-base+ +ins-bits+)
+            (let ((copyp (plusp cpy)))
+              (multiple-value-bind (ccode cxv cxb)
+                  (if copyp (length-code cpy +cpy-base+ +cpy-bits+) (values 0 0 0))
+                (let* ((repeat (and copyp (not dictp) (= dist (ring 3))))
+                       (dist0 (and repeat (<= icode 7) (< ccode 16)))
+                       (csym (if dist0
+                                 (cmd-symbol-dist0 icode ccode)
+                                 (cmd-symbol icode ccode)))
+                       (dcode 0) (dxv 0) (dxb 0) (has-dist nil))
+                  (incf (aref cmdfreq csym))
+                  (loop for i from lit-start below (+ lit-start ins)
+                        do (incf (aref litfreq (aref *cmpdata* i))))
+                  (when copyp
+                    (unless dist0
+                      (setf has-dist t)
+                      (if repeat
+                          (setf dcode 0)
+                          (multiple-value-bind (scode sxv sxb)
+                              (special-distance-code rb dist)
+                            (if scode
+                                (setf dcode scode dxv sxv dxb sxb)
+                                (multiple-value-setq (dcode dxv dxb)
+                                  (encode-distance dist)))))
+                      (incf (aref distfreq dcode))
+                      ;; Distance symbol 0 reuses the last distance without
+                      ;; pushing; dictionary references are not pushed either.
+                      (unless (or dictp (= dcode 0))
+                        (push-distance dist))))
+                  (push (make-cmdrec :ins ins :lit-start lit-start :cpy cpy :csym csym
+                                     :ixv ixv :ixb ixb :cxv cxv :cxb cxb
+                                     :has-dist has-dist :dcode dcode :dxv dxv :dxb dxb)
+                        recs))))))))
     (values (nreverse recs) litfreq cmdfreq distfreq)))
 
 (defun write-mlen-header (w n last)
@@ -406,59 +453,92 @@ Returns (values records litfreq cmdfreq distfreq)."
     (b:wbits w m1 (* 4 nib))                             ; MLEN-1
     (unless last (b:wbits w 0 1))))                      ; ISUNCOMPRESSED=0
 
+(defun write-compressed-block-body (w data base-pos window use-dict dict-limit rb)
+  "Write the NBLTYPES/trees/commands part of a compressed meta-block.  The
+MLEN header must already have been written.  RB is the stream-wide distance
+ring shared with the decoder."
+  (let ((*cmpdata* data))
+    (multiple-value-bind (recs litf cmdf distf)
+        (plan-commands (lz77 data window use-dict dict-limit base-pos) rb)
+      (let ((lit (build-etree litf 256 15))
+            (cmd (build-etree cmdf 704 15))
+            (dist (build-etree distf 64 15)))
+        (b:wbits w 0 1) (b:wbits w 0 1) (b:wbits w 0 1)   ; NBLTYPES L/I/D = 1
+        (b:wbits w 0 2)                                   ; NPOSTFIX=0
+        (b:wbits w 0 4)                                   ; NDIRECT=0
+        (b:wbits w 0 2)                                   ; context mode (literal type 0)
+        (b:wbits w 0 1) (b:wbits w 0 1)                   ; NTREESL=1, NTREESD=1
+        (write-etree w lit 256)
+        (write-etree w cmd 704)
+        (write-etree w dist 64)
+        (dolist (r recs)
+          (etree-emit w cmd (cmdrec-csym r))
+          (b:wbits w (cmdrec-ixv r) (cmdrec-ixb r))
+          (b:wbits w (cmdrec-cxv r) (cmdrec-cxb r))
+          (loop for i from (cmdrec-lit-start r) below (+ (cmdrec-lit-start r) (cmdrec-ins r))
+                do (etree-emit w lit (aref data i)))
+          (when (cmdrec-has-dist r)
+            (etree-emit w dist (cmdrec-dcode r))
+            (b:wbits w (cmdrec-dxv r) (cmdrec-dxb r))))))))
+
 (defun compress-entropy (input &key (use-dict nil) (dict-limit nil))
-  "Entropy-coded brotli stream for INPUT (single meta-block, n <= 2^24).
-Returns OCTETS, or NIL if INPUT is too large for one meta-block."
-  (let* ((data (b:to-octets input)) (n (length data)))
-    (when (> n #.(ash 1 24)) (return-from compress-entropy nil))
-    (let ((w (b:make-bwr))
-          (wbits (min 24 (max 10 (integer-length (max 1 n))))))
-      (write-wbits w wbits)
-      (if (zerop n)
-          (progn (b:wbits w 1 1) (b:wbits w 1 1))        ; empty last meta-block
-          (let ((*cmpdata* data)
-                (window (- (ash 1 (min 24 (max 10 (integer-length (max 1 n))))) 16)))
-            (multiple-value-bind (recs litf cmdf distf) (plan-commands (lz77 data window use-dict dict-limit))
-              (let ((lit (build-etree litf 256 15))
-                    (cmd (build-etree cmdf 704 15))
-                    (dist (build-etree distf 64 15)))
-                (write-mlen-header w n t)
-                (b:wbits w 0 1) (b:wbits w 0 1) (b:wbits w 0 1)   ; NBLTYPES L/I/D = 1
-                (b:wbits w 0 2)                                   ; NPOSTFIX=0
-                (b:wbits w 0 4)                                   ; NDIRECT=0
-                (b:wbits w 0 2)                                   ; context mode (literal type 0)
-                (b:wbits w 0 1) (b:wbits w 0 1)                   ; NTREESL=1, NTREESD=1
-                (write-etree w lit 256)
-                (write-etree w cmd 704)
-                (write-etree w dist 64)
-                (dolist (r recs)
-                  (etree-emit w cmd (cmdrec-csym r))
-                  (b:wbits w (cmdrec-ixv r) (cmdrec-ixb r))
-                  (b:wbits w (cmdrec-cxv r) (cmdrec-cxb r))
-                  (loop for i from (cmdrec-lit-start r) below (+ (cmdrec-lit-start r) (cmdrec-ins r))
-                        do (etree-emit w lit (aref data i)))
-                  (when (cmdrec-has-dist r)
-                    (etree-emit w dist (cmdrec-dcode r))
-                    (b:wbits w (cmdrec-dxv r) (cmdrec-dxb r))))))))
-      (b:w-align w)
-      (b:to-octets (b:bwr-out w)))))
+  "Entropy-coded brotli stream for INPUT.  Inputs larger than one meta-block
+are split into <= 2^24-byte compressed meta-blocks followed by an empty last
+meta-block."
+  (let* ((data (b:to-octets input))
+         (n (length data))
+         (w (b:make-bwr))
+         (wbits (min 24 (max 10 (integer-length (max 1 n)))))
+         (window (- (ash 1 wbits) 16))
+         (rb (make-array 5 :initial-contents '(16 15 11 4 4))))
+    (write-wbits w wbits)
+    (cond
+      ((zerop n)
+       (b:wbits w 1 1) (b:wbits w 1 1))                    ; ISLAST + ISLASTEMPTY
+      ((<= n #.(ash 1 24))
+       (write-mlen-header w n t)
+       (write-compressed-block-body w data 0 window use-dict dict-limit rb))
+      (t
+       (let ((pos 0)
+             (limit #.(ash 1 24)))
+         (loop while (< pos n) do
+           (let* ((end (min n (+ pos limit)))
+                  (chunk (subseq data pos end)))
+             (write-mlen-header w (- end pos) nil)
+             (write-compressed-block-body w chunk pos window use-dict dict-limit rb)
+             (setf pos end)))
+         (b:wbits w 1 1) (b:wbits w 1 1))))                ; final empty last block
+    (b:w-align w)
+    (b:to-octets (b:bwr-out w))))
 
 (defun incompressible-p (data)
-  "Cheap sample check: lots of distinct bytes and no dominant byte means the
-entropy coder is unlikely to beat a stored meta-block."
+  "Cheap sample check: lots of distinct bytes, no dominant byte, and almost no
+repeated 4-byte sequences means the entropy coder is unlikely to beat a stored
+meta-block.  The 4-byte test is important: a periodic ramp has 256 distinct
+byte values and a flat byte distribution, but repeats every 4-byte window and
+compresses extremely well."
   (declare (type (simple-array (unsigned-byte 8) (*)) data)
            (optimize (speed 3) (safety 0)))
   (let* ((n (length data))
-         (sample (min n 4096))
+         (sample (min n 16384))
          (seen (make-array 256 :initial-element 0))
          (unique 0) (maxfreq 0))
-    (when (zerop sample) (return-from incompressible-p nil))
+    (when (< sample 4) (return-from incompressible-p nil))
     (dotimes (i sample)
       (let* ((b (aref data i)) (c (1+ (aref seen b))))
         (setf (aref seen b) c)
         (when (= c 1) (incf unique))
         (when (> c maxfreq) (setf maxfreq c))))
-    (and (> unique 230) (< maxfreq (/ sample 10)))))
+    (and (> unique 230)
+         (< maxfreq (/ sample 10))
+         (let ((table (make-hash-table :test #'eql :size sample))
+               (duplicates 0))
+           (loop for i from 0 below (- sample 3) do
+             (let ((key (dict-key4 data i)))
+               (if (gethash key table)
+                   (incf duplicates)
+                   (setf (gethash key table) t))))
+           (< duplicates (max 16 (/ sample 100)))))))
 
 (defun compress (input)
   "Compress INPUT to a brotli stream.  Uses entropy-coded meta-blocks (LZ77 +

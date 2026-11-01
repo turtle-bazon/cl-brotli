@@ -9,23 +9,81 @@
         (t (coerce s '(simple-array (unsigned-byte 8) (*))))))
 
 (defstruct (brd (:constructor make-brd (bytes &optional (pos 0) (end (length bytes)))))
-  (bytes nil :type octets) (pos 0 :type fixnum) (end 0 :type fixnum) (bit 0 :type fixnum))
-(defun r-eof-p (r) (and (>= (brd-pos r) (brd-end r)) (zerop (brd-bit r))))
+  (bytes nil :type octets) (pos 0 :type fixnum) (end 0 :type fixnum)
+  ;; Bit accumulator: ACC holds NBITS unconsumed bits, least-significant bit
+  ;; first.  Loading whole bytes at a time avoids the old bit-by-bit loop.
+  (acc 0 :type fixnum) (nbits 0 :type fixnum))
+
+(defun r-eof-p (r)
+  (and (>= (brd-pos r) (brd-end r)) (zerop (brd-nbits r))))
+
+(declaim (inline %fill-bits rbits rbit))
+(defun %fill-bits (r n)
+  (declare (type brd r) (type fixnum n) (optimize (speed 3) (safety 0)))
+  (loop while (< (brd-nbits r) n) do
+    (when (>= (brd-pos r) (brd-end r))
+      (error "brotli: end of input"))
+    (setf (brd-acc r)
+          (logior (brd-acc r)
+                  (ash (aref (brd-bytes r) (brd-pos r)) (brd-nbits r))))
+    (incf (brd-nbits r) 8)
+    (incf (brd-pos r))))
+
 (defun rbits (r n)
   "Read N bits, LSB-first, as an integer."
-  (let ((v 0) (got 0))
-    (loop while (< got n) do
-      (when (>= (brd-pos r) (brd-end r)) (error "brotli: end of input"))
-      (let* ((avail (- 8 (brd-bit r))) (take (min avail (- n got)))
-             (chunk (ldb (byte take (brd-bit r)) (aref (brd-bytes r) (brd-pos r)))))
-        (setf v (logior v (ash chunk got))) (incf got take) (incf (brd-bit r) take)
-        (when (= (brd-bit r) 8) (setf (brd-bit r) 0) (incf (brd-pos r)))))
-    v))
+  (declare (type brd r) (type fixnum n) (optimize (speed 3) (safety 0)))
+  (if (zerop n)
+      0
+      (progn
+        (%fill-bits r n)
+        (let ((v (logand (brd-acc r) (1- (ash 1 n)))))
+          (setf (brd-acc r) (ash (brd-acc r) (- n)))
+          (decf (brd-nbits r) n)
+          v))))
+
 (defun rbit (r) (rbits r 1))
-(defun r-align (r) (when (plusp (brd-bit r)) (setf (brd-bit r) 0) (incf (brd-pos r))))
+
+(defun peek-bits (r n)
+  "Return the next N bits without consuming them."
+  (declare (type brd r) (type fixnum n) (optimize (speed 3) (safety 0)))
+  (if (zerop n)
+      0
+      (progn
+        (%fill-bits r n)
+        (logand (brd-acc r) (1- (ash 1 n))))))
+
+(defun bits-available (r)
+  "Number of bits remaining, including bits already buffered in ACC."
+  (+ (brd-nbits r) (* 8 (- (brd-end r) (brd-pos r)))))
+
+(defun r-align (r)
+  "Discard bits up to the next byte boundary."
+  (let ((drop (mod (brd-nbits r) 8)))
+    (when (plusp drop)
+      (setf (brd-acc r) (ash (brd-acc r) (- drop)))
+      (decf (brd-nbits r) drop))))
+
 (defun r-bytes (r n)
+  (declare (type brd r) (type fixnum n) (optimize (speed 3) (safety 0)))
   (let ((out (make-array n :element-type '(unsigned-byte 8))))
-    (dotimes (i n out) (setf (aref out i) (aref (brd-bytes r) (brd-pos r))) (incf (brd-pos r)))))
+    (if (zerop (brd-nbits r))
+        (let ((start (brd-pos r)))
+          (unless (<= (+ start n) (brd-end r))
+            (error "brotli: end of input"))
+          (replace out (brd-bytes r) :start2 start :end2 (+ start n))
+          (incf (brd-pos r) n))
+        (dotimes (i n out)
+          (if (>= (brd-nbits r) 8)
+              (progn
+                (setf (aref out i) (logand (brd-acc r) #xff))
+                (setf (brd-acc r) (ash (brd-acc r) -8))
+                (decf (brd-nbits r) 8))
+              (progn
+                (when (>= (brd-pos r) (brd-end r))
+                  (error "brotli: end of input"))
+                (setf (aref out i) (aref (brd-bytes r) (brd-pos r)))
+                (incf (brd-pos r))))))
+    out))
 
 (defstruct (bwr (:constructor make-bwr))
   (out (make-array 64 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0))

@@ -2,6 +2,7 @@
   (:use #:cl)
   (:export #:octets #:to-octets
            #:brd #:make-brd #:rbit #:rbits #:r-align #:r-bytes #:r-eof-p
+           #:peek-bits #:bits-available
            #:bwr #:make-bwr #:wbits #:w-align #:w-bytes #:bwr-out))
 (defpackage #:cl-brotli.pure
   (:use #:cl)
