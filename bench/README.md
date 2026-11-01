@@ -137,54 +137,55 @@ host-specific; compare ratios, not absolute MiB/s, across machines.
 
 ### Low-level compression, q0-q9 (this is the remaining gap)
 
-Each cell is `lisp MiB/s / C MiB/s / lisp/C`. The geomean column covers all
-**eleven** datasets, including the tiny highly-compressible ones.
+Each cell is `lisp MiB/s / C MiB/s / lisp/C`; the geomean column covers
+all **eleven** datasets, including the tiny highly-compressible ones.
 
 | q | text | html | json | source | binary | geomean |
 |---:|---:|---:|---:|---:|---:|---:|
-| 0 | 493.2 / 211.5 / 2.33x | 31.3 / 490.6 / 0.06x | 43.3 / 629.3 / 0.07x | 65.5 / 229.9 / 0.28x | 28.6 / 456.4 / 0.06x | 0.19x |
-| 1 | 80.9 / 1876.6 / 0.04x | 23.6 / 334.1 / 0.07x | 29.3 / 387.9 / 0.08x | 41.1 / 294.7 / 0.14x | 21.8 / 322.1 / 0.07x | 0.03x |
-| 2 | 78.3 / 1074.5 / 0.07x | 22.5 / 184.0 / 0.12x | 27.2 / 260.4 / 0.10x | 41.5 / 347.2 / 0.12x | 20.9 / 181.9 / 0.11x | 0.09x |
-| 3 | 78.1 / 1009.3 / 0.08x | 23.4 / 154.4 / 0.15x | 24.5 / 206.7 / 0.12x | 39.1 / 294.7 / 0.13x | 19.9 / 143.0 / 0.14x | 0.10x |
-| 4 | 76.6 / 822.7 / 0.09x | 21.1 / 121.4 / 0.17x | 22.7 / 153.4 / 0.15x | 37.0 / 236.9 / 0.16x | 17.6 / 97.9 / 0.18x | 0.11x |
-| 5 | 66.8 / 636.7 / 0.10x | 11.1 / 58.4 / 0.19x | 12.8 / 70.5 / 0.18x | 21.2 / 121.2 / 0.17x | 10.9 / 51.2 / 0.21x | 0.12x |
-| 6 | 68.2 / 628.0 / 0.11x | 9.5 / 56.3 / 0.17x | 11.1 / 62.1 / 0.18x | 18.9 / 111.0 / 0.17x | 9.8 / 47.4 / 0.21x | 0.13x |
-| 7 | 69.1 / 315.4 / 0.22x | 8.3 / 41.2 / 0.20x | 10.0 / 44.6 / 0.22x | 17.5 / 90.2 / 0.19x | 9.0 / 37.8 / 0.24x | 0.14x |
-| 8 | 64.6 / 579.7 / 0.11x | 6.7 / 37.5 / 0.18x | 8.4 / 34.2 / 0.25x | 15.5 / 77.3 / 0.20x | 7.8 / 31.8 / 0.25x | 0.14x |
-| 9 | 65.3 / 170.5 / 0.38x | 5.8 / 24.1 / 0.24x | 7.3 / 21.9 / 0.33x | 14.0 / 50.0 / 0.28x | 7.1 / 22.8 / 0.31x | 0.33x |
+| 0 | 505.3 / 209.5 / 2.41x | 32.0 / 493.3 / 0.06x | 46.3 / 667.4 / 0.07x | 69.4 / 229.2 / 0.30x | 30.5 / 464.9 / 0.07x | 0.18x |
+| 1 | 286.4 / 1906.1 / 0.15x | 28.5 / 338.7 / 0.08x | 38.2 / 392.3 / 0.10x | 63.1 / 291.9 / 0.22x | 27.2 / 327.2 / 0.08x | 0.09x |
+| 2 | 280.6 / 1094.9 / 0.26x | 28.6 / 186.0 / 0.15x | 35.2 / 267.0 / 0.13x | 61.6 / 345.6 / 0.18x | 26.2 / 185.0 / 0.14x | 0.24x |
+| 3 | 273.3 / 1027.3 / 0.27x | 28.9 / 153.0 / 0.19x | 33.0 / 206.9 / 0.16x | 58.2 / 292.1 / 0.20x | 25.0 / 144.1 / 0.17x | 0.26x |
+| 4 | 262.5 / 836.6 / 0.31x | 27.1 / 131.2 / 0.21x | 30.4 / 149.4 / 0.20x | 53.6 / 236.7 / 0.23x | 23.9 / 95.4 / 0.25x | 0.30x |
+| 5 | 69.3 / 638.3 / 0.11x | 11.3 / 66.7 / 0.17x | 13.0 / 62.5 / 0.21x | 21.1 / 120.8 / 0.17x | 11.2 / 52.0 / 0.22x | 0.13x |
+| 6 | 69.4 / 638.9 / 0.11x | 9.6 / 63.3 / 0.15x | 11.2 / 61.7 / 0.18x | 19.1 / 110.2 / 0.17x | 10.1 / 47.9 / 0.21x | 0.13x |
+| 7 | 66.9 / 312.3 / 0.21x | 8.4 / 42.7 / 0.20x | 10.0 / 41.2 / 0.24x | 17.5 / 82.2 / 0.21x | 9.2 / 39.4 / 0.23x | 0.15x |
+| 8 | 68.9 / 587.3 / 0.12x | 6.8 / 35.8 / 0.19x | 8.4 / 34.0 / 0.25x | 15.6 / 77.8 / 0.20x | 8.1 / 32.8 / 0.25x | 0.14x |
+| 9 | 68.2 / 173.3 / 0.39x | 5.9 / 22.7 / 0.26x | 7.2 / 21.2 / 0.34x | 14.1 / 49.4 / 0.29x | 7.3 / 22.7 / 0.32x | 0.34x |
 
-This is still a large gap. q0 is actually faster than C q0 on text (2.33x)
-but only 0.06-0.07x on HTML/JSON/binary. q1 is the worst row (0.03x geomean)
-because C q1 runs at 1.9 GiB/s on text and 300-400 MiB/s on the other real
-datasets. q2-q9 stay between 0.09x and 0.33x.
+This is still a large gap, but the match-skip heuristic from C's q0/q1 fast
+fragment path changed the low levels materially. q1 is now 0.09x instead of
+0.02x, and q2-q4 are 0.24-0.30x instead of 0.07-0.11x. q0 is 2.41x faster
+than C q0 on text, but only 0.07x on HTML/JSON/binary: q0 is dominated by
+per-symbol emission rather than match finding. q5-q9 do not use the skip path
+(lazy matching), so they stay 0.13-0.34x.
 
-Against the previous run, the low-level work improved q0 by about 2.1x,
-q1-q4 by 1.2-1.5x, q5 by about 1.1x, and q6-q9 by 1.7-1.9x. The remaining cost
-is dominated by per-command planning and bit emission, not the match finder
-alone: C q0-q9 use block splitting and highly optimized Huffman/emit loops
-that a portable Lisp encoder still cannot match on literal-heavy data.
+Against the previous run: q0 ~2x, q1-q4 ~3-4x, q5 ~1.2x, q6-q9 ~1.8-1.9x.
+The remaining cost is split between per-command planning/bit emission and
+C's fixed fast command alphabet (a 64-symbol command code built for the fast
+fragment path) plus one-pass literal emission. Those are structural changes,
+not more table tuning.
 
 ### q0/q1 decompression
 
-Each cell is `lisp MiB/s / C MiB/s / lisp/C`; the geomean column covers all
-**eleven** datasets.
+Each cell is `lisp MiB/s / C MiB/s / lisp/C`; the geomean column covers
+all **eleven** datasets.
 
 | q | text | html | json | source | binary | geomean |
 |---:|---:|---:|---:|---:|---:|---:|
-| 0 | 736.0 / 2732.9 / 0.27x | 107.6 / 561.7 / 0.19x | 139.3 / 754.2 / 0.18x | 107.2 / 423.7 / 0.25x | 100.6 / 392.8 / 0.26x | 0.29x |
-| 1 | 582.6 / 1710.1 / 0.34x | 103.5 / 562.7 / 0.18x | 118.8 / 575.1 / 0.21x | 103.4 / 462.8 / 0.22x | 109.9 / 394.8 / 0.28x | 0.36x |
+| 0 | 739.8 / 2736.7 / 0.27x | 113.2 / 567.5 / 0.20x | 136.9 / 767.2 / 0.18x | 110.5 / 481.8 / 0.23x | 103.6 / 400.9 / 0.26x | 0.23x |
+| 1 | 581.3 / 1738.4 / 0.33x | 107.7 / 573.7 / 0.19x | 117.7 / 641.9 / 0.18x | 106.1 / 516.5 / 0.21x | 113.6 / 403.5 / 0.28x | 0.31x |
 
-The q0/q1 decoders are still ~4-5x behind C on literal-heavy data and ~2.5x
-behind on text. Across all eleven datasets (including tiny compressible
-streams) the q0/q1 geomeans are 0.29x and 0.36x. The gap is the per-literal
-Huffman/context path; q2 and above are at or above parity.
+q0/q1 decode is still 0.23x/0.31x across all datasets. Text is 0.27x/0.33x,
+but literal-heavy HTML/JSON/source/binary is 0.18-0.28x. The gap is the
+per-literal Huffman/context decode path; q2 and above are at or above parity.
 
 ### Higher levels
 
 | q | size (lisp/C) | compression (lisp/C) | decompression (lisp/C) |
 |---:|---:|---:|---:|
-| 10 | 1.075 | 2.45x | 0.93x |
-| 11 | 1.202 | 2.09x | 0.94x |
+| 10 | 1.075 | 2.49x | 1.07x |
+| 11 | 1.202 | 2.17x | 1.13x |
 
 q10/q11 are included for completeness. They are not representative of the
 low-level behavior: the encoder spends much more time parsing, which is where
@@ -194,19 +195,18 @@ C q11 is slow, while C q0-q9 are much faster than the lisp encoder.
 
 | C q | size (lisp/C) | compress (lisp/C core) | decompress (lisp/C core) |
 |---:|---:|---:|---:|
-| 0 | 0.416 | 0.19x | 0.29x |
-| 1 | 0.456 | 0.03x | 0.36x |
-| 2 | 0.927 | 0.09x | 0.81x |
-| 3 | 1.023 | 0.10x | 1.04x |
-| 4 | 1.041 | 0.11x | 0.94x |
-| 5 | 1.058 | 0.12x | 0.89x |
-| 6 | 1.061 | 0.13x | 0.82x |
-| 7 | 1.060 | 0.14x | 0.89x |
-| 8 | 1.060 | 0.14x | 0.89x |
-| 9 | 1.064 | 0.33x | 0.89x |
-| 10 | 1.075 | 2.45x | 0.93x |
-| 11 | 1.202 | 2.09x | 0.94x |
-
+| 0 | 0.411 | 0.18x | 0.23x |
+| 1 | 0.469 | 0.09x | 0.31x |
+| 2 | 0.956 | 0.24x | 0.86x |
+| 3 | 1.057 | 0.26x | 1.08x |
+| 4 | 1.077 | 0.30x | 1.12x |
+| 5 | 1.058 | 0.13x | 1.04x |
+| 6 | 1.061 | 0.13x | 0.97x |
+| 7 | 1.060 | 0.15x | 1.05x |
+| 8 | 1.060 | 0.14x | 1.04x |
+| 9 | 1.064 | 0.34x | 1.03x |
+| 10 | 1.075 | 2.49x | 1.07x |
+| 11 | 1.202 | 2.17x | 1.13x |
 ### Size boundary
 
 Multi-meta-block encoding keeps ratios stable across the 16 MiB boundary. The
@@ -258,8 +258,8 @@ maps, block switching, a 122 KiB static dictionary, and much larger alphabets.
 Running cl-newzlib's own harness on this same host (Roswell SBCL 2.6.9,
 zlib 1.2.13, 2 MiB inputs, levels 1/3/6/9) gives 1.70x compression and 1.19x
 decompression for its allocation-free `into` API (1.62x / 1.08x one-shot).
-cl-brotli's q11 geomeans against C Brotli on the same host are 2.09x
-compression and 0.94x decompression, but q11 is not the useful comparison for
+cl-brotli's q11 geomeans against C Brotli on the same host are 2.17x
+compression and 1.13x decompression, but q11 is not the useful comparison for
 the low-level work: C q11 is deliberately slow, while C q0-q9 are 3-30x faster
 than the lisp encoder on the same data. The cl-newzlib comparison is still
 useful evidence that portable Lisp can reach C parity, but it applies to the
@@ -313,8 +313,9 @@ The benchmark was used to drive these changes:
   length-code and command-symbol tables, and one hash computation per position;
 * an SBCL word-at-a-time match extender over the input SAP (`%MATCH-LEN-SAP`);
 * a bit writer with one capacity check per call instead of one per byte;
-* q0-q4 disable short distance codes; q0 uses one candidate and skips
-  interior match insertion entirely;
+* q0-q4 disable short distance codes and port C's fast-fragment match-skip
+  heuristic (`skip++ >> 5`), so literal-heavy data stops hashing every byte;
+  q0 uses one candidate and q0-q4 skip interior match insertion;
 * decoder preallocated match copies, 4x output growth, and array-based
   Huffman subtable grouping;
 * level-matched benchmark rows and a microsecond-resolution timer.
@@ -331,13 +332,15 @@ level against both decoders). Benchmarks are run only on SBCL 2.6.9.
 * Encoder ratio is at C q5 (1.06x) on text-like data; the q11 size gap (1.20x)
   needs context modeling, block splitting, and length-changing dictionary
   transforms.
-* Low-level encoder throughput is the largest gap: q0 is 0.19x, q1 is 0.03x,
-  q2-q8 are 0.09-0.14x, and q9 is 0.33x of C's matching levels. q0 is faster
-  than C q0 on text but 0.06-0.07x on HTML/JSON/binary. Command planning and
-  per-symbol bit emission remain the bottleneck; q11 is not representative.
-* q0/q1 decode is still 0.23x/0.24x on the five representative real datasets
-  (0.29x/0.36x across all eleven, which include tiny compressible streams).
-  Literal-heavy HTML/JSON is 0.18-0.21x and text is 0.27-0.34x. Fast per-literal
+* Low-level encoder throughput is still the largest gap: q0 is 0.18x, q1 is
+  0.09x, q2-q4 are 0.24-0.30x, q5-q8 are 0.13-0.15x, and q9 is 0.34x of C's
+  matching levels. q0 is faster than C q0 on text but 0.07x on HTML/JSON/binary.
+  The C source shows the remaining structural gap: its q0/q1 fragment path
+  uses a fixed 64-symbol command/distance code, a literal code built from the
+  pre-LZ77 input histogram, and one-pass emission; ours still builds command
+  records and a literal histogram after LZ77.
+* q0/q1 decode is 0.23x/0.31x across all eleven datasets. Text is 0.27x/0.33x;
+  literal-heavy HTML/JSON/source/binary is 0.18-0.28x. Fast per-literal
   Huffman/context decoding, not match copying, is the remaining decoder gap.
 * The encoder builds the plain entropy-coded stream, adds a dictionary pass
   when the level enables it and the input is text-like, and only builds the
@@ -351,5 +354,6 @@ level against both decoders). Benchmarks are run only on SBCL 2.6.9.
 * `bench/bench.lisp` — harness.
 * `bench/run.lisp`, `bench/run.sh` — entry point.
 * `bench/run-all.sh` — regenerates the result set.
+* `bench/C-NOTES.md` — C-source comparison and remaining structural gaps.
 * `bench/results/*.csv` — raw rows.
 * `bench/results/*.out` — rendered Markdown reports.

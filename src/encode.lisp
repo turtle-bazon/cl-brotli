@@ -454,7 +454,8 @@ dictionary is worth consulting."
           (incf text))))
     (> text (/ (* 9 (max 1 sample)) 10))))
 
-(defun %lz77 (data sap window use-dict dict-limit base-pos max-chain lazy)
+(defun %lz77 (data sap window use-dict dict-limit base-pos max-chain lazy
+              skip-match insert-interior)
   "Implementation of LZ77.  SAP is a system-area pointer for DATA on SBCL,
 or NIL on other implementations."
   (declare (type (simple-array (unsigned-byte 8) (*)) data)
@@ -473,10 +474,10 @@ or NIL on other implementations."
                           (make-array n :element-type 'fixnum
                                         :initial-element -1)))
                (cmds '()) (lit-start 0) (p 0) (last (- n min-match))
-               (dict-used 0))
+               (skip 32) (dict-used 0))
           (declare (type (simple-array fixnum (*)) head)
                    (type (or null (simple-array fixnum (*))) prev)
-                   (type fixnum p lit-start last dict-used))
+                   (type fixnum p lit-start last skip dict-used))
           (labels (#+sbcl
                    (hash (i)
                      (if sap (%hash4-sap sap i hmask) (%hash4 data i hmask)))
@@ -515,13 +516,18 @@ or NIL on other implementations."
                            (push (list (- p lit-start) lit-start best-len
                                        best-dist nil)
                                  cmds)
-                           (when chained
+                           (when (and chained insert-interior)
                              (loop for q from (1+ p)
                                    below (min (+ p best-len) (1+ last))
                                    do (ins q (hash q))))
+                           (setf skip 32)
                            (incf p best-len)
                            (setf lit-start p))
-                         (incf p))))
+                         (if skip-match
+                             (let ((step (max 1 (ash skip -5))))
+                               (incf p step)
+                               (incf skip))
+                             (incf p)))))
             (loop while (<= p last) do
               (let* ((ph (hash p)))
                 (multiple-value-bind (best-len best-dist) (find-match p ph)
@@ -538,10 +544,11 @@ or NIL on other implementations."
                                   cmds)
                             (incf dict-used)
                             (ins p ph)
-                            (when chained
+                            (when (and chained insert-interior)
                               (loop for q from (1+ p)
                                     below (min (+ p dict-len) (1+ last))
                                     do (ins q (hash q))))
+                            (setf skip 32)
                             (incf p dict-len)
                             (setf lit-start p)))))
                     (unless dict-p
@@ -562,7 +569,8 @@ or NIL on other implementations."
             (nreverse cmds))))))
 
 (defun lz77 (data window &key (use-dict (text-like-data-p data)) dict-limit
-                              (base-pos 0) (max-chain 128) (lazy t))
+                              (base-pos 0) (max-chain 128) (lazy t)
+                              (skip-match nil) (insert-interior t))
   "Return commands (insert-len lit-start copy-len distance dict-p); copy-len 0
 marks a trailing insert-only command.  BASE-POS is the number of bytes already
 produced before DATA; it is needed to encode dictionary distances correctly
@@ -571,9 +579,10 @@ compression ratio for encoder throughput."
   #+sbcl
   (sb-sys:with-pinned-objects (data)
     (%lz77 data (sb-sys:vector-sap data) window use-dict dict-limit
-           base-pos max-chain lazy))
+           base-pos max-chain lazy skip-match insert-interior))
   #-sbcl
-  (%lz77 data nil window use-dict dict-limit base-pos max-chain lazy))
+  (%lz77 data nil window use-dict dict-limit base-pos max-chain lazy
+          skip-match insert-interior))
 
 ;;; ---- compressed meta-block --------------------------------------------
 
@@ -668,7 +677,8 @@ per command."
     (unless last (b:wbits w 0 1))))                      ; ISUNCOMPRESSED=0
 
 (defun write-compressed-block-body (w data base-pos window use-dict dict-limit rb
-                                    &key (max-chain 128) (lazy t) (short-dist t) cmds)
+                                    &key (max-chain 128) (lazy t) (short-dist t)
+                                      (skip-match nil) (insert-interior t) cmds)
   "Write the NBLTYPES/trees/commands part of a compressed meta-block.  The
 MLEN header must already have been written.  RB is the stream-wide distance
 ring shared with the decoder.  CMDS, when supplied, is a precomputed command
@@ -679,7 +689,9 @@ list covering exactly this block."
          data
          (or cmds
              (lz77 data window :use-dict use-dict :dict-limit dict-limit
-                            :base-pos base-pos :max-chain max-chain :lazy lazy))
+                            :base-pos base-pos :max-chain max-chain :lazy lazy
+                            :skip-match skip-match
+                            :insert-interior insert-interior))
          rb :short-dist short-dist)
       (let ((lit (build-etree litf 256 15))
             (cmd (build-etree cmdf 704 15))
@@ -788,7 +800,8 @@ whole and moved to the next block when necessary."
     (nreverse blocks)))
 
 (defun compress-entropy (input &key (use-dict nil) (dict-limit nil)
-                                    (max-chain 128) (lazy t) (short-dist t))
+                                    (max-chain 128) (lazy t) (short-dist t)
+                                    (skip-match nil) (insert-interior t))
   "Entropy-coded brotli stream for INPUT.  Inputs larger than one meta-block
 are split into <= 2^24-byte compressed meta-blocks followed by an empty last
 meta-block."
@@ -807,7 +820,9 @@ meta-block."
        (write-mlen-header w n t)
        (write-compressed-block-body w data 0 window use-dict dict-limit rb
                                     :max-chain max-chain :lazy lazy
-                                    :short-dist short-dist))
+                                    :short-dist short-dist
+                                    :skip-match skip-match
+                                    :insert-interior insert-interior))
       (t
        (let* ((cmds (lz77 data window :use-dict use-dict
                                    :dict-limit dict-limit :base-pos 0
@@ -821,6 +836,8 @@ meta-block."
              (write-compressed-block-body w data 0 window use-dict dict-limit
                                           rb :max-chain max-chain
                                              :lazy lazy :short-dist short-dist
+                                             :skip-match skip-match
+                                             :insert-interior insert-interior
                                              :cmds block)
              (incf pos outlen)))
          (unless (= pos n)
@@ -867,11 +884,11 @@ enable the static dictionary."
     ;; Quality 0 is the fast path, not raw stored blocks: stored would be
     ;; ~30x larger than C q0 on text-like data.  The stored fallback is still
     ;; used whenever entropy coding cannot beat the input size.
-    (0 '(:max-chain 1 :lazy nil :use-dict nil :short-dist nil))
-    (1 '(:max-chain 2 :lazy nil :use-dict nil :short-dist nil))
-    (2 '(:max-chain 4 :lazy nil :use-dict nil :short-dist nil))
-    (3 '(:max-chain 8 :lazy nil :use-dict nil :short-dist nil))
-    (4 '(:max-chain 16 :lazy nil :use-dict nil :short-dist nil))
+    (0 '(:max-chain 1 :lazy nil :use-dict nil :short-dist nil :skip-match t :insert-interior nil))
+    (1 '(:max-chain 2 :lazy nil :use-dict nil :short-dist nil :skip-match t :insert-interior nil))
+    (2 '(:max-chain 4 :lazy nil :use-dict nil :short-dist nil :skip-match t :insert-interior nil))
+    (3 '(:max-chain 8 :lazy nil :use-dict nil :short-dist nil :skip-match t :insert-interior nil))
+    (4 '(:max-chain 16 :lazy nil :use-dict nil :short-dist nil :skip-match t :insert-interior nil))
     (5 '(:max-chain 32 :lazy t :use-dict nil :short-dist t))
     (6 '(:max-chain 48 :lazy t :use-dict nil :short-dist t))
     (7 '(:max-chain 64 :lazy t :use-dict nil :short-dist t))
@@ -894,17 +911,23 @@ already smaller than the input."
         (let* ((max-chain (getf params :max-chain 128))
                (lazy (getf params :lazy t))
                (short-dist (getf params :short-dist t))
+               (skip-match (getf params :skip-match nil))
+               (insert-interior (getf params :insert-interior t))
                (dict-ok (and (getf params :use-dict) (text-like-data-p data)))
                (plain (compress-entropy data :use-dict nil
                                                :max-chain max-chain
                                                :lazy lazy
-                                               :short-dist short-dist))
+                                               :short-dist short-dist
+                                               :skip-match skip-match
+                                               :insert-interior insert-interior))
                (best plain))
           (when dict-ok
             (let ((alt (compress-entropy data :use-dict t
                                                 :max-chain max-chain
                                                 :lazy lazy
-                                                :short-dist short-dist)))
+                                                :short-dist short-dist
+                                                :skip-match skip-match
+                                                :insert-interior insert-interior)))
               (when (< (length alt) (length best)) (setf best alt))))
           (when (>= (length best) (+ n 32))
             (let ((stored (compress-stored data)))

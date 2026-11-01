@@ -14,7 +14,8 @@
   ;; first.  A 64-bit reservoir lets %FILL-BITS load four input bytes at a
   ;; time instead of one; NBITS stays <= 55 after a refill because callers
   ;; never request more than 24 bits.
-  (acc 0 :type (unsigned-byte 64)) (nbits 0 :type (integer 0 63)))
+  (acc 0 :type (unsigned-byte 64)) (nbits 0 :type (integer 0 63))
+  (sap nil))
 
 (defun r-eof-p (r)
   (and (>= (brd-pos r) (brd-end r)) (zerop (brd-nbits r))))
@@ -38,6 +39,14 @@
     (let ((pos (brd-pos r)) (end (brd-end r)) (nbits (brd-nbits r)))
       (cond
         ((>= pos end) (error "brotli: end of input"))
+        #+(and sbcl little-endian)
+        ((and (brd-sap r) (<= (+ pos 8) end))
+         (let* ((bytes (min 7 (ash (- 63 nbits) -3)))
+                (mask (1- (ash 1 (* 8 bytes))))
+                (word (logand (sb-sys:sap-ref-64 (brd-sap r) pos) mask)))
+           (setf (brd-acc r) (logior (brd-acc r) (ash word nbits)))
+           (incf (brd-nbits r) (* 8 bytes))
+           (incf (brd-pos r) bytes)))
         ((<= (+ pos 4) end)
          (setf (brd-acc r)
                (logior (brd-acc r)

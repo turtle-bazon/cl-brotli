@@ -34,11 +34,9 @@
     (replace (outbuf-data out) src :start1 pos)
     (setf (outbuf-pos out) (+ pos n))))
 
-(defun decompress (input)
-  "Decode a brotli stream (RFC 7932).  Returns OCTETS.  Handles uncompressed and
-compressed meta-blocks, plus metadata blocks; the distance ring buffer and the
-static dictionary span the whole stream."
-  (let* ((r (b:make-brd (b:to-octets input))) (out (%out))
+(defun %decompress (r)
+  "Decode a brotli stream from the reader R."
+  (let* ((out (%out))
          (window (- (ash 1 (read-wbits r)) 16))
          ;; distance ring buffer: 4 slots + rolling write index (slot 4),
          ;; pre-seeded with 4 pushes so the initial last distances are 16,15,11,4.
@@ -46,7 +44,7 @@ static dictionary span the whole stream."
                           :initial-contents '(16 15 11 4 4))))
     (loop named blocks do
       (let ((islast (b:rbit r)))
-        (when (and (= islast 1) (= (b:rbit r) 1)) (return-from blocks))   ; ISLAST + ISLASTEMPTY
+        (when (and (= islast 1) (= (b:rbit r) 1)) (return-from blocks)) ; ISLAST + ISLASTEMPTY
         (let ((mnib (b:rbits r 2)))
           (cond
             ((= mnib 3)                                                   ; metadata meta-block
@@ -65,6 +63,19 @@ static dictionary span the whole stream."
         (when (= islast 1) (return-from blocks))))
     (let ((data (outbuf-data out)) (pos (outbuf-pos out)))
       (if (= pos (length data)) data (subseq data 0 pos)))))
+
+(defun decompress (input)
+  "Decode a brotli stream (RFC 7932).  Returns OCTETS.  Handles uncompressed and
+compressed meta-blocks, plus metadata blocks; the distance ring buffer and the
+static dictionary span the whole stream."
+  (let ((data (b:to-octets input)))
+    #+(and sbcl little-endian)
+    (sb-sys:with-pinned-objects (data)
+      (let ((r (b:make-brd data)))
+        (setf (b:brd-sap r) (sb-sys:vector-sap data))
+        (%decompress r)))
+    #-(and sbcl little-endian)
+    (%decompress (b:make-brd data))))
 
 ;;; ---- compress (uncompressed/stored meta-blocks) -----------------------
 (defconstant +mlen-max+ #xFFFFFF)   ; 6 nibbles

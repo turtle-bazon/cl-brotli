@@ -3,7 +3,7 @@
   (:export #:octets #:to-octets
            #:brd #:make-brd #:rbit #:rbits #:r-align #:r-bytes #:r-eof-p
            #:peek-bits #:bits-available
-           #:brd-bytes #:brd-pos #:brd-end #:brd-acc #:brd-nbits #:%word-at
+           #:brd-bytes #:brd-pos #:brd-end #:brd-acc #:brd-nbits #:brd-sap #:%word-at
            #:bwr #:make-bwr #:wbits #:w-align #:w-bytes #:bwr-out
            #:bwr-pos #:bwr-result))
 (defpackage #:cl-brotli.lisp
