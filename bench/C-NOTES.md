@@ -129,3 +129,41 @@ single-threaded portable Lisp, and chunk parallelism does not rescue it
 without destroying text ratio. The realistic wins remain the default q11
 path, q11 round-trip, highly compressible decode, and API-level one-shot
 (where the CFFI wrapper's allocation dominates).
+
+## Disassembly-guided encoder work (q0-q9)
+
+Profiling q0 HTML/JSON showed the time split across `plan-commands` (~30%),
+the emitter (`write-compressed-block-body` + `wbits`, ~35%), and `%lz77` (~30%).
+The generated code, not the algorithm, exposed four concrete problems:
+
+1. `wbits` computed `(1- (ash 1 n))` at runtime and used generic arithmetic.
+   Replacing it with a precomputed mask table, an `(unsigned-byte 64)` scratch
+   accumulator, and a typed `prev` bit count removed the `ASH`/`TWO-ARG-AND`
+   calls; the writer improved 15-20%.
+2. The writer flushed bytes in a `loop while (>= nbits 8)`. C Brotli stores the
+   accumulator once and advances by `nbits/8`. We now keep eight bytes of
+   slack, do one unaligned 64-bit store (`sap-ref-64` on little-endian SBCL),
+   and advance by `nbits >> 3`. A batched literal-run writer keeps `acc`,
+   `nbits`, and `pos` in locals and pins the output SAP once per run.
+3. The emitter declared tree arrays as `(or null (simple-array fixnum (*)))`.
+   That forced 13 out-of-line `SB-KERNEL:VECTOR-HAIRY-DATA-VECTOR-REF` calls
+   in the per-command loop, 8% of q0 HTML. Binding non-null arrays (with a
+   shared empty vector) removed every generic array call.
+4. `%MATCH-LEN-SAP` and `%HASH4-SAP` were called once per scanned position.
+   Declaring them inline removed those calls and lifted q5-q9 by 25-40%
+   (text q5 82 -> 115 MiB/s in the microbenchmark).
+
+The flat command record was also reduced from 12 to 10 fixnums: `cpy` was
+unused by the emitter, and a negative `dcode` now means "no distance bits".
+
+Measured effect on the level-matched 1 MiB benchmark (geomean lisp/C,
+compression): q0 0.20x -> 0.26x, q1 0.08x -> 0.11x, q2 0.26x -> 0.30x,
+q3 0.27x -> 0.33x, q4 0.31x -> 0.36x, q5 0.14x -> 0.18x, q6 0.14x -> 0.17x,
+q7 0.16x -> 0.19x, q8 0.16x -> 0.19x, q9 0.38x -> 0.44x. q0 text is now
+3.90x C, q0 source 0.64x C. q11 compression/decompression improved to
+2.71x / 1.33x.
+
+The literal-heavy cells still need C's one-pass fragment strategy (fixed
+64-symbol command/distance alphabet, sampled pre-LZ77 literal histogram,
+emission during the scan) rather than another constant-factor pass; that is a
+different encoder, not a table or writer tweak.

@@ -95,6 +95,9 @@ lengths to symbols by frequency (most frequent -> shortest)."
   single
   simple)
 
+(defparameter +empty-fixnums+ (make-array 0 :element-type 'fixnum))
+(declaim (type (simple-array fixnum (*)) +empty-fixnums+))
+
 (defun reverse-code (code len)
   "Reverse the low LEN bits of CODE.  The canonical codes are MSB-first but
 the bit writer is LSB-first; precomputing the reversal lets ETREE-EMIT issue
@@ -136,10 +139,12 @@ one WBITS call per symbol instead of one per bit."
 (defun emit-bits-msb (w code len)
   (loop for i from (1- len) downto 0 do (b:wbits w (logand (ash code (- i)) 1) 1)))
 
+(declaim (inline etree-emit))
 (defun etree-emit (w et sym)
+  (declare (type b:bwr w) (type etree et) (type fixnum sym))
   (unless (etree-single et)
-    (b:wbits w (aref (etree-rcodes et) sym)
-             (aref (etree-lengths et) sym))))
+    (b:wbits w (the fixnum (aref (etree-rcodes et) sym))
+             (the fixnum (aref (etree-lengths et) sym)))))
 
 ;;; ---- prefix-code description writer (inverse of READ-PREFIX-CODE) ------
 
@@ -271,6 +276,7 @@ LENGTH-CODE was ~20% of low-quality compression time."
 (defparameter +ins-lc+ (make-length-code-table +ins-base+ +ins-bits+ 4096))
 (defparameter +cpy-lc+ (make-length-code-table +cpy-base+ +cpy-bits+ 4096))
 
+(declaim (inline length-code))
 (defun length-code (len tables base bits)
   "Largest code C with BASE[C] <= LEN; returns (values C extra-val extra-bits).
 Common lengths use the precomputed TABLES; longer ones fall back to the
@@ -295,6 +301,7 @@ canonical search."
                 (+ (* cell 64) (ash (- i (* ir 8)) 3) (- c (* cr 8)))))))))
 (declaim (type (simple-array fixnum (*)) +cmd-symbol-table+))
 
+(declaim (inline cmd-symbol))
 (defun cmd-symbol (icode ccode)
   (aref +cmd-symbol-table+ (+ (* icode 24) ccode)))
 
@@ -303,6 +310,7 @@ canonical search."
 codes 0..7 and copy codes 0..15 (command symbols 0..127)."
   (+ (* (ash ccode -3) 64) (* icode 8) (logand ccode 7)))
 
+(declaim (inline encode-distance))
 (defun encode-distance (d)
   "Distance D (>=1) -> (values dcode dextra-val dextra-bits) for NPOSTFIX=NDIRECT=0.
 The loop-free form partitions D by NBITS = INTEGER-LENGTH(D+4)-2."
@@ -312,6 +320,7 @@ The loop-free form partitions D by NBITS = INTEGER-LENGTH(D+4)-2."
          (offset (- (ash (+ 2 b) nbits) 4)))
     (values (+ 16 (* 2 (1- nbits)) b) (- d offset 1) nbits)))
 
+(declaim (inline special-distance-code))
 (defun special-distance-code (rb d)
   "If D is one of the short distance-ring codes, return (values CODE 0 0).
 RB is the 4-slot ring plus a write index in slot 4."
@@ -410,6 +419,8 @@ considered so command copy lengths remain the base-word lengths."
     len))
 
 #+sbcl
+(declaim (inline %hash4-sap))
+#+sbcl
 (defun %hash4-sap (sap i hmask)
   (declare (type sb-sys:system-area-pointer sap) (type fixnum i hmask)
            (optimize (speed 3) (safety 0)))
@@ -428,6 +439,8 @@ considered so command copy lengths remain the base-word lengths."
            (optimize (speed 3) (safety 0)))
   (sb-kernel:count-trailing-zeros x))
 
+#+(and sbcl x86-64 64-bit little-endian)
+(declaim (inline %match-len-sap))
 #+(and sbcl x86-64 64-bit little-endian)
 (defun %match-len-sap (sap a b n)
   "Word-at-a-time match extension; A < B and A+MAXL < N, so 8-byte loads
@@ -597,11 +610,12 @@ compression ratio for encoder throughput."
 
 ;;; ---- compressed meta-block --------------------------------------------
 
-;;; Flat command records: 12 fixnums per command.  A struct per command was
-;;; ~15% of low-quality compression time.
-(defconstant +cmd-stride+ 12)
-;; offsets: 0 ins, 1 lit-start, 2 cpy, 3 csym, 4 ixv, 5 ixb,
-;;          6 cxv, 7 cxb, 8 has-dist, 9 dcode, 10 dxv, 11 dxb
+;;; Flat command records: 10 fixnums per command.  A struct per command was
+;;; ~15% of low-quality compression time; CPY is not needed by the emitter,
+;;; and a negative DCODE means "no distance bits".
+(defconstant +cmd-stride+ 10)
+;; offsets: 0 ins, 1 lit-start, 2 csym, 3 ixv, 4 ixb, 5 cxv, 6 cxb,
+;;          7 dcode (-1 = none), 8 dxv, 9 dxb
 
 (defun plan-commands (data cmds
                       &optional (rb (make-array 5 :element-type 'fixnum
@@ -623,60 +637,65 @@ per command."
     (declare (type fixnum ri)
              (type (simple-array (unsigned-byte 8) (*)) data)
              (type (simple-array fixnum (*)) recs litfreq cmdfreq distfreq rb))
-    (flet ((ring (offset)
-             (aref rb (logand (+ (aref rb 4) offset) 3)))
-           (push-distance (d)
-             (setf (aref rb (logand (aref rb 4) 3)) d)
-             (incf (aref rb 4))))
-      (dolist (c cmds)
-        (destructuring-bind (ins lit-start cpy dist dictp) c
-          (multiple-value-bind (icode ixv ixb)
-              (length-code ins +ins-lc+ +ins-base+ +ins-bits+)
-            (let ((copyp (plusp cpy)))
-              (multiple-value-bind (ccode cxv cxb)
-                  (if copyp
-                      (length-code cpy +cpy-lc+ +cpy-base+ +cpy-bits+)
-                      (values 0 0 0))
-                (let* ((repeat (and copyp (not dictp) (= dist (ring 3))))
-                       (dist0 (and repeat (<= icode 7) (< ccode 16)))
-                       (csym (if dist0
-                                 (cmd-symbol-dist0 icode ccode)
-                                 (cmd-symbol icode ccode)))
-                       (dcode 0) (dxv 0) (dxb 0) (has-dist 0))
-                  (incf (aref cmdfreq csym))
-                  (loop for i from lit-start below (+ lit-start ins)
-                        do (incf (aref litfreq (aref data i))))
-                  (when copyp
-                    (unless dist0
-                      (setf has-dist 1)
-                      (if repeat
-                          (setf dcode 0)
-                          (multiple-value-bind (scode sxv sxb)
-                              (if short-dist
-                                  (special-distance-code rb dist)
-                                  (values nil 0 0))
-                            (if scode
-                                (setf dcode scode dxv sxv dxb sxb)
-                                (multiple-value-setq (dcode dxv dxb)
-                                  (encode-distance dist)))))
-                      (incf (aref distfreq dcode))
-                      ;; Distance symbol 0 reuses the last distance without
-                      ;; pushing; dictionary references are not pushed either.
-                      (unless (or dictp (= dcode 0))
-                        (push-distance dist))))
-                  (setf (aref recs ri) ins
-                        (aref recs (+ ri 1)) lit-start
-                        (aref recs (+ ri 2)) cpy
-                        (aref recs (+ ri 3)) csym
-                        (aref recs (+ ri 4)) ixv
-                        (aref recs (+ ri 5)) ixb
-                        (aref recs (+ ri 6)) cxv
-                        (aref recs (+ ri 7)) cxb
-                        (aref recs (+ ri 8)) has-dist
-                        (aref recs (+ ri 9)) dcode
-                        (aref recs (+ ri 10)) dxv
-                        (aref recs (+ ri 11)) dxb)
-                  (incf ri +cmd-stride+))))))))
+    ;; Explicit CAR/CDR access instead of DESTRUCTURING-BIND: the latter
+    ;; expands to SB-C::CHECK-DS-LIST in this hot loop.
+    (dolist (c cmds)
+      (let* ((ins (car c))
+             (lit-start (cadr c))
+             (cpy (caddr c))
+             (dist (cadddr c))
+             (dictp (car (cddddr c)))
+             (ring-pos (aref rb 4)))
+        (declare (type fixnum ins lit-start cpy dist ring-pos))
+        (multiple-value-bind (icode ixv ixb)
+            (length-code ins +ins-lc+ +ins-base+ +ins-bits+)
+          (declare (type fixnum icode ixv ixb))
+          (let ((copyp (plusp cpy)))
+            (multiple-value-bind (ccode cxv cxb)
+                (if copyp
+                    (length-code cpy +cpy-lc+ +cpy-base+ +cpy-bits+)
+                    (values 0 0 0))
+              (declare (type fixnum ccode cxv cxb))
+              (let* ((repeat (and copyp (not dictp)
+                                  (= dist (aref rb (logand (+ ring-pos 3) 3)))))
+                     (dist0 (and repeat (<= icode 7) (< ccode 16)))
+                     (csym (if dist0
+                               (cmd-symbol-dist0 icode ccode)
+                               (cmd-symbol icode ccode)))
+                     (dcode -1) (dxv 0) (dxb 0))
+                (declare (type fixnum csym dcode dxv dxb))
+                (incf (aref cmdfreq csym))
+                (loop for i from lit-start below (+ lit-start ins)
+                      do (incf (aref litfreq (aref data i))))
+                (when copyp
+                  (unless dist0
+                    (if repeat
+                        (setf dcode 0)
+                        (multiple-value-bind (scode sxv sxb)
+                            (if short-dist
+                                (special-distance-code rb dist)
+                                (values nil 0 0))
+                          (if scode
+                              (setf dcode scode dxv sxv dxb sxb)
+                              (multiple-value-setq (dcode dxv dxb)
+                                (encode-distance dist)))))
+                    (incf (aref distfreq dcode))
+                    ;; Distance symbol 0 reuses the last distance without
+                    ;; pushing; dictionary references are not pushed either.
+                    (unless (or dictp (= dcode 0))
+                      (setf (aref rb (logand ring-pos 3)) dist)
+                      (setf (aref rb 4) (1+ ring-pos)))))
+                (setf (aref recs ri) ins
+                      (aref recs (+ ri 1)) lit-start
+                      (aref recs (+ ri 2)) csym
+                      (aref recs (+ ri 3)) ixv
+                      (aref recs (+ ri 4)) ixb
+                      (aref recs (+ ri 5)) cxv
+                      (aref recs (+ ri 6)) cxb
+                      (aref recs (+ ri 7)) dcode
+                      (aref recs (+ ri 8)) dxv
+                      (aref recs (+ ri 9)) dxb)
+                (incf ri +cmd-stride+)))))))
     (values recs ncmd litfreq cmdfreq distfreq)))
 
 (defun write-mlen-header (w n last)
@@ -694,6 +713,12 @@ per command."
 MLEN header must already have been written.  RB is the stream-wide distance
 ring shared with the decoder.  CMDS, when supplied, is a precomputed command
 list covering exactly this block."
+  (declare (type b:bwr w)
+           (type (simple-array (unsigned-byte 8) (*)) data)
+           (type fixnum base-pos window)
+           (type (or null fixnum) dict-limit)
+           (type (simple-array fixnum (*)) rb)
+           (type fixnum max-chain))
   (progn
     (multiple-value-bind (recs ncmd litf cmdf distf)
         (plan-commands
@@ -704,6 +729,8 @@ list covering exactly this block."
                             :skip-match skip-match
                             :insert-interior insert-interior))
          rb :short-dist short-dist)
+      (declare (type (simple-array fixnum (*)) recs litf cmdf distf)
+               (type fixnum ncmd))
       (let ((lit (build-etree litf 256 15))
             (cmd (build-etree cmdf 704 15))
             (dist (build-etree distf 64 15)))
@@ -715,20 +742,53 @@ list covering exactly this block."
         (write-etree w lit 256)
         (write-etree w cmd 704)
         (write-etree w dist 64)
-        (dotimes (k ncmd)
-          (let ((b (* k +cmd-stride+)))
-            (declare (type fixnum b))
-            (etree-emit w cmd (aref recs (+ b 3)))
-            (b:wbits w (aref recs (+ b 4)) (aref recs (+ b 5)))
-            (b:wbits w (aref recs (+ b 6)) (aref recs (+ b 7)))
-            (let ((ins (aref recs b))
-                  (ls (aref recs (+ b 1))))
-              (declare (type fixnum ins ls))
-              (loop for i from ls below (+ ls ins)
-                    do (etree-emit w lit (aref data i))))
-            (when (plusp (aref recs (+ b 8)))
-              (etree-emit w dist (aref recs (+ b 9)))
-              (b:wbits w (aref recs (+ b 10)) (aref recs (+ b 11))))))))))
+        ;; Hoist the per-tree slot reads and the "single symbol" tests out of
+        ;; the per-command loop.  Literal-heavy blocks otherwise re-read four
+        ;; slots and re-test a branch for every literal.
+        (let ((cmd-single (etree-single cmd))
+              (lit-single (etree-single lit))
+              (dist-single (etree-single dist))
+              (cmd-rc (or (etree-rcodes cmd) +empty-fixnums+))
+              (cmd-ln (or (etree-lengths cmd) +empty-fixnums+))
+              (lit-rc (or (etree-rcodes lit) +empty-fixnums+))
+              (lit-ln (or (etree-lengths lit) +empty-fixnums+))
+              (dist-rc (or (etree-rcodes dist) +empty-fixnums+))
+              (dist-ln (or (etree-lengths dist) +empty-fixnums+)))
+          (declare (type (simple-array fixnum (*))
+                         cmd-rc cmd-ln lit-rc lit-ln dist-rc dist-ln))
+          (dotimes (k ncmd)
+            (let ((b (* k +cmd-stride+)))
+              (declare (type fixnum b))
+              (let ((ins (aref recs b))
+                    (ls (aref recs (+ b 1))))
+                (declare (type fixnum ins ls))
+                ;; One capacity check covers every bit this command can emit:
+                ;; at most ~13 bytes of command/distance overhead plus two
+                ;; bytes per literal (code lengths are <= 15 bits), plus the
+                ;; eight-byte slack the raw writer needs for its final store.
+                (b:w-ensure w (+ 24 (* 2 ins)))
+                (unless cmd-single
+                  (b:%wbits-raw w (aref cmd-rc (aref recs (+ b 2)))
+                                (aref cmd-ln (aref recs (+ b 2)))))
+                (b:%wbits-raw w (aref recs (+ b 3)) (aref recs (+ b 4)))
+                (b:%wbits-raw w (aref recs (+ b 5)) (aref recs (+ b 6)))
+                (unless lit-single
+                  ;; Long runs amortize the pin/state setup of the run
+                  ;; writer; short runs are cheaper inline.
+                  (if (>= ins 16)
+                      (b:w-emit-run w data ls (+ ls ins) lit-rc lit-ln)
+                      (loop for i from ls below (+ ls ins)
+                            do (let ((sym (aref data i)))
+                                 (b:%wbits-raw w (aref lit-rc sym)
+                                               (aref lit-ln sym))))))
+                (let ((dcode (aref recs (+ b 7))))
+                  (declare (type fixnum dcode))
+                  (when (>= dcode 0)
+                    (unless dist-single
+                      (b:%wbits-raw w (aref dist-rc dcode)
+                                    (aref dist-ln dcode)))
+                    (b:%wbits-raw w (aref recs (+ b 8))
+                                  (aref recs (+ b 9)))))))))))))
 
 (defun command-output-length (cmd)
   (+ (first cmd) (third cmd)))
