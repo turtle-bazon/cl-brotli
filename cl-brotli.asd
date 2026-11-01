@@ -8,14 +8,12 @@
   :serial t
   :components ((:module "src"
                 :serial t
-                :components ((:module "lisp"
-                              :serial t
-                              :components ((:file "packages")
-                                           (:file "bitio")
-                                           (:file "tables")
-                                           (:file "huffman")
-                                           (:file "dict")
-                                           (:file "decompress")
-                                           (:file "brotli")
-                                           (:file "encode")))
+                :components ((:file "packages")
+                             (:file "bitio")
+                             (:file "tables")
+                             (:file "huffman")
+                             (:file "dict")
+                             (:file "decompress")
+                             (:file "brotli")
+                             (:file "encode")
                              (:file "package")))))

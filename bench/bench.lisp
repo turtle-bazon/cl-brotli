@@ -194,7 +194,7 @@ least one byte so zero-length inputs still have a valid pointer."
 (defun repo-source-octets ()
   (let* ((root (project-root))
          (files (append
-                 (directory (merge-pathnames "src/lisp/*.lisp" root))
+                 (directory (merge-pathnames "src/*.lisp" root))
                  (directory (merge-pathnames "src/*.lisp" root))
                  (list (merge-pathnames "README.md" root)
                        (merge-pathnames "NOTICE" root)
