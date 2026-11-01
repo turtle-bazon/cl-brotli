@@ -58,6 +58,8 @@ Also builds a small lookup table for fast decoding of short codes."
         (make-huff :count count :symbol symbol :table table
                    :table-bits table-bits)))))
 
+(declaim (inline read-huff))
+
 (defun read-huff-slow (r h)
   (let ((code 0) (first 0) (index 0)
         (count (huff-count h)) (sym (huff-symbol h)))

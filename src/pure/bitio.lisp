@@ -17,7 +17,7 @@
 (defun r-eof-p (r)
   (and (>= (brd-pos r) (brd-end r)) (zerop (brd-nbits r))))
 
-(declaim (inline %fill-bits rbits rbit))
+(declaim (inline %fill-bits rbits rbit peek-bits bits-available))
 (defun %fill-bits (r n)
   (declare (type brd r) (type fixnum n) (optimize (speed 3) (safety 0)))
   (loop while (< (brd-nbits r) n) do

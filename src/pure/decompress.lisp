@@ -52,6 +52,7 @@
     (1 (ash p1 -2))                                        ; MSB6
     (2 (logior (aref +lut0+ p1) (aref +lut1+ p2)))         ; UTF8
     (3 (logior (ash (aref +lut2+ p1) 3) (aref +lut2+ p2))))) ; Signed
+(declaim (inline lit-context))
 
 (defstruct blk ntypes (type 0) (prev 1) (count 0) bhuff chuff)
 
@@ -122,12 +123,16 @@ distance ring buffer (persists across the stream)."
                       (make-array (* 4 nbl-d) :initial-element 0)))
            (htreel (make-array ntreesl)) (htreei (make-array nbl-i)) (htreed (make-array ntreesd))
            (dist-alpha (+ 16 ndirect (ash 48 npostfix))))
-      (dotimes (i ntreesl) (setf (aref htreel i) (read-prefix-code r 256)))
-      (dotimes (i nbl-i) (setf (aref htreei i) (read-prefix-code r 704)))
-      (dotimes (i ntreesd) (setf (aref htreed i) (read-prefix-code r dist-alpha)))
+       (dotimes (i ntreesl)
+         (setf (aref htreel i) (read-prefix-code r 256)))
+       (dotimes (i nbl-i)
+         (setf (aref htreei i) (read-prefix-code r 704)))
+       (dotimes (i ntreesd)
+         (setf (aref htreed i) (read-prefix-code r dist-alpha)))
       ;; command loop
       (loop while (< (fill-pointer out) target) do
-        (blk-maybe-switch r blkI)
+        (unless (= 1 (blk-ntypes blkI))
+          (blk-maybe-switch r blkI))
         (let* ((cmd (read-huff r (aref htreei (blk-type blkI))))
                (cell (ash cmd -6))
                (icode (+ (aref +cmd-ins+ cell) (logand (ash cmd -3) 7)))
@@ -137,7 +142,8 @@ distance ring buffer (persists across the stream)."
                (clen (+ (aref +cpy-base+ ccode) (b:rbits r (aref +cpy-bits+ ccode)))))
           ;; insert literals
           (dotimes (k ilen)
-            (blk-maybe-switch r blkL)
+            (unless (= 1 (blk-ntypes blkL))
+              (blk-maybe-switch r blkL))
             (let* ((fp (fill-pointer out))
                    (p1 (if (> fp 0) (aref out (1- fp)) 0))
                    (p2 (if (> fp 1) (aref out (- fp 2)) 0))
@@ -151,7 +157,8 @@ distance ring buffer (persists across the stream)."
             (if dist0
                 (setf distance (aref rb (logand (+ idx 3) 3)))   ; last distance, no push
                 (progn
-                  (blk-maybe-switch r blkD)
+                  (unless (= 1 (blk-ntypes blkD))
+                    (blk-maybe-switch r blkD))
                   (let* ((cidd (cond ((= clen 2) 0) ((= clen 3) 1) ((= clen 4) 2) (t 3)))
                          (dtree (aref htreed (aref cmapd (+ (* 4 (blk-type blkD)) cidd)))))
                     (setf dcode (read-huff r dtree))

@@ -453,13 +453,15 @@ like the decoder's ring."
     (b:wbits w m1 (* 4 nib))                             ; MLEN-1
     (unless last (b:wbits w 0 1))))                      ; ISUNCOMPRESSED=0
 
-(defun write-compressed-block-body (w data base-pos window use-dict dict-limit rb)
+(defun write-compressed-block-body (w data base-pos window use-dict dict-limit rb
+                                    &optional cmds)
   "Write the NBLTYPES/trees/commands part of a compressed meta-block.  The
 MLEN header must already have been written.  RB is the stream-wide distance
-ring shared with the decoder."
+ring shared with the decoder.  CMDS, when supplied, is a precomputed command
+list covering exactly this block."
   (let ((*cmpdata* data))
     (multiple-value-bind (recs litf cmdf distf)
-        (plan-commands (lz77 data window use-dict dict-limit base-pos) rb)
+        (plan-commands (or cmds (lz77 data window use-dict dict-limit base-pos)) rb)
       (let ((lit (build-etree litf 256 15))
             (cmd (build-etree cmdf 704 15))
             (dist (build-etree distf 64 15)))
@@ -481,6 +483,86 @@ ring shared with the decoder."
             (etree-emit w dist (cmdrec-dcode r))
             (b:wbits w (cmdrec-dxv r) (cmdrec-dxb r))))))))
 
+(defun command-output-length (cmd)
+  (+ (first cmd) (third cmd)))
+
+(defun split-copy-length (cpy space)
+  "Split CPY into (values A B) with A+B=CPY, A<=SPACE, and each part either
+zero or a valid Brotli copy length (>=2)."
+  (cond
+    ((< cpy 2) (error "invalid copy length ~D" cpy))
+    ((and (>= space 2) (>= (- cpy space) 2))
+     (values space (- cpy space)))
+    ((and (>= space 2) (= (- cpy space) 1))
+     (if (>= (1- space) 2)
+         (values (1- space) 2)
+         (values 0 cpy)))
+    (t
+     (values 0 cpy))))
+
+(defun split-command-at (cmd space)
+  "Split CMD so the first piece produces at most SPACE bytes.  Returns
+\(values FIRST REST); FIRST may be NIL when a dictionary command cannot be
+split and the current meta-block must be closed first."
+  (destructuring-bind (ins lit-start cpy dist dictp) cmd
+    (let ((out (+ ins cpy)))
+      (cond
+        ((<= out space)
+         (values cmd nil))
+        ((>= ins space)
+         (values (list space lit-start 0 0 nil)
+                 (list (- ins space) (+ lit-start space) cpy dist dictp)))
+        (t
+         (cond
+           (dictp
+            (if (plusp ins)
+                (values (list ins lit-start 0 0 nil)
+                        (list 0 0 cpy dist dictp))
+                (values nil cmd)))
+           (t
+            (multiple-value-bind (first-copy rest-copy)
+                (split-copy-length cpy (- space ins))
+              (cond
+                ((and (zerop ins) (zerop first-copy))
+                 (values nil cmd))
+                ((zerop first-copy)
+                 (values (list ins lit-start 0 0 nil)
+                         (list 0 0 rest-copy dist nil)))
+                (t
+                 (values (list ins lit-start first-copy dist nil)
+                         (list 0 0 rest-copy dist nil))))))))))))
+
+(defun partition-commands (cmds limit)
+  "Partition CMDS into meta-blocks whose total output length is <= LIMIT.
+Normal copies and literal runs may be split; dictionary copies are kept
+whole and moved to the next block when necessary."
+  (let ((blocks '()) (current '()) (used 0))
+    (flet ((finish ()
+             (when current
+               (push (nreverse current) blocks)
+               (setf current '() used 0))))
+      (dolist (cmd cmds)
+        (loop
+          (let ((space (- limit used)))
+            (cond
+              ((zerop space) (finish))
+              (t
+               (multiple-value-bind (first rest)
+                   (split-command-at cmd space)
+                 (cond
+                   (first
+                    (push first current)
+                    (incf used (command-output-length first))
+                    (if rest
+                        (setf cmd rest)
+                        (return)))
+                   ((plusp (length current))
+                    (finish))
+                   (t
+                    (error "command does not fit an empty meta-block")))))))))
+      (finish))
+    (nreverse blocks)))
+
 (defun compress-entropy (input &key (use-dict nil) (dict-limit nil))
   "Entropy-coded brotli stream for INPUT.  Inputs larger than one meta-block
 are split into <= 2^24-byte compressed meta-blocks followed by an empty last
@@ -499,14 +581,18 @@ meta-block."
        (write-mlen-header w n t)
        (write-compressed-block-body w data 0 window use-dict dict-limit rb))
       (t
-       (let ((pos 0)
-             (limit #.(ash 1 24)))
-         (loop while (< pos n) do
-           (let* ((end (min n (+ pos limit)))
-                  (chunk (subseq data pos end)))
-             (write-mlen-header w (- end pos) nil)
-             (write-compressed-block-body w chunk pos window use-dict dict-limit rb)
-             (setf pos end)))
+       (let* ((cmds (lz77 data window use-dict dict-limit 0))
+              (blocks (partition-commands cmds #.(ash 1 24)))
+              (pos 0))
+         (dolist (block blocks)
+           (let ((outlen (reduce #'+ block :key #'command-output-length
+                                       :initial-value 0)))
+             (write-mlen-header w outlen nil)
+             (write-compressed-block-body w data 0 window use-dict dict-limit
+                                          rb block)
+             (incf pos outlen)))
+         (unless (= pos n)
+           (error "multi-block encoder produced ~D bytes, expected ~D" pos n))
          (b:wbits w 1 1) (b:wbits w 1 1))))                ; final empty last block
     (b:w-align w)
     (b:to-octets (b:bwr-out w))))
