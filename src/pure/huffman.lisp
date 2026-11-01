@@ -5,7 +5,8 @@
 (defconstant +max-bits+ 15)
 (defconstant +huff-table-bits+ 10)
 
-(defstruct huff (count nil) (symbol nil) (single nil) (table nil) (table-bits 0))
+(defstruct huff (count nil) (symbol nil) (single nil) (table nil) (table-bits 0)
+  (subtables nil))
 
 (defun %reverse-bits (value bits)
   (let ((result 0))
@@ -15,7 +16,8 @@
 
 (defun build-huff (lengths n)
   "Canonical Huffman from code LENGTHS[0:n-1] (0 = absent), Mark-Adler style.
-Also builds a small lookup table for fast decoding of short codes."
+Builds a 10-bit primary table plus one 32-entry secondary table per long
+prefix, so codes up to 15 bits decode in two lookups."
   (let ((count (make-array (1+ +max-bits+) :initial-element 0))
         (nonzero 0) (last -1) (maxlen 0))
     (dotimes (s n)
@@ -38,6 +40,8 @@ Also builds a small lookup table for fast decoding of short codes."
             (incf (aref offs l)))))
       (let* ((table-bits (min +huff-table-bits+ maxlen))
              (table (make-array (ash 1 table-bits) :initial-element 0))
+             (subtables (make-array 0 :adjustable t :fill-pointer 0))
+             (groups (make-hash-table :test #'eql))
              (next (make-array (1+ +max-bits+) :initial-element 0)))
         (let ((code 0))
           (loop for bits from 1 to +max-bits+ do
@@ -49,14 +53,37 @@ Also builds a small lookup table for fast decoding of short codes."
               (let* ((sym (aref symbol (+ start k)))
                      (code (aref next len)))
                 (incf (aref next len))
-                (when (<= len table-bits)
-                  (let ((rev (%reverse-bits code len))
-                        (entry (logior (ash sym 4) len))
-                        (stride (ash 1 len)))
-                    (loop for base from rev below (ash 1 table-bits) by stride
-                          do (setf (aref table base) entry))))))))
+                (if (<= len table-bits)
+                    (let ((rev (%reverse-bits code len))
+                          (entry (logior (ash sym 4) len))
+                          (stride (ash 1 len)))
+                      (loop for base from rev below (ash 1 table-bits)
+                            by stride
+                            do (setf (aref table base) entry)))
+                    (let* ((rem (- len table-bits))
+                           (prefix (ash code (- rem)))
+                           (rev-prefix (%reverse-bits prefix table-bits)))
+                      (push (list sym code len)
+                            (gethash rev-prefix groups))))))))
+        (maphash
+         (lambda (prefix items)
+           (let ((sub-index (fill-pointer subtables))
+                 (sub (make-array (ash 1 (- +max-bits+ table-bits))
+                                  :initial-element 0)))
+             (dolist (item items)
+               (destructuring-bind (sym code len) item
+                 (let* ((rem (- len table-bits))
+                        (low (logand code (1- (ash 1 rem))))
+                        (rev (%reverse-bits low rem))
+                        (entry (logior (ash sym 4) rem))
+                        (stride (ash 1 rem)))
+                   (loop for base from rev below (length sub) by stride
+                         do (setf (aref sub base) entry)))))
+             (setf (aref table prefix) (ash (1+ sub-index) 4))
+             (vector-push-extend sub subtables)))
+         groups)
         (make-huff :count count :symbol symbol :table table
-                   :table-bits table-bits)))))
+                   :table-bits table-bits :subtables subtables)))))
 
 (declaim (inline read-huff))
 
@@ -73,16 +100,30 @@ Also builds a small lookup table for fast decoding of short codes."
 
 (defun read-huff (r h)
   "Decode one symbol from R using canonical code H.  Short codes use the
-lookup table; longer codes fall back to the bit-by-bit decoder."
+10-bit primary table; longer codes use a secondary table."
   (when (huff-single h) (return-from read-huff (huff-single h)))
   (let ((table (huff-table h)) (table-bits (huff-table-bits h)))
     (if (and table (>= (b:bits-available r) table-bits))
         (let ((entry (aref table (b:peek-bits r table-bits))))
-          (if (plusp entry)
-              (let ((len (logand entry 15)))
-                (b:rbits r len)
-                (ash entry -4))
-              (read-huff-slow r h)))
+          (cond
+            ((plusp (logand entry 15))
+             (let ((len (logand entry 15)))
+               (b:rbits r len)
+               (ash entry -4)))
+            ((plusp entry)
+             (if (>= (b:bits-available r) (+ table-bits 5))
+                 (progn
+                   (b:rbits r table-bits)
+                   (let* ((sub (aref (huff-subtables h)
+                                     (1- (ash entry -4))))
+                          (entry2 (aref sub (b:peek-bits r 5))))
+                     (if (plusp (logand entry2 15))
+                         (let ((rem (logand entry2 15)))
+                           (b:rbits r rem)
+                           (ash entry2 -4))
+                         (berr "invalid prefix code"))))
+                 (read-huff-slow r h)))
+            (t (read-huff-slow r h))))
         (read-huff-slow r h))))
 
 (defun alphabet-bits (size) (max 1 (integer-length (1- size))))

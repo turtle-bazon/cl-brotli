@@ -86,17 +86,17 @@ x86-64). Raw CSV files are in `bench/results/`.
 
 | dataset | pure size | C q5 size | C q11 size | pure/C q5 | pure/C q11 | pure comp MiB/s | C q11 core comp MiB/s | pure dec MiB/s | C q11 core dec MiB/s | C q11 one-shot dec MiB/s |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| text | 12218 | 11568 | 9702 | 1.056 | 1.259 | 5.2 | 6.2 | 96.8 | 368.7 | 58.8 |
-| html | 198383 | 193999 | 169361 | 1.023 | 1.171 | 0.5 | 0.3 | 10.9 | 240.4 | 51.7 |
-| json | 57985 | 57439 | 47684 | 1.010 | 1.216 | 1.5 | 0.3 | 28.8 | 568.1 | 66.7 |
-| source | 93132 | 91102 | 79992 | 1.022 | 1.164 | 1.5 | 0.6 | 29.4 | 328.9 | 62.5 |
-| binary | 309582 | 283510 | 251377 | 1.092 | 1.232 | 1.2 | 0.2 | 5.6 | 156.2 | 43.5 |
-| zeros | 13 | 13 | 14 | 1.000 | 0.929 | 10.0 | 16.7 | 347.2 | 400.0 | 26.8 |
-| random | 1048581 | 1048581 | 1048581 | 1.000 | 1.000 | 15.6 | 0.7 | 223.2 | 3906.0 | 27.8 |
-| periodic | 291 | 269 | 218 | 1.082 | 1.335 | 8.9 | 20.0 | 230.8 | 480.7 | 35.7 |
-| pattern | 306 | 284 | 278 | 1.077 | 1.101 | 10.0 | 20.8 | 375.0 | 432.5 | 35.7 |
-| dict | 57 | 47 | 31 | 1.213 | 1.839 | 9.6 | 25.0 | 868.0 | 367.6 | 25.9 |
-| utf8 | 293 | 262 | 226 | 1.118 | 1.296 | 10.0 | 22.7 | 811.6 | 416.6 | 31.2 |
+| text | 11845 | 11568 | 9702 | 1.024 | 1.221 | 6.0 | 6.1 | 100.0 | 393.7 | 51.7 |
+| html | 197366 | 193999 | 169361 | 1.017 | 1.165 | 0.5 | 0.3 | 9.3 | 260.4 | 62.5 |
+| json | 57983 | 57439 | 47684 | 1.009 | 1.216 | 1.7 | 0.3 | 21.7 | 568.1 | 71.4 |
+| source | 92803 | 91102 | 79992 | 1.019 | 1.160 | 1.0 | 0.6 | 19.2 | 322.1 | 71.4 |
+| binary | 309582 | 283510 | 251377 | 1.092 | 1.232 | 1.2 | 0.2 | 6.9 | 166.7 | 37.0 |
+| zeros | 13 | 13 | 14 | 1.000 | 0.929 | 10.9 | 13.2 | 932.8 | 367.6 | 26.3 |
+| random | 1048581 | 1048581 | 1048581 | 1.000 | 1.000 | 12.5 | 0.8 | 195.3 | 3845.9 | 37.5 |
+| periodic | 291 | 269 | 218 | 1.082 | 1.335 | 9.3 | 23.8 | 753.0 | 520.8 | 38.5 |
+| pattern | 306 | 284 | 278 | 1.077 | 1.101 | 10.4 | 20.8 | 367.6 | 467.3 | 32.6 |
+| dict | 57 | 47 | 31 | 1.213 | 1.839 | 10.4 | 26.3 | 390.6 | 416.6 | 27.8 |
+| utf8 | 293 | 262 | 226 | 1.118 | 1.296 | 9.3 | 21.7 | 796.1 | 367.6 | 33.3 |
 
 Geometric mean pure/C size ratio at q11: **1.201** excluding `periodic`
 (1.213 including it). The pure encoder's ratio is roughly C quality
@@ -106,18 +106,18 @@ Geometric mean pure/C size ratio at q11: **1.201** excluding `periodic`
 
 | C q | size (pure/C) | compress (pure/C core) | decompress (pure/C core) |
 |---:|---:|---:|---:|
-| 0 | 0.353 | 0.01x | 0.07x |
-| 1 | 0.404 | 0.01x | 0.14x |
-| 2 | 0.856 | 0.02x | 0.25x |
-| 3 | 0.971 | 0.02x | 0.28x |
-| 4 | 0.999 | 0.04x | 0.20x |
-| 5 | 1.059 | 0.04x | 0.29x |
-| 6 | 1.065 | 0.04x | 0.21x |
-| 7 | 1.065 | 0.05x | 0.26x |
-| 8 | 1.068 | 0.05x | 0.21x |
-| 9 | 1.073 | 0.12x | 0.23x |
-| 10 | 1.070 | 1.46x | 0.20x |
-| 11 | 1.201 | 1.45x | 0.24x |
+| 0 | 0.370 | 0.01x | 0.08x |
+| 1 | 0.420 | 0.01x | 0.14x |
+| 2 | 0.865 | 0.02x | 0.19x |
+| 3 | 0.973 | 0.02x | 0.25x |
+| 4 | 0.998 | 0.03x | 0.23x |
+| 5 | 1.057 | 0.03x | 0.27x |
+| 6 | 1.062 | 0.04x | 0.24x |
+| 7 | 1.063 | 0.05x | 0.25x |
+| 8 | 1.065 | 0.05x | 0.25x |
+| 9 | 1.071 | 0.12x | 0.21x |
+| 10 | 1.082 | 1.44x | 0.21x |
+| 11 | 1.209 | 1.40x | 0.25x |
 
 Pure compression is about **25× slower than C q4–q5**, but often faster than C
 q11 on literal-heavy data because C q11 spends much more time parsing. Pure
@@ -135,10 +135,10 @@ chunk boundary:
 
 | dataset | size | C q11 size | pure size | pure/C |
 |---|---:|---:|---:|---:|
-| text | 16 MiB | 9715 | 12218 | 1.26 |
-| text | 17 MiB | 9728 | 12230 | 1.26 |
-| source | 16 MiB | 80005 | 93133 | 1.16 |
-| source | 17 MiB | 80018 | 93145 | 1.16 |
+| text | 16 MiB | 9715 | 11845 | 1.22 |
+| text | 17 MiB | 9728 | 11858 | 1.22 |
+| source | 16 MiB | 80005 | 92803 | 1.16 |
+| source | 17 MiB | 80018 | 92816 | 1.16 |
 | periodic | 1 KiB | 216 | 289 | 1.34 |
 | periodic | 1 MiB | 218 | 291 | 1.33 |
 | periodic | 16 MiB | 232 | 291 | 1.25 |
@@ -153,9 +153,9 @@ needs a larger window to match it; at `lgwin` 10–14 C is much worse than pure:
 
 | dataset | C q11 lgwin 14 | C q11 lgwin 16 | C q11 lgwin 22 | pure |
 |---|---:|---:|---:|---:|
-| text | 278610 | 9790 | 9702 | 12218 |
-| html | 229097 | 185376 | 169361 | 198383 |
-| source | 208249 | 195375 | 79992 | 93132 |
+| text | 278610 | 9790 | 9702 | 11845 |
+| html | 229097 | 185376 | 169361 | 197366 |
+| source | 208249 | 195375 | 79992 | 92803 |
 | binary | 268554 | 261544 | 251377 | 309582 |
 
 C `mode` 0/1/2 made no meaningful difference at q11 on text/HTML/JSON.
@@ -169,7 +169,10 @@ The benchmark was used to drive these changes:
 * a stream-wide distance ring shared by all meta-blocks;
 * a 4-byte-repeat check in `incompressible-p` so periodic high-diversity data is
   compressed instead of stored;
-* a word-level bit reader and a 10-bit Huffman lookup table in the decoder;
+* a word-level bit reader and a two-level Huffman decoder (10-bit primary,
+  32-entry secondary tables for long codes);
+* fast single-tree literal and distance decode paths;
+* unlimited dictionary matching for text-like data;
 * implicit-distance command symbols and short distance-ring codes in the
   encoder;
 * rejection of non-positive resolved distances;

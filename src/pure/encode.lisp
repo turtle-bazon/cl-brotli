@@ -635,7 +635,7 @@ Huffman), falling back to stored meta-blocks when that wouldn't be smaller."
         stored
         (let* ((plain (compress-entropy data :use-dict nil))
                (variants (and (text-like-data-p data)
-                              (list (compress-entropy data :use-dict t :dict-limit 1))))
+                              (list (compress-entropy data :use-dict t))))
                (best (first (sort (remove nil (list* plain stored variants))
                                   #'< :key #'length))))
           best))))
