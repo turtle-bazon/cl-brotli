@@ -79,6 +79,19 @@
                  (cl-brotli.reference:compress data))
                 data))))
 
+(test lisp-quality-levels
+  ;; Every effort level must produce a stream both decoders accept.
+  (let* ((unit (octets "The quick brown fox jumps over the lazy dog. Brotli quality level. "))
+         (ulen (length unit))
+         (n 65536)
+         (data (make-array n :element-type '(unsigned-byte 8))))
+    (dotimes (i n)
+      (setf (aref data i) (aref unit (mod i ulen))))
+    (dotimes (q 12)
+      (let ((compressed (cl-brotli:compress data :quality q)))
+        (is (equalp (cl-brotli:decompress compressed) data))
+        (is (equalp (cl-brotli.reference:decompress compressed) data))))))
+
 (test differential-random-sizes
   (dolist (n '(0 1 2 10 100 1000 10000))
     (let ((data (make-array n :element-type '(unsigned-byte 8))))

@@ -2,363 +2,363 @@
 Lisp:  SBCL 2.6.9.roswell
 C Brotli: 1.0.9
 Sizes: 4.00 MiB, 16.00 MiB, 17.00 MiB   Datasets: TEXT, SOURCE, RANDOM, PERIODIC, PATTERN
-Levels: 5, 11   Windows: 22   Modes: 0
+C/lisp levels: 5, 11   Windows: 22   Modes: 0
 Samples: 1   Target: 0.05s   Consing: off
-CPU:   Intel Xeon Processor (Skylake, IBRS, no TSX)
+CPU:   AMD Ryzen 7 3700X 8-Core Processor
 
-  TEXT @ 4.00 MiB
-## TEXT — /usr/share/common-licenses/GPL-3 (4.00 MiB)
-
-### compression
-
-| C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
-|----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 11569 | 11686 | 1.010 | 250.0 | 52.6 | 5.7 | 0.02x | 0.11x |
-| 11 | 22 | 0 | 9702 | 11686 | 1.204 | 12.3 | 11.9 | 5.7 | 0.47x | 0.48x |
-
-### decompression of the C stream
-
-| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
-|----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 571.4 | 40.0 | 352.9 | 0.62x | 8.82x |
-| 11 | 22 | 0 | 428.5 | 43.5 | 333.3 | 0.78x | 7.67x |
-
-### lisp-encoded stream: decoder comparison
-
-| C decode MiB/s | lisp decode MiB/s | lisp/C |
-|---------------:|-------------------:|--------:|
-| 428.5 | 363.6 | 0.85x |
-
-  SOURCE @ 4.00 MiB
-## SOURCE — cl-newzlib + pesekey source (stable corpus) (4.00 MiB)
+## TEXT — /usr/share/common-licenses/GPL-3 [fnv1a32=650F5FE8] (4.00 MiB)
 
 ### compression
 
 | C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 91103 | 90741 | 0.996 | 125.0 | 32.3 | 2.2 | 0.02x | 0.07x |
-| 11 | 22 | 0 | 79992 | 90741 | 1.134 | 2.5 | 2.2 | 2.2 | 0.87x | 0.97x |
+| 5 | 22 | 0 | 11569 | 12080 | 1.044 | 815.5 | 192.3 | 91.5 | 0.11x | 0.48x |
+| 11 | 22 | 0 | 9702 | 11694 | 1.205 | 46.4 | 39.3 | 37.4 | 0.81x | 0.95x |
 
 ### decompression of the C stream
 
 | C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 461.5 | 47.6 | 76.9 | 0.17x | 1.62x |
-| 11 | 22 | 0 | 400.0 | 71.4 | 76.9 | 0.19x | 1.08x |
+| 5 | 22 | 0 | 635.6 | 74.4 | 2923.2 | 4.60x | 39.28x |
+| 11 | 22 | 0 | 593.4 | 67.7 | 2910.6 | 4.90x | 43.01x |
 
 ### lisp-encoded stream: decoder comparison
 
-| C decode MiB/s | lisp decode MiB/s | lisp/C |
-|---------------:|-------------------:|--------:|
-| 400.0 | 111.1 | 0.28x |
+| C q | C decode MiB/s | lisp decode MiB/s | lisp/C |
+|----:|---------------:|-------------------:|--------:|
+| 5 | 596.3 | 4385.0 | 7.35x |
+| 11 | 628.3 | 3941.0 | 6.27x |
 
-  RANDOM @ 4.00 MiB
-## RANDOM — generated xorshift32 bytes (4.00 MiB)
+## SOURCE — cl-newzlib + pesekey source (stable corpus) [fnv1a32=A1F36397] (4.00 MiB)
 
 ### compression
 
 | C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 4194320 | 4194309 | 1.000 | 55.6 | 25.0 | 17.5 | 0.32x | 0.70x |
-| 11 | 22 | 0 | 4194320 | 4194309 | 1.000 | 0.7 | 0.7 | 17.5 | 25.60x | 24.81x |
+| 5 | 22 | 0 | 90636 | 92091 | 1.016 | 334.5 | 141.4 | 52.9 | 0.16x | 0.37x |
+| 11 | 22 | 0 | 79632 | 89834 | 1.128 | 6.6 | 6.4 | 11.6 | 1.77x | 1.81x |
 
 ### decompression of the C stream
 
 | C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 1911.9 | 40.0 | 285.7 | 0.15x | 7.14x |
-| 11 | 22 | 0 | 2132.1 | 47.6 | 250.0 | 0.12x | 5.25x |
+| 5 | 22 | 0 | 598.4 | 108.2 | 690.1 | 1.15x | 6.38x |
+| 11 | 22 | 0 | 606.3 | 104.6 | 720.8 | 1.19x | 6.89x |
 
 ### lisp-encoded stream: decoder comparison
 
-| C decode MiB/s | lisp decode MiB/s | lisp/C |
-|---------------:|-------------------:|--------:|
-| 2999.8 | 352.9 | 0.12x |
+| C q | C decode MiB/s | lisp decode MiB/s | lisp/C |
+|----:|---------------:|-------------------:|--------:|
+| 5 | 614.0 | 1119.8 | 1.82x |
+| 11 | 628.2 | 994.9 | 1.58x |
 
-  PERIODIC @ 4.00 MiB
-## PERIODIC — 0..255 ramp repeated (4.00 MiB)
+## RANDOM — generated xorshift32 bytes [fnv1a32=B92D24D3] (4.00 MiB)
 
 ### compression
 
 | C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 269 | 291 | 1.082 | 500.0 | 62.5 | 9.8 | 0.02x | 0.16x |
-| 11 | 22 | 0 | 218 | 291 | 1.335 | 28.6 | 15.6 | 9.8 | 0.34x | 0.63x |
+| 5 | 22 | 0 | 4194320 | 4194309 | 1.000 | 222.4 | 110.5 | 827.1 | 3.72x | 7.48x |
+| 11 | 22 | 0 | 4194320 | 4194309 | 1.000 | 2.6 | 2.5 | 864.9 | 336.24x | 341.94x |
 
 ### decompression of the C stream
 
 | C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 428.5 | 38.5 | 545.4 | 1.27x | 14.18x |
-| 11 | 22 | 0 | 600.0 | 38.5 | 500.0 | 0.83x | 13.00x |
+| 5 | 22 | 0 | 15057.6 | 187.9 | 861.4 | 0.06x | 4.59x |
+| 11 | 22 | 0 | 16278.2 | 188.8 | 1046.4 | 0.06x | 5.54x |
 
 ### lisp-encoded stream: decoder comparison
 
-| C decode MiB/s | lisp decode MiB/s | lisp/C |
-|---------------:|-------------------:|--------:|
-| 600.0 | 666.6 | 1.11x |
+| C q | C decode MiB/s | lisp decode MiB/s | lisp/C |
+|----:|---------------:|-------------------:|--------:|
+| 5 | 27520.4 | 2535.6 | 0.09x |
+| 11 | 27464.2 | 2454.3 | 0.09x |
 
-  PATTERN @ 4.00 MiB
-## PATTERN — 256-byte pseudo-random pattern repeated (4.00 MiB)
+## PERIODIC — 0..255 ramp repeated [fnv1a32=EFDC9DC5] (4.00 MiB)
 
 ### compression
 
 | C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 284 | 307 | 1.081 | 400.0 | 58.8 | 9.4 | 0.02x | 0.16x |
-| 11 | 22 | 0 | 278 | 307 | 1.104 | 22.7 | 15.2 | 9.4 | 0.42x | 0.62x |
+| 5 | 22 | 0 | 269 | 291 | 1.082 | 1429.0 | 217.8 | 83.2 | 0.06x | 0.38x |
+| 11 | 22 | 0 | 218 | 291 | 1.335 | 65.1 | 51.6 | 89.3 | 1.37x | 1.73x |
 
 ### decompression of the C stream
 
 | C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 461.5 | 33.3 | 428.5 | 0.93x | 12.86x |
-| 11 | 22 | 0 | 545.4 | 40.0 | 400.0 | 0.73x | 10.00x |
+| 5 | 22 | 0 | 616.2 | 44.1 | 4143.4 | 6.72x | 93.98x |
+| 11 | 22 | 0 | 596.3 | 40.9 | 4131.3 | 6.93x | 100.89x |
 
 ### lisp-encoded stream: decoder comparison
 
-| C decode MiB/s | lisp decode MiB/s | lisp/C |
-|---------------:|-------------------:|--------:|
-| 400.0 | 428.5 | 1.07x |
+| C q | C decode MiB/s | lisp decode MiB/s | lisp/C |
+|----:|---------------:|-------------------:|--------:|
+| 5 | 598.0 | 4103.9 | 6.86x |
+| 11 | 597.5 | 4121.1 | 6.90x |
 
-  TEXT @ 16.00 MiB
-## TEXT — /usr/share/common-licenses/GPL-3 (16.00 MiB)
+## PATTERN — 256-byte pseudo-random pattern repeated [fnv1a32=C6DE9DC5] (4.00 MiB)
 
 ### compression
 
 | C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 11626 | 11686 | 1.005 | 363.6 | 49.4 | 4.9 | 0.01x | 0.10x |
-| 11 | 22 | 0 | 9715 | 11686 | 1.203 | 16.6 | 10.4 | 4.9 | 0.30x | 0.47x |
+| 5 | 22 | 0 | 284 | 307 | 1.081 | 1414.3 | 219.0 | 83.8 | 0.06x | 0.38x |
+| 11 | 22 | 0 | 278 | 307 | 1.104 | 54.3 | 44.2 | 83.8 | 1.54x | 1.89x |
 
 ### decompression of the C stream
 
 | C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 500.0 | 93.0 | 400.0 | 0.80x | 4.30x |
-| 11 | 22 | 0 | 444.4 | 71.4 | 333.3 | 0.75x | 4.67x |
+| 5 | 22 | 0 | 598.6 | 43.8 | 4050.4 | 6.77x | 92.41x |
+| 11 | 22 | 0 | 599.0 | 44.0 | 3956.1 | 6.60x | 90.01x |
 
 ### lisp-encoded stream: decoder comparison
 
-| C decode MiB/s | lisp decode MiB/s | lisp/C |
-|---------------:|-------------------:|--------:|
-| 444.4 | 444.4 | 1.00x |
+| C q | C decode MiB/s | lisp decode MiB/s | lisp/C |
+|----:|---------------:|-------------------:|--------:|
+| 5 | 600.5 | 3998.9 | 6.66x |
+| 11 | 598.2 | 4159.7 | 6.95x |
 
-  SOURCE @ 16.00 MiB
-## SOURCE — cl-newzlib + pesekey source (stable corpus) (16.00 MiB)
+## TEXT — /usr/share/common-licenses/GPL-3 [fnv1a32=348C03B7] (16.00 MiB)
 
 ### compression
 
 | C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 91160 | 90741 | 0.995 | 266.6 | 51.9 | 3.9 | 0.01x | 0.07x |
-| 11 | 22 | 0 | 80005 | 90741 | 1.134 | 6.7 | 6.2 | 3.9 | 0.58x | 0.62x |
+| 5 | 22 | 0 | 11626 | 12080 | 1.039 | 1162.1 | 200.1 | 85.8 | 0.07x | 0.43x |
+| 11 | 22 | 0 | 9715 | 11694 | 1.204 | 46.6 | 39.2 | 41.6 | 0.89x | 1.06x |
 
 ### decompression of the C stream
 
 | C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 571.4 | 97.6 | 181.8 | 0.32x | 1.86x |
-| 11 | 22 | 0 | 363.6 | 72.7 | 200.0 | 0.55x | 2.75x |
+| 5 | 22 | 0 | 594.6 | 126.5 | 1428.3 | 2.40x | 11.29x |
+| 11 | 22 | 0 | 577.3 | 125.1 | 1368.2 | 2.37x | 10.94x |
 
 ### lisp-encoded stream: decoder comparison
 
-| C decode MiB/s | lisp decode MiB/s | lisp/C |
-|---------------:|-------------------:|--------:|
-| 500.0 | 210.5 | 0.42x |
+| C q | C decode MiB/s | lisp decode MiB/s | lisp/C |
+|----:|---------------:|-------------------:|--------:|
+| 5 | 591.8 | 4484.7 | 7.58x |
+| 11 | 638.2 | 4489.7 | 7.03x |
 
-  RANDOM @ 16.00 MiB
-## RANDOM — generated xorshift32 bytes (16.00 MiB)
+## SOURCE — cl-newzlib + pesekey source (stable corpus) [fnv1a32=15CA3D18] (16.00 MiB)
 
 ### compression
 
 | C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 16777257 | 16777224 | 1.000 | 49.4 | 25.3 | 16.5 | 0.33x | 0.65x |
-| 11 | 22 | 0 | 16777268 | 16777224 | 1.000 | 0.6 | 0.6 | 16.5 | 27.20x | 28.86x |
+| 5 | 22 | 0 | 90694 | 92091 | 1.015 | 757.3 | 184.0 | 73.8 | 0.10x | 0.40x |
+| 11 | 22 | 0 | 79646 | 89834 | 1.128 | 18.3 | 17.1 | 26.4 | 1.44x | 1.55x |
 
 ### decompression of the C stream
 
 | C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 1999.9 | 40.8 | 235.3 | 0.12x | 5.76x |
-| 11 | 22 | 0 | 1999.9 | 47.6 | 166.7 | 0.08x | 3.50x |
+| 5 | 22 | 0 | 579.9 | 146.1 | 966.7 | 1.67x | 6.62x |
+| 11 | 22 | 0 | 578.6 | 152.8 | 989.7 | 1.71x | 6.48x |
 
 ### lisp-encoded stream: decoder comparison
 
-| C decode MiB/s | lisp decode MiB/s | lisp/C |
-|---------------:|-------------------:|--------:|
-| 2999.8 | 200.0 | 0.07x |
+| C q | C decode MiB/s | lisp decode MiB/s | lisp/C |
+|----:|---------------:|-------------------:|--------:|
+| 5 | 587.6 | 2310.2 | 3.93x |
+| 11 | 638.2 | 2378.9 | 3.73x |
 
-  PERIODIC @ 16.00 MiB
-## PERIODIC — 0..255 ramp repeated (16.00 MiB)
+## RANDOM — generated xorshift32 bytes [fnv1a32=449BC6BE] (16.00 MiB)
 
 ### compression
 
 | C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 327 | 291 | 0.890 | 444.4 | 62.5 | 9.9 | 0.02x | 0.16x |
-| 11 | 22 | 0 | 232 | 291 | 1.254 | 15.7 | 11.0 | 9.9 | 0.63x | 0.90x |
+| 5 | 22 | 0 | 16777257 | 16777224 | 1.000 | 245.1 | 103.3 | 841.0 | 3.43x | 8.14x |
+| 11 | 22 | 0 | 16777268 | 16777224 | 1.000 | 1.9 | 1.9 | 851.2 | 448.75x | 454.74x |
 
 ### decompression of the C stream
 
 | C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 571.4 | 70.2 | 363.6 | 0.64x | 5.18x |
-| 11 | 22 | 0 | 400.0 | 60.6 | 333.3 | 0.83x | 5.50x |
+| 5 | 22 | 0 | 7255.0 | 182.3 | 1262.5 | 0.17x | 6.92x |
+| 11 | 22 | 0 | 7217.7 | 182.9 | 956.5 | 0.13x | 5.23x |
 
 ### lisp-encoded stream: decoder comparison
 
-| C decode MiB/s | lisp decode MiB/s | lisp/C |
-|---------------:|-------------------:|--------:|
-| 444.4 | 413.8 | 0.93x |
+| C q | C decode MiB/s | lisp decode MiB/s | lisp/C |
+|----:|---------------:|-------------------:|--------:|
+| 5 | 8073.6 | 1109.7 | 0.14x |
+| 11 | 8088.7 | 1060.9 | 0.13x |
 
-  PATTERN @ 16.00 MiB
-## PATTERN — 256-byte pseudo-random pattern repeated (16.00 MiB)
+## PERIODIC — 0..255 ramp repeated [fnv1a32=3C1C9DC5] (16.00 MiB)
 
 ### compression
 
 | C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 297 | 307 | 1.034 | 363.6 | 54.8 | 10.7 | 0.03x | 0.20x |
-| 11 | 22 | 0 | 291 | 307 | 1.055 | 17.8 | 10.9 | 10.7 | 0.60x | 0.98x |
+| 5 | 22 | 0 | 327 | 291 | 0.890 | 1304.7 | 204.5 | 88.1 | 0.07x | 0.43x |
+| 11 | 22 | 0 | 232 | 291 | 1.254 | 40.6 | 35.1 | 87.2 | 2.15x | 2.48x |
 
 ### decompression of the C stream
 
 | C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 615.3 | 74.1 | 444.4 | 0.72x | 6.00x |
-| 11 | 22 | 0 | 666.6 | 71.4 | 400.0 | 0.60x | 5.60x |
+| 5 | 22 | 0 | 628.2 | 102.7 | 1458.4 | 2.32x | 14.20x |
+| 11 | 22 | 0 | 581.0 | 90.4 | 1456.7 | 2.51x | 16.11x |
 
 ### lisp-encoded stream: decoder comparison
 
-| C decode MiB/s | lisp decode MiB/s | lisp/C |
-|---------------:|-------------------:|--------:|
-| 571.4 | 571.4 | 1.00x |
+| C q | C decode MiB/s | lisp decode MiB/s | lisp/C |
+|----:|---------------:|-------------------:|--------:|
+| 5 | 604.5 | 5273.6 | 8.72x |
+| 11 | 582.9 | 5160.8 | 8.85x |
 
-  TEXT @ 17.00 MiB
-## TEXT — /usr/share/common-licenses/GPL-3 (17.00 MiB)
+## PATTERN — 256-byte pseudo-random pattern repeated [fnv1a32=98249DC5] (16.00 MiB)
 
 ### compression
 
 | C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 11683 | 11699 | 1.001 | 386.3 | 44.3 | 6.0 | 0.02x | 0.13x |
-| 11 | 22 | 0 | 9728 | 11699 | 1.203 | 15.0 | 10.5 | 6.0 | 0.40x | 0.57x |
+| 5 | 22 | 0 | 297 | 307 | 1.034 | 1299.5 | 206.8 | 86.9 | 0.07x | 0.42x |
+| 11 | 22 | 0 | 291 | 307 | 1.055 | 33.3 | 29.1 | 88.3 | 2.65x | 3.03x |
 
 ### decompression of the C stream
 
 | C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 425.0 | 85.0 | 236.1 | 0.56x | 2.78x |
-| 11 | 22 | 0 | 425.0 | 73.3 | 236.1 | 0.56x | 3.22x |
+| 5 | 22 | 0 | 586.9 | 100.5 | 1284.0 | 2.19x | 12.78x |
+| 11 | 22 | 0 | 614.8 | 100.3 | 1422.9 | 2.31x | 14.18x |
 
 ### lisp-encoded stream: decoder comparison
 
-| C decode MiB/s | lisp decode MiB/s | lisp/C |
-|---------------:|-------------------:|--------:|
-| 607.1 | 303.6 | 0.50x |
+| C q | C decode MiB/s | lisp decode MiB/s | lisp/C |
+|----:|---------------:|-------------------:|--------:|
+| 5 | 595.1 | 5410.3 | 9.09x |
+| 11 | 578.1 | 4730.1 | 8.18x |
 
-  SOURCE @ 17.00 MiB
-## SOURCE — cl-newzlib + pesekey source (stable corpus) (17.00 MiB)
+## TEXT — /usr/share/common-licenses/GPL-3 [fnv1a32=749321D5] (17.00 MiB)
 
 ### compression
 
 | C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 91217 | 90754 | 0.995 | 283.3 | 40.5 | 4.2 | 0.01x | 0.10x |
-| 11 | 22 | 0 | 80018 | 90754 | 1.134 | 6.4 | 5.4 | 4.2 | 0.66x | 0.78x |
+| 5 | 22 | 0 | 11683 | 12092 | 1.035 | 1181.2 | 204.4 | 88.9 | 0.08x | 0.43x |
+| 11 | 22 | 0 | 9728 | 11706 | 1.203 | 48.0 | 40.1 | 41.9 | 0.87x | 1.04x |
 
 ### decompression of the C stream
 
 | C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 607.1 | 73.3 | 146.5 | 0.24x | 2.00x |
-| 11 | 22 | 0 | 531.2 | 98.8 | 125.0 | 0.24x | 1.26x |
+| 5 | 22 | 0 | 602.6 | 132.4 | 1515.4 | 2.51x | 11.44x |
+| 11 | 22 | 0 | 614.8 | 130.4 | 1340.4 | 2.18x | 10.28x |
 
 ### lisp-encoded stream: decoder comparison
 
-| C decode MiB/s | lisp decode MiB/s | lisp/C |
-|---------------:|-------------------:|--------:|
-| 472.2 | 212.5 | 0.45x |
+| C q | C decode MiB/s | lisp decode MiB/s | lisp/C |
+|----:|---------------:|-------------------:|--------:|
+| 5 | 588.7 | 1218.7 | 2.07x |
+| 11 | 623.6 | 1123.9 | 1.80x |
 
-  RANDOM @ 17.00 MiB
-## RANDOM — generated xorshift32 bytes (17.00 MiB)
+## SOURCE — cl-newzlib + pesekey source (stable corpus) [fnv1a32=4760948D] (17.00 MiB)
 
 ### compression
 
 | C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 17825836 | 17825801 | 1.000 | 37.3 | 21.8 | 18.7 | 0.50x | 0.86x |
-| 11 | 22 | 0 | 17825848 | 17825801 | 1.000 | 0.6 | 0.6 | 18.7 | 31.23x | 31.38x |
+| 5 | 22 | 0 | 90751 | 92104 | 1.015 | 755.9 | 188.4 | 72.6 | 0.10x | 0.39x |
+| 11 | 22 | 0 | 79658 | 89846 | 1.128 | 19.0 | 17.6 | 26.3 | 1.38x | 1.49x |
 
 ### decompression of the C stream
 
 | C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 1961.4 | 39.3 | 193.2 | 0.10x | 4.91x |
-| 11 | 22 | 0 | 1961.4 | 40.9 | 157.4 | 0.08x | 3.85x |
+| 5 | 22 | 0 | 602.2 | 153.4 | 984.6 | 1.64x | 6.42x |
+| 11 | 22 | 0 | 592.1 | 153.2 | 1022.8 | 1.73x | 6.67x |
 
 ### lisp-encoded stream: decoder comparison
 
-| C decode MiB/s | lisp decode MiB/s | lisp/C |
-|---------------:|-------------------:|--------:|
-| 2999.8 | 212.5 | 0.07x |
+| C q | C decode MiB/s | lisp decode MiB/s | lisp/C |
+|----:|---------------:|-------------------:|--------:|
+| 5 | 601.9 | 981.3 | 1.63x |
+| 11 | 600.5 | 787.1 | 1.31x |
 
-  PERIODIC @ 17.00 MiB
-## PERIODIC — 0..255 ramp repeated (17.00 MiB)
+## RANDOM — generated xorshift32 bytes [fnv1a32=7C1634ED] (17.00 MiB)
 
 ### compression
 
 | C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 384 | 303 | 0.789 | 425.0 | 45.7 | 8.9 | 0.02x | 0.19x |
-| 11 | 22 | 0 | 244 | 303 | 1.242 | 17.8 | 12.8 | 8.9 | 0.50x | 0.69x |
+| 5 | 22 | 0 | 17825836 | 17825801 | 1.000 | 202.5 | 98.9 | 896.1 | 4.42x | 9.06x |
+| 11 | 22 | 0 | 17825848 | 17825801 | 1.000 | 1.9 | 1.8 | 833.5 | 447.58x | 451.94x |
 
 ### decompression of the C stream
 
 | C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 531.2 | 77.3 | 250.0 | 0.47x | 3.24x |
-| 11 | 22 | 0 | 607.1 | 67.5 | 202.4 | 0.33x | 3.00x |
+| 5 | 22 | 0 | 7165.3 | 180.8 | 1008.7 | 0.14x | 5.58x |
+| 11 | 22 | 0 | 7294.6 | 180.0 | 1046.7 | 0.14x | 5.82x |
 
 ### lisp-encoded stream: decoder comparison
 
-| C decode MiB/s | lisp decode MiB/s | lisp/C |
-|---------------:|-------------------:|--------:|
-| 386.3 | 250.0 | 0.65x |
+| C q | C decode MiB/s | lisp decode MiB/s | lisp/C |
+|----:|---------------:|-------------------:|--------:|
+| 5 | 8133.3 | 965.8 | 0.12x |
+| 11 | 8153.2 | 964.5 | 0.12x |
 
-  PATTERN @ 17.00 MiB
-## PATTERN — 256-byte pseudo-random pattern repeated (17.00 MiB)
+## PERIODIC — 0..255 ramp repeated [fnv1a32=57CC9DC5] (17.00 MiB)
 
 ### compression
 
 | C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 309 | 319 | 1.032 | 425.0 | 45.7 | 8.4 | 0.02x | 0.18x |
-| 11 | 22 | 0 | 304 | 319 | 1.049 | 16.7 | 11.5 | 8.4 | 0.51x | 0.74x |
+| 5 | 22 | 0 | 384 | 303 | 0.789 | 1314.9 | 203.9 | 86.6 | 0.07x | 0.42x |
+| 11 | 22 | 0 | 244 | 303 | 1.242 | 41.1 | 35.3 | 85.6 | 2.08x | 2.42x |
 
 ### decompression of the C stream
 
 | C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 531.2 | 64.4 | 236.1 | 0.44x | 3.67x |
-| 11 | 22 | 0 | 708.3 | 90.4 | 212.5 | 0.30x | 2.35x |
+| 5 | 22 | 0 | 569.3 | 99.5 | 1438.5 | 2.53x | 14.45x |
+| 11 | 22 | 0 | 619.5 | 94.7 | 1435.5 | 2.32x | 15.16x |
 
 ### lisp-encoded stream: decoder comparison
 
-| C decode MiB/s | lisp decode MiB/s | lisp/C |
-|---------------:|-------------------:|--------:|
-| 472.2 | 250.0 | 0.53x |
+| C q | C decode MiB/s | lisp decode MiB/s | lisp/C |
+|----:|---------------:|-------------------:|--------:|
+| 5 | 589.0 | 1194.2 | 2.03x |
+| 11 | 570.4 | 1107.5 | 1.94x |
+
+## PATTERN — 256-byte pseudo-random pattern repeated [fnv1a32=29951DC5] (17.00 MiB)
+
+### compression
+
+| C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
+|----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
+| 5 | 22 | 0 | 309 | 319 | 1.032 | 1294.4 | 203.9 | 84.7 | 0.07x | 0.42x |
+| 11 | 22 | 0 | 304 | 319 | 1.049 | 33.3 | 29.5 | 83.7 | 2.52x | 2.83x |
+
+### decompression of the C stream
+
+| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
+|----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
+| 5 | 22 | 0 | 579.5 | 102.2 | 1245.1 | 2.15x | 12.18x |
+| 11 | 22 | 0 | 583.3 | 102.4 | 1244.4 | 2.13x | 12.15x |
+
+### lisp-encoded stream: decoder comparison
+
+| C q | C decode MiB/s | lisp decode MiB/s | lisp/C |
+|----:|---------------:|-------------------:|--------:|
+| 5 | 603.9 | 1095.4 | 1.81x |
+| 11 | 601.1 | 1166.6 | 1.94x |
 
 ## Summary (geometric mean lisp/C, grouped by size/mode/lgwin/q)
 
 | size | mode | lgwin | C q | size (lisp/C) | comp core (lisp/C) | comp 1-shot (lisp/C) | decomp core (lisp/C) | decomp 1-shot (lisp/C) |
 |-----:|-----:|------:|----:|--------------:|-------------------:|---------------------:|---------------------:|-----------------------:|
-| 4.00 MiB | 0 | 22 | 5 | 1.033 | 0.04x | 0.17x | 0.45x | 7.14x |
-| 4.00 MiB | 0 | 22 | 11 | 1.150 | 1.08x | 1.35x | 0.40x | 5.63x |
-| 16.00 MiB | 0 | 22 | 5 | 0.984 | 0.03x | 0.17x | 0.42x | 4.28x |
-| 16.00 MiB | 0 | 22 | 11 | 1.125 | 1.12x | 1.50x | 0.44x | 4.25x |
-| 17.00 MiB | 0 | 22 | 5 | 0.959 | 0.03x | 0.21x | 0.31x | 3.18x |
-| 17.00 MiB | 0 | 22 | 11 | 1.122 | 1.16x | 1.48x | 0.25x | 2.56x |
+| 4.00 MiB | 0 | 22 | 5 | 1.044 | 0.19x | 0.72x | 1.69x | 25.11x |
+| 4.00 MiB | 0 | 22 | 11 | 1.149 | 3.99x | 4.54x | 1.77x | 27.21x |
+| 16.00 MiB | 0 | 22 | 5 | 0.994 | 0.16x | 0.76x | 1.29x | 9.87x |
+| 16.00 MiB | 0 | 22 | 11 | 1.124 | 5.05x | 5.62x | 1.26x | 9.67x |
+| 17.00 MiB | 0 | 22 | 5 | 0.969 | 0.17x | 0.77x | 1.26x | 9.37x |
+| 17.00 MiB | 0 | 22 | 11 | 1.121 | 4.90x | 5.45x | 1.22x | 9.40x |
 

@@ -2,6 +2,8 @@
 ;;;; (DEFLATE/zlib convention).  Simple + complex code descriptions (RFC 7932 §3).
 (in-package #:cl-brotli.lisp)
 
+(declaim (optimize (speed 3) (safety 0)))
+
 (defconstant +max-bits+ 15)
 (defconstant +huff-table-bits+ 10)
 
@@ -45,7 +47,7 @@ prefix, so codes up to 15 bits decode in two lookups."
       (let* ((table-bits (min +huff-table-bits+ maxlen))
              (table (make-array (ash 1 table-bits) :initial-element 0))
              (subtables (make-array 0 :adjustable t :fill-pointer 0))
-             (groups (make-hash-table :test #'eql))
+             (groups (make-array (ash 1 table-bits) :initial-element nil))
              (next (make-array (1+ +max-bits+) :initial-element 0)))
         (let ((code 0))
           (loop for bits from 1 to +max-bits+ do
@@ -68,24 +70,24 @@ prefix, so codes up to 15 bits decode in two lookups."
                            (prefix (ash code (- rem)))
                            (rev-prefix (%reverse-bits prefix table-bits)))
                       (push (list sym code len)
-                            (gethash rev-prefix groups))))))))
-        (maphash
-         (lambda (prefix items)
-           (let ((sub-index (fill-pointer subtables))
-                 (sub (make-array (ash 1 (- +max-bits+ table-bits))
-                                  :initial-element 0)))
-             (dolist (item items)
-               (destructuring-bind (sym code len) item
-                 (let* ((rem (- len table-bits))
-                        (low (logand code (1- (ash 1 rem))))
-                        (rev (%reverse-bits low rem))
-                        (entry (logior (ash sym 4) rem))
-                        (stride (ash 1 rem)))
-                   (loop for base from rev below (length sub) by stride
-                         do (setf (svref sub base) entry)))))
-             (setf (svref table prefix) (ash (1+ sub-index) 4))
-             (vector-push-extend sub subtables)))
-         groups)
+                            (aref groups rev-prefix))))))))
+        (dotimes (prefix (length groups))
+          (let ((items (aref groups prefix)))
+            (when items
+              (let ((sub-index (fill-pointer subtables))
+                    (sub (make-array (ash 1 (- +max-bits+ table-bits))
+                                     :initial-element 0)))
+                (dolist (item items)
+                  (destructuring-bind (sym code len) item
+                    (let* ((rem (- len table-bits))
+                           (low (logand code (1- (ash 1 rem))))
+                           (rev (%reverse-bits low rem))
+                           (entry (logior (ash sym 4) rem))
+                           (stride (ash 1 rem)))
+                      (loop for base from rev below (length sub) by stride
+                            do (setf (svref sub base) entry)))))
+                (setf (svref table prefix) (ash (1+ sub-index) 4))
+                (vector-push-extend sub subtables)))))
         (make-huff :count count :symbol symbol :table table
                    :table-bits table-bits
                    :subtables (coerce subtables 'simple-vector))))))
@@ -93,6 +95,7 @@ prefix, so codes up to 15 bits decode in two lookups."
 (declaim (inline read-huff))
 
 (defun read-huff-slow (r h)
+  (declare (type huff h))
   (let ((code 0) (first 0) (index 0)
         (count (huff-count h)) (sym (huff-symbol h)))
     (declare (type simple-vector count sym)
@@ -107,12 +110,19 @@ prefix, so codes up to 15 bits decode in two lookups."
 
 (defun read-huff (r h)
   "Decode one symbol from R using canonical code H.  Short codes use the
-10-bit primary table; longer codes use a secondary table."
-  (when (huff-single h) (return-from read-huff (huff-single h)))
+10-bit primary table; longer codes use a secondary table.  PEEK-BITS fills
+the reservoir or signals end-of-input, so the old BITS-AVAILABLE guards are
+redundant on the fast path."
+  (declare (type huff h))
+  (unless (huff-table h) (return-from read-huff (huff-single h)))
   (let ((table (huff-table h)) (table-bits (huff-table-bits h)))
     (declare (type simple-vector table)
              (type fixnum table-bits))
-    (if (and table (>= (b:bits-available r) table-bits))
+    ;; A valid stream may end with a code shorter than the primary table
+    ;; width.  PEEK-BITS would otherwise insist on TABLE-BITS bits and report
+    ;; end-of-input; the canonical slow walk can decode the remaining bits.
+    (if (or (>= (b:brd-nbits r) table-bits)
+            (>= (b:bits-available r) table-bits))
         (let ((entry (svref table (b:peek-bits r table-bits))))
           (declare (type fixnum entry))
           (cond
@@ -122,13 +132,14 @@ prefix, so codes up to 15 bits decode in two lookups."
                (b:rbits r len)
                (ash entry -4)))
             ((plusp entry)
-             (if (>= (b:bits-available r) (+ table-bits 5))
+             (if (or (>= (b:brd-nbits r) (+ table-bits 5))
+                     (>= (b:bits-available r) (+ table-bits 5)))
                  (progn
                    (b:rbits r table-bits)
-                   (let* ((sub (svref (huff-subtables h)
-                                     (1- (ash entry -4))))
+                   (let* ((subs (huff-subtables h))
+                          (sub (svref subs (1- (ash entry -4))))
                           (entry2 (svref sub (b:peek-bits r 5))))
-                     (declare (type vector sub)
+                     (declare (type simple-vector subs sub)
                               (type fixnum entry2))
                      (if (plusp (logand entry2 15))
                          (let ((rem (logand entry2 15)))

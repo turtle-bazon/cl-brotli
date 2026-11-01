@@ -191,6 +191,20 @@ least one byte so zero-length inputs still have a valid pointer."
 (defun first-existing (paths)
   (find-if #'probe-file paths))
 
+(defun fnv1a32 (octets)
+  "32-bit FNV-1a fingerprint of OCTETS, as a hex string.
+The harness prints this for every dataset so that runs on different hosts
+(and runs where a real corpus file is missing) can be compared only when the
+input bytes actually match."
+  (declare (type (simple-array (unsigned-byte 8) (*)) octets)
+           (optimize (speed 3) (safety 0)))
+  (let ((hash #x811C9DC5))
+    (declare (type (unsigned-byte 32) hash))
+    (dotimes (i (length octets))
+      (setf hash (logand #xFFFFFFFF
+                         (* (logxor hash (aref octets i)) #x01000193))))
+    (format nil "~8,'0X" hash)))
+
 (defun repo-source-octets ()
   (let* ((root (project-root))
          (files (append
@@ -245,11 +259,15 @@ when cl-brotli itself is edited."
                  :external-format :utf-8)))
     (tile-octets sample n)))
 
+(defun json-source-path ()
+  (first-existing
+   (list #p"/home/turtle/.ghcup/ghc/9.10.3/share/doc/ghc-9.10.3/html/libraries/base-4.20.2.0-9cd7/doc-index.json"
+         #p"/home/turtle/.ghcup/ghc/9.10.3/share/doc/ghc-9.10.3/html/libraries/ghc-internal-9.1003.0-b213/doc-index.json")))
+
 (defun make-json-octets (n)
-  "Use a real JSON document when available, otherwise generate records."
-  (let ((path (first-existing
-               (list #p"/home/turtle/.ghcup/ghc/9.10.3/share/doc/ghc-9.10.3/html/libraries/base-4.20.2.0-9cd7/doc-index.json"
-                     #p"/home/turtle/.ghcup/ghc/9.10.3/share/doc/ghc-9.10.3/html/libraries/ghc-internal-9.1003.0-b213/doc-index.json"))))
+  "Use a real JSON document when available, otherwise generate records.
+Both branches are deterministic for a given N and source file."
+  (let ((path (json-source-path)))
     (if path
         (tile-octets (read-file-octets path :max n) n)
         ;; Fallback: deterministic JSON-like records.
@@ -271,7 +289,39 @@ when cl-brotli itself is edited."
                                    (rnd 1000))))
             (coerce out '(simple-array (unsigned-byte 8) (*))))))))
 
-(defun make-dataset (name size)
+(defparameter *html-words*
+  #("compression" "benchmark" "encoder" "decoder" "stream" "window" "huffman"
+    "literal" "distance" "context" "block" "transform" "dictionary" "quality"
+    "throughput" "ratio" "buffer" "octets" "length" "symbol" "table" "prefix"
+    "command" "metablock" "reference" "implementation" "performance" "dataset"))
+
+(defun make-html-octets (n)
+  "Deterministic HTML-like document used when no system HTML corpus is found.
+Keeps the dataset meaningful on minimal hosts instead of silently tiling
+Common Lisp source, which would make HTML nearly identical to SOURCE."
+  (let ((out (make-array n :element-type '(unsigned-byte 8) :fill-pointer 0))
+        (s 7654321)
+        (words (length *html-words*)))
+    (labels ((emit (string)
+               (loop for ch across string
+                     while (< (fill-pointer out) n)
+                     do (vector-push (char-code ch) out)))
+             (rnd (bound)
+               (setf s (logand (+ (* s 1103515245) 12345) #x7FFFFFFF))
+               (mod s bound))
+             (word () (aref *html-words* (rnd words))))
+      (emit "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><title>Brotli benchmark corpus</title></head><body>\n")
+      (loop while (< (fill-pointer out) n)
+            do (emit (format nil
+                             "<div class=\"item\" id=\"row-~D\"><h2>~A ~D</h2><p>~A ~A ~A, ~A ~A.</p><ul><li>~A: ~D</li><li>~A: ~D</li></ul><a href=\"/~A/~D\">~A</a></div>\n"
+                             (rnd 1000000) (word) (rnd 1000000)
+                             (word) (word) (word) (word) (word)
+                             (word) (rnd 10000) (word) (rnd 10000)
+                             (word) (rnd 1000000) (word))))
+      (emit "</body></html>\n")
+      (coerce out '(simple-array (unsigned-byte 8) (*))))))
+
+(defun %make-dataset (name size)
   (ecase name
     (:text
      (let ((path (first-existing
@@ -289,11 +339,13 @@ when cl-brotli itself is edited."
                  :description (namestring path)
                  :data (tile-octets (read-file-octets path :max size) size))
            (list :name "html"
-                 :description "repository source"
-                 :data (tile-octets (repo-source-octets) size)))))
+                 :description "generated HTML records"
+                 :data (make-html-octets size)))))
     (:json
      (list :name "json"
-           :description "real JSON document or generated records"
+           :description (if (json-source-path)
+                            (namestring (json-source-path))
+                            "generated JSON records")
            :data (make-json-octets size)))
     (:source
      (list :name "source"
@@ -342,6 +394,13 @@ when cl-brotli itself is edited."
            :description "multilingual UTF-8 text"
            :data (make-utf8-octets size)))))
 
+(defun make-dataset (name size)
+  "Build dataset NAME of SIZE octets and attach a content fingerprint."
+  (let* ((spec (%make-dataset name size))
+         (data (getf spec :data)))
+    (setf (getf spec :hash) (fnv1a32 data))
+    spec))
+
 ;;; ------------------------------------------------------------------
 ;;; Timing and reporting
 ;;; ------------------------------------------------------------------
@@ -355,13 +414,20 @@ when cl-brotli itself is edited."
          (n (length sorted)))
     (nth (floor n 2) sorted)))
 
+(defun now-seconds ()
+  "Microsecond-resolution wall clock; GET-INTERNAL-REAL-TIME is too coarse
+for sub-millisecond operations on some builds (it reports zero ticks for a
+single fast decode)."
+  #+sbcl (multiple-value-bind (sec usec) (sb-ext:get-time-of-day)
+           (+ (coerce sec 'double-float) (/ usec 1000000.0d0)))
+  #-sbcl (/ (get-internal-real-time) 1.0d0 internal-time-units-per-second))
+
 (defun time-reps (thunk reps)
-  (let ((start (get-internal-real-time)))
+  (let ((start (now-seconds)))
     (dotimes (i reps)
       (declare (ignore i))
       (funcall thunk))
-    (/ (- (get-internal-real-time) start)
-       (* 1.0 internal-time-units-per-second reps))))
+    (/ (- (now-seconds) start) reps)))
 
 (defun measure (thunk &key (target 0.2) (samples 3) (max-reps 1000))
   "Return (values MEDIAN BEST REPS) seconds per call."
@@ -390,6 +456,13 @@ when cl-brotli itself is edited."
       (push (time-reps thunk-a reps-a) times-a)
       (push (time-reps thunk-b reps-b) times-b))
     (values (median times-a) (median times-b))))
+
+(defun format-size (octets)
+  "Human-readable size for report headings; keeps 0/1/10/1K distinct."
+  (cond ((< octets 1024) (format nil "~D B" octets))
+        ((< octets (* 1024 1024))
+         (format nil "~,1f KiB" (/ octets 1024.0)))
+        (t (format nil "~,2f MiB" (/ octets 1048576.0)))))
 
 (defun mib-per-second (octets seconds)
   (if (or (zerop octets) (zerop seconds))
@@ -420,6 +493,7 @@ included; this is mostly useful for the lisp Lisp side and the CFFI wrapper."
 (defstruct bench-row
   dataset
   description
+  data-hash
   size
   mode
   lgwin
@@ -448,10 +522,10 @@ included; this is mostly useful for the lisp Lisp side and the CFFI wrapper."
   (format t "Lisp:  ~A ~A~%" (lisp-implementation-type)
           (lisp-implementation-version))
   (format t "C Brotli: ~A~%" (brotli-version-string))
-  (format t "Sizes: ~{~,2f MiB~^, ~}   Datasets: ~{~A~^, ~}~%"
-          (mapcar (lambda (n) (/ n 1048576.0)) (getf options :sizes))
+  (format t "Sizes: ~{~A~^, ~}   Datasets: ~{~A~^, ~}~%"
+          (mapcar #'format-size (getf options :sizes))
           (mapcar #'symbol-name (getf options :datasets)))
-  (format t "Levels: ~{~D~^, ~}   Windows: ~{~D~^, ~}   Modes: ~{~D~^, ~}~%"
+  (format t "C/lisp levels: ~{~D~^, ~}   Windows: ~{~D~^, ~}   Modes: ~{~D~^, ~}~%"
           (getf options :levels) (getf options :windows) (getf options :modes))
   (format t "Samples: ~D   Target: ~,2fs   Consing: ~A~%"
           (getf options :samples) (getf options :target)
@@ -499,13 +573,16 @@ included; this is mostly useful for the lisp Lisp side and the CFFI wrapper."
                        (speed-ratio lisp c-core)
                        (speed-ratio lisp c-one)))))
 
-(defun print-lisp-stream-table (row)
-  (let* ((n (bench-row-size row))
-         (c (mib-per-second n (bench-row-lisp-stream-c-decomp row)))
-         (lisp (mib-per-second n (bench-row-lisp-stream-lisp-decomp row))))
-    (print-table-row "| C decode MiB/s | lisp decode MiB/s | lisp/C |")
-    (print-table-row "|---------------:|-------------------:|--------:|")
-    (print-table-row "| ~,1f | ~,1f | ~,2fx |" c lisp (speed-ratio lisp c))))
+(defun print-lisp-stream-table (rows)
+  (let ((n (bench-row-size (first rows))))
+    (print-table-row "| C q | C decode MiB/s | lisp decode MiB/s | lisp/C |")
+    (print-table-row "|----:|---------------:|-------------------:|--------:|")
+    (dolist (row (remove-duplicates rows :key #'bench-row-level))
+      (let ((c (mib-per-second n (bench-row-lisp-stream-c-decomp row)))
+            (lisp (mib-per-second n (bench-row-lisp-stream-lisp-decomp row))))
+        (print-table-row "| ~D | ~,1f | ~,1f | ~,2fx |"
+                         (bench-row-level row) c lisp
+                         (speed-ratio lisp c))))))
 
 (defun print-consing-table (row)
   (print-table-row "| operation | lisp Lisp consed | C one-shot consed |")
@@ -518,13 +595,15 @@ included; this is mostly useful for the lisp Lisp side and the CFFI wrapper."
                    (bench-row-c-decomp-consed row)))
 
 (defun print-dataset-report (rows dataset size description)
-  (format t "## ~A — ~A (~,2f MiB)~%~%" dataset description (/ size 1048576.0))
+  (format t "## ~A — ~A [fnv1a32=~A] (~A)~%~%"
+          dataset description (bench-row-data-hash (first rows))
+          (format-size size))
   (format t "### compression~%~%")
   (print-compression-table rows)
   (format t "~%### decompression of the C stream~%~%")
   (print-decompression-table rows)
   (format t "~%### lisp-encoded stream: decoder comparison~%~%")
-  (print-lisp-stream-table (first rows))
+  (print-lisp-stream-table rows)
   (when (bench-row-lisp-comp-consed (first rows))
     (format t "~%### Lisp allocation (bytes consed per call; C core foreign allocation excluded)~%~%")
     (print-consing-table (first rows)))
@@ -549,8 +628,8 @@ included; this is mostly useful for the lisp Lisp side and the CFFI wrapper."
                             (= (bench-row-lgwin r) lgwin)
                             (= (bench-row-level r) level)))
                      all-rows)))
-          (print-table-row "| ~,2f MiB | ~D | ~D | ~D | ~,3f | ~,2fx | ~,2fx | ~,2fx | ~,2fx |"
-                           (/ size 1048576.0) mode lgwin level
+          (print-table-row "| ~A | ~D | ~D | ~D | ~,3f | ~,2fx | ~,2fx | ~,2fx | ~,2fx |"
+                           (format-size size) mode lgwin level
                            (geometric-mean
                             (mapcar (lambda (r)
                                       (if (zerop (bench-row-c-size r))
@@ -605,108 +684,116 @@ included; this is mostly useful for the lisp Lisp side and the CFFI wrapper."
          (samples (getf options :samples))
          (target (getf options :target))
          (consing (getf options :consing))
-         (lisp-compressed (cl-brotli:compress data))
-         (lisp-size (length lisp-compressed))
-         (lisp-comp-time nil)
-         (lisp-comp-consed nil)
-         (lisp-stream-c-time nil)
-         (lisp-stream-lisp-time nil)
          (rows '()))
-    ;; Correctness: the lisp encoder's stream must decode with both decoders.
-    (validate-lisp-stream data lisp-compressed)
-    (multiple-value-bind (median best reps)
-        (measure (lambda () (cl-brotli:compress data))
-                 :target target :samples samples)
-      (declare (ignore best reps))
-      (setf lisp-comp-time median))
-    (when consing
-      (setf lisp-comp-consed
-            (measure-consing (lambda () (cl-brotli:compress data)))))
-    ;; Decode the lisp stream with both decoders.
-    (let ((cc (make-c-decompressor lisp-compressed n)))
-      (unwind-protect
-           (progn
-             (multiple-value-bind (c-time lisp-time)
-                 (measure-pair (lambda () (c-decompress-core cc))
-                               (lambda () (cl-brotli:decompress lisp-compressed))
-                               :target target :samples samples)
-               (setf lisp-stream-c-time c-time
-                     lisp-stream-lisp-time lisp-time)))
-        (free-c-decompressor cc)))
-    (dolist (mode (getf options :modes))
-      (dolist (lgwin (getf options :windows))
-        (dolist (level (getf options :levels))
-          (let ((cc (make-c-compressor data)))
-            (unwind-protect
-                 (let* ((c-size (c-compress-core cc level lgwin mode))
-                        (c-compressed (c-compressor-result cc))
-                        (c-one-shot (cl-brotli.reference:compress
-                                     data :quality level :lgwin lgwin :mode mode)))
-                   (unless (= (length c-one-shot) c-size)
-                     (error "C core and one-shot sizes differ (~D vs ~D) for ~A q~D lgwin ~D mode ~D"
-                            c-size (length c-one-shot) dataset-name level lgwin mode))
-                   (unless (equalp c-compressed c-one-shot)
-                     (error "C core and one-shot outputs differ for ~A q~D lgwin ~D mode ~D"
-                            dataset-name level lgwin mode))
-                   (validate-c-stream data c-compressed level lgwin mode)
-                   ;; Time C core vs C one-shot compression.
-                   (multiple-value-bind (c-core-time c-one-time)
-                       (measure-pair (lambda () (c-compress-core cc level lgwin mode))
-                                     (lambda () (cl-brotli.reference:compress
-                                                 data :quality level :lgwin lgwin :mode mode))
-                                     :target target :samples samples)
-                     ;; Time lisp vs C-core decompression of the C stream.
-                     (let ((cd (make-c-decompressor c-compressed n)))
-                       (unwind-protect
-                            (progn
-                              (c-decompress-core cd)
-                              (let ((decoded (c-decompressor-result cd)))
-                                (unless (equalp decoded data)
-                                  (error "C core decode mismatch for ~A q~D" dataset-name level))))
-                         (free-c-decompressor cd)))
-                     (let ((cd (make-c-decompressor c-compressed n)))
-                       (unwind-protect
-                            (multiple-value-bind (c-dec-core lisp-dec)
-                                (measure-pair (lambda () (c-decompress-core cd))
-                                              (lambda () (cl-brotli:decompress c-compressed))
-                                              :target target :samples samples)
-                              (multiple-value-bind (c-dec-core-2 c-dec-one)
+    ;; Level is the outer loop: the lisp encoder has no mode/window knob, so
+    ;; its stream, timing, and decode pair are reused across C mode/window
+    ;; variants instead of being recomputed for every cell.
+    (dolist (level (getf options :levels))
+      (let* ((lisp-compressed (cl-brotli:compress data :quality level))
+             (lisp-size (length lisp-compressed))
+             (lisp-comp-time nil)
+             (lisp-comp-consed nil)
+             (lisp-stream-c-time nil)
+             (lisp-stream-lisp-time nil))
+        (validate-lisp-stream data lisp-compressed)
+        (multiple-value-bind (median best reps)
+            (measure (lambda () (cl-brotli:compress data :quality level))
+                     :target target :samples samples)
+          (declare (ignore best reps))
+          (setf lisp-comp-time median))
+        (when consing
+          (setf lisp-comp-consed
+                (measure-consing
+                 (lambda () (cl-brotli:compress data :quality level)))))
+        ;; Decode the lisp stream with both decoders once per level.
+        (let ((lcd (make-c-decompressor lisp-compressed n)))
+          (unwind-protect
+               (multiple-value-bind (c-time lisp-time)
+                   (measure-pair (lambda () (c-decompress-core lcd))
+                                 (lambda () (cl-brotli:decompress lisp-compressed))
+                                 :target target :samples samples)
+                 (setf lisp-stream-c-time c-time
+                       lisp-stream-lisp-time lisp-time))
+            (free-c-decompressor lcd)))
+        (dolist (mode (getf options :modes))
+          (dolist (lgwin (getf options :windows))
+            (let ((cc (make-c-compressor data)))
+              (unwind-protect
+                   (let* ((c-size (c-compress-core cc level lgwin mode))
+                          (c-compressed (c-compressor-result cc))
+                          (c-one-shot (cl-brotli.reference:compress
+                                       data :quality level :lgwin lgwin :mode mode)))
+                     (unless (= (length c-one-shot) c-size)
+                       (error "C core and one-shot sizes differ (~D vs ~D) for ~A q~D lgwin ~D mode ~D"
+                              c-size (length c-one-shot) dataset-name level lgwin mode))
+                     (unless (equalp c-compressed c-one-shot)
+                       (error "C core and one-shot outputs differ for ~A q~D lgwin ~D mode ~D"
+                              dataset-name level lgwin mode))
+                     (validate-c-stream data c-compressed level lgwin mode)
+                     ;; Time C core vs C one-shot compression.
+                     (multiple-value-bind (c-core-time c-one-time)
+                         (measure-pair (lambda () (c-compress-core cc level lgwin mode))
+                                       (lambda () (cl-brotli.reference:compress
+                                                   data :quality level :lgwin lgwin :mode mode))
+                                       :target target :samples samples)
+                       ;; Validate and time lisp vs C-core decode of the C stream.
+                       (let ((cd (make-c-decompressor c-compressed n)))
+                         (unwind-protect
+                              (progn
+                                (c-decompress-core cd)
+                                (let ((decoded (c-decompressor-result cd)))
+                                  (unless (equalp decoded data)
+                                    (error "C core decode mismatch for ~A q~D"
+                                           dataset-name level))))
+                           (free-c-decompressor cd)))
+                       (let ((cd (make-c-decompressor c-compressed n)))
+                         (unwind-protect
+                              (multiple-value-bind (c-dec-core lisp-dec)
                                   (measure-pair (lambda () (c-decompress-core cd))
-                                                (lambda () (cl-brotli.reference:decompress c-compressed))
+                                                (lambda () (cl-brotli:decompress c-compressed))
                                                 :target target :samples samples)
-                                (declare (ignore c-dec-core-2))
-                                (let ((row (make-bench-row
-                                            :dataset dataset-name
-                                            :description (getf spec :description)
-                                            :size n :mode mode :lgwin lgwin :level level
-                                            :c-size c-size
-                                            :lisp-size lisp-size
-                                            :c-comp-core c-core-time
-                                            :c-comp-one-shot c-one-time
-                                            :lisp-comp lisp-comp-time
-                                            :c-decomp-core c-dec-core
-                                            :c-decomp-one-shot c-dec-one
-                                            :lisp-decomp lisp-dec
-                                            :lisp-stream-c-decomp lisp-stream-c-time
-                                            :lisp-stream-lisp-decomp lisp-stream-lisp-time
-                                            :lisp-comp-consed lisp-comp-consed
-                                            :c-comp-consed (and consing
-                                                                (measure-consing
-                                                                 (lambda ()
-                                                                   (cl-brotli.reference:compress
-                                                                    data :quality level
-                                                                    :lgwin lgwin :mode mode))))
-                                            :lisp-decomp-consed (and consing
-                                                                     (measure-consing
-                                                                      (lambda ()
-                                                                        (cl-brotli:decompress c-compressed))))
-                                            :c-decomp-consed (and consing
-                                                                  (measure-consing
-                                                                   (lambda ()
-                                                                     (cl-brotli.reference:decompress c-compressed)))))))
-                                  (push row rows)))))
-                         (free-c-decompressor cd)))))
-              (free-c-compressor cc)))))
+                                (multiple-value-bind (c-dec-core-2 c-dec-one)
+                                    (measure-pair (lambda () (c-decompress-core cd))
+                                                  (lambda () (cl-brotli.reference:decompress c-compressed))
+                                                  :target target :samples samples)
+                                  (declare (ignore c-dec-core-2))
+                                  (let ((row (make-bench-row
+                                              :dataset dataset-name
+                                              :description (getf spec :description)
+                                              :data-hash (getf spec :hash)
+                                              :size n :mode mode :lgwin lgwin :level level
+                                              :c-size c-size
+                                              :lisp-size lisp-size
+                                              :c-comp-core c-core-time
+                                              :c-comp-one-shot c-one-time
+                                              :lisp-comp lisp-comp-time
+                                              :c-decomp-core c-dec-core
+                                              :c-decomp-one-shot c-dec-one
+                                              :lisp-decomp lisp-dec
+                                              :lisp-stream-c-decomp lisp-stream-c-time
+                                              :lisp-stream-lisp-decomp lisp-stream-lisp-time
+                                              :lisp-comp-consed lisp-comp-consed
+                                              :c-comp-consed
+                                              (and consing
+                                                   (measure-consing
+                                                    (lambda ()
+                                                      (cl-brotli.reference:compress
+                                                       data :quality level
+                                                       :lgwin lgwin :mode mode))))
+                                              :lisp-decomp-consed
+                                              (and consing
+                                                   (measure-consing
+                                                    (lambda ()
+                                                      (cl-brotli:decompress c-compressed))))
+                                              :c-decomp-consed
+                                              (and consing
+                                                   (measure-consing
+                                                    (lambda ()
+                                                      (cl-brotli.reference:decompress
+                                                       c-compressed)))))))
+                                    (push row rows)))))
+                           (free-c-decompressor cd)))))
+                (free-c-compressor cc))))))
     (nreverse rows)))
 
 (defun run-benchmark (&optional (options nil))
@@ -715,8 +802,7 @@ included; this is mostly useful for the lisp Lisp side and the CFFI wrapper."
   (let ((all-rows '()))
     (dolist (size (getf options :sizes))
       (dolist (name (getf options :datasets))
-        (format *error-output* "~&  ~A @ ~,2f MiB~%"
-                name (/ size 1048576.0))
+        (format *error-output* "~&  ~A @ ~A~%" name (format-size size))
         (let ((rows (benchmark-dataset name size options)))
           (when rows
             (print-dataset-report rows (bench-row-dataset (first rows)) size
@@ -733,7 +819,11 @@ included; this is mostly useful for the lisp Lisp side and the CFFI wrapper."
 ;;; ------------------------------------------------------------------
 
 (defun csv-escape (value)
-  (let ((string (princ-to-string value)))
+  (let ((string (if (floatp value)
+                    ;; SBCL prints double floats as 1.5d0, which spreadsheet
+                    ;; and CSV tools do not parse.
+                    (format nil "~,12f" value)
+                    (princ-to-string value))))
     (if (or (find #\, string) (find #\" string) (find #\Newline string))
         (with-output-to-string (out)
           (write-char #\" out)
@@ -747,7 +837,7 @@ included; this is mostly useful for the lisp Lisp side and the CFFI wrapper."
 (defun write-csv (path rows)
   (with-open-file (stream path :direction :output :if-exists :supersede
                                :if-does-not-exist :create)
-    (let ((columns '(dataset description size mode lgwin level c-size lisp-size
+    (let ((columns '(dataset description data-hash size mode lgwin level c-size lisp-size
                       c-comp-core c-comp-one-shot lisp-comp
                       c-decomp-core c-decomp-one-shot lisp-decomp
                       lisp-stream-c-decomp lisp-stream-lisp-decomp
@@ -775,7 +865,7 @@ included; this is mostly useful for the lisp Lisp side and the CFFI wrapper."
   (format t "  --sizes LIST      multiple sizes, e.g. 0,1K,1M,16M~%")
   (format t "  --datasets LIST   ~{~A~^, ~} (default all)~%"
           *dataset-names*)
-  (format t "  --levels LIST     C quality levels (default 0..11)~%")
+  (format t "  --levels LIST     C and lisp quality levels (default 0..11)~%")
   (format t "  --windows LIST    C lgwin values (default 22)~%")
   (format t "  --modes LIST      C modes (default 0; 0=generic, 1=text, 2=font)~%")
   (format t "  --samples N       timed samples per measurement (default 3)~%")

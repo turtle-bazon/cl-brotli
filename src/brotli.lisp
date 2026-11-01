@@ -27,7 +27,7 @@
         (t (berr "unsupported WBITS ~d" wbits))))
 
 ;;; ---- decompress -------------------------------------------------------
-(defun %out () (make-outbuf (make-array 256 :element-type '(unsigned-byte 8))))
+(defun %out () (make-outbuf (make-array 4096 :element-type '(unsigned-byte 8))))
 (defun %append (out src)
   (let ((pos (outbuf-pos out)) (n (length src)))
     (%grow out (+ pos n))
@@ -42,7 +42,8 @@ static dictionary span the whole stream."
          (window (- (ash 1 (read-wbits r)) 16))
          ;; distance ring buffer: 4 slots + rolling write index (slot 4),
          ;; pre-seeded with 4 pushes so the initial last distances are 16,15,11,4.
-         (rb (make-array 5 :initial-contents '(16 15 11 4 4))))
+         (rb (make-array 5 :element-type 'fixnum
+                          :initial-contents '(16 15 11 4 4))))
     (loop named blocks do
       (let ((islast (b:rbit r)))
         (when (and (= islast 1) (= (b:rbit r) 1)) (return-from blocks))   ; ISLAST + ISLASTEMPTY
@@ -72,7 +73,7 @@ static dictionary span the whole stream."
   "Encode INPUT as a valid brotli stream of uncompressed (stored) meta-blocks.
 Reference-decodable; no actual compression.  Used as the fallback when entropy
 coding would not shrink the data (see COMPRESS in encode.lisp)."
-  (let* ((data (b:to-octets input)) (n (length data)) (w (b:make-bwr)))
+  (let* ((data (b:to-octets input)) (n (length data)) (w (b:make-bwr 1024)))
     (write-wbits w 16)
     (if (zerop n)
         (progn (b:wbits w 1 1) (b:wbits w 1 1))                          ; ISLAST + ISLASTEMPTY
@@ -90,4 +91,4 @@ coding would not shrink the data (see COMPRESS in encode.lisp)."
               (incf pos chunk)))
           (b:wbits w 1 1) (b:wbits w 1 1)))                             ; final empty last block
     (b:w-align w)
-    (b:to-octets (b:bwr-out w))))
+    (b:bwr-result w)))

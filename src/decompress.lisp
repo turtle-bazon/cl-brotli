@@ -1,6 +1,11 @@
 ;;;; src/decompress.lisp — brotli compressed meta-block decoder (RFC 7932 §9-10).
 (in-package #:cl-brotli.lisp)
 
+;; The decoder is validated against the C reference on every test/benchmark
+;; stream; safety 0 removes per-symbol bounds checks from the literal and
+;; match paths.
+(declaim (optimize (speed 3) (safety 0)))
+
 ;;; length-code base/extra tables
 (defparameter +ins-bits+ #(0 0 0 0 0 0 1 1 2 2 3 3 4 4 5 5 6 7 8 9 10 12 14 24))
 (defparameter +ins-base+ #(0 1 2 3 4 5 6 8 10 14 18 26 34 50 66 98 130 194 322 578 1090 2114 6210 22594))
@@ -15,6 +20,12 @@
 ;; The ring is a rolling buffer indexed by IDX (slots written most-recent-last).
 (defparameter +dsc-index+ #(3 2 1 0 3 3 3 3 3 3 2 2 2 2 2 2))
 (defparameter +dsc-value+ #(0 0 0 0 -1 1 -2 2 -3 3 -1 1 -2 2 -3 3))
+;; These are compile-time constants, but they are DEFPARAMETERs, so SBCL
+;; otherwise treats each AREF as a hairy (possibly non-simple) vector access.
+(declaim (type simple-vector
+                 +ins-bits+ +ins-base+ +cpy-bits+ +cpy-base+
+                 +blen-bits+ +blen-base+ +cmd-ins+ +cmd-cpy+
+                 +dsc-index+ +dsc-value+))
 
 (defun read-nbltypes (r)
   (if (zerop (b:rbit r)) 1
@@ -54,6 +65,19 @@
     (3 (logior (ash (aref +lut2+ p1) 3) (aref +lut2+ p2))))) ; Signed
 (declaim (inline lit-context))
 
+(defmacro %lit-context (mode p1 p2)
+  "Inline context computation.  Kept as a macro rather than relying on
+DECLAIM INLINE: the literal loop is hot enough that a missed inline is
+visible, and MODE is loop-invariant between block switches."
+  (let ((m (gensym "MODE")) (a (gensym "P1")) (b (gensym "P2")))
+    `(let ((,m ,mode) (,a ,p1) (,b ,p2))
+       (case ,m
+         (0 (logand ,a #x3f))
+         (1 (ash ,a -2))
+         (2 (logior (aref +lut0+ ,a) (aref +lut1+ ,b)))
+         (3 (logior (ash (aref +lut2+ ,a) 3) (aref +lut2+ ,b)))
+         (t 0)))))
+
 (defstruct blk ntypes (type 0) (prev 1) (count 0) bhuff chuff)
 
 (defun read-blk-header (r ntypes)
@@ -84,7 +108,7 @@
 (defun %grow (out need)
   (let ((data (outbuf-data out)))
     (when (> need (length data))
-      (let ((new (make-array (max need (* 2 (length data)))
+      (let ((new (make-array (max need (* 4 (length data)))
                               :element-type '(unsigned-byte 8))))
         (replace new data)
         (setf (outbuf-data out) new)))))
@@ -124,6 +148,32 @@
        (setf (aref data (+ pos i)) (aref data (+ src i))))))
   (+ pos length))
 
+(defun %copy-match-bytes (data fp src distance len)
+  (declare (optimize (speed 3) (safety 0))
+           (type (simple-array (unsigned-byte 8) (*)) data)
+           (type fixnum fp src distance len))
+  (cond
+    ((= distance 1)
+     (fill data (aref data src) :start fp :end (+ fp len)))
+    ((and (>= distance len) (<= len 16))
+     (%copy-tiny-match data fp src len))
+    ((>= distance len)
+     (replace data data :start1 fp :start2 src :end2 (+ src len)))
+    ((<= len 16)
+     (dotimes (i len)
+       (setf (aref data (+ fp i))
+             (aref data (+ src (mod i distance))))))
+    (t
+     ;; Copy the seed, then double the written pattern.  This is O(log len)
+     ;; replace calls even for distance 1 (a long run of one byte).
+     (replace data data :start1 fp :start2 src :end2 (+ src distance))
+     (loop with copied = distance
+           while (< copied len)
+           for n = (min copied (- len copied))
+           do (replace data data :start1 (+ fp copied) :start2 fp
+                       :end2 (+ fp n))
+              (incf copied n)))))
+
 (defun out-copy (out distance len)
   (declare (optimize (speed 3) (safety 0)))
   (when (<= distance 0)
@@ -132,34 +182,30 @@
         (src (- (outbuf-pos out) distance)))
     (%grow out (+ fp len))
     (setf (outbuf-pos out) (+ fp len))
-    (let ((data (outbuf-data out)))
-      (cond
-        ((= distance 1)
-         (fill data (aref data src) :start fp :end (+ fp len)))
-        ((and (>= distance len) (<= len 16))
-         (%copy-tiny-match data fp src len))
-        ((>= distance len)
-         (replace data data :start1 fp :start2 src :end2 (+ src len)))
-        ((<= len 16)
-         (dotimes (i len)
-           (setf (aref data (+ fp i))
-                 (aref data (+ src (mod i distance))))))
-        (t
-         ;; Copy the seed, then double the written pattern.  This is O(log len)
-         ;; replace calls even for distance 1 (a long run of one byte).
-         (replace data data :start1 fp :start2 src :end2 (+ src distance))
-         (loop with copied = distance
-               while (< copied len)
-               for n = (min copied (- len copied))
-               do (replace data data :start1 (+ fp copied) :start2 fp
-                           :end2 (+ fp n))
-                  (incf copied n)))))))
+    (%copy-match-bytes (outbuf-data out) fp src distance len)))
+
+(defun out-copy-preallocated (out distance len)
+  "Like OUT-COPY, but the meta-block capacity was reserved up front."
+  (declare (optimize (speed 3) (safety 0)))
+  (when (<= distance 0)
+    (berr "invalid distance ~d" distance))
+  (let ((fp (outbuf-pos out))
+        (src (- (outbuf-pos out) distance)))
+    (setf (outbuf-pos out) (+ fp len))
+    (%copy-match-bytes (outbuf-data out) fp src distance len)))
 
 (defun out-append-vec (out v)
   (let ((fp (outbuf-pos out)) (n (length v)))
     (%grow out (+ fp n))
     (replace (outbuf-data out) v :start1 fp)
     (setf (outbuf-pos out) (+ fp n))))
+
+(defun out-append-vec-preallocated (out v)
+  (let ((fp (outbuf-pos out)) (n (length v)))
+    (replace (outbuf-data out) v :start1 fp)
+    (setf (outbuf-pos out) (+ fp n))))
+
+(declaim (inline out-copy-preallocated))
 
 (defun decode-compressed-meta-block (r out mlen window rb)
   "Decode one compressed meta-block of MLEN bytes into OUT.  RB is the 4-entry
@@ -179,11 +225,24 @@ distance ring buffer (persists across the stream)."
            (ntreesd (read-nbltypes r))
            (cmapd (if (>= ntreesd 2) (read-context-map r (* 4 nbl-d) ntreesd)
                       (make-array (* 4 nbl-d) :initial-element 0)))
-           (htreel (make-array ntreesl)) (htreei (make-array nbl-i)) (htreed (make-array ntreesd))
+           (htreel (make-array ntreesl)) (htreei (make-array nbl-i))
+           (htreed (make-array ntreesd))
+           (lit-trees (make-array (* 64 nbl-l)))
            (dist-alpha (+ 16 ndirect (ash 48 npostfix)))
-           (single-lit-tree nil) (single-dist-tree nil))
-       (declare (type simple-vector cmode cmapl cmapd htreel htreei htreed)
-                (type fixnum nbl-l nbl-i nbl-d ntreesl ntreesd))
+           (single-lit-tree nil) (single-dist-tree nil)
+           ;; NBLTYPES is fixed for a meta-block; hoist the one-tree checks out
+           ;; of the per-command/per-literal paths.
+           (single-lblock (= 1 (blk-ntypes blkL)))
+           (single-iblock (= 1 (blk-ntypes blkI)))
+           (single-dblock (= 1 (blk-ntypes blkD))))
+       (declare (type simple-vector cmode cmapl cmapd htreel htreei htreed
+                                 lit-trees)
+                (type (simple-array fixnum (*)) rb)
+                (type blk blkL blkI blkD)
+                (type outbuf out)
+                (type b:brd r)
+                (type fixnum nbl-l nbl-i nbl-d ntreesl ntreesd mlen window
+                      start target))
        (%grow out target)
        (dotimes (i ntreesl)
          (setf (svref htreel i) (read-prefix-code r 256)))
@@ -193,67 +252,105 @@ distance ring buffer (persists across the stream)."
          (setf (svref htreed i) (read-prefix-code r dist-alpha)))
        (when (= ntreesl 1) (setf single-lit-tree (svref htreel 0)))
        (when (= ntreesd 1) (setf single-dist-tree (svref htreed 0)))
-      ;; command loop
-      (loop while (< (outbuf-pos out) target) do
-        (unless (= 1 (blk-ntypes blkI))
-          (blk-maybe-switch r blkI))
-        (let* ((cmd (read-huff r (svref htreei (blk-type blkI))))
-               (cell (ash cmd -6))
-               (icode (+ (aref +cmd-ins+ cell) (logand (ash cmd -3) 7)))
-               (ccode (+ (aref +cmd-cpy+ cell) (logand cmd 7)))
-               (dist0 (< cmd 128))
-               (ilen (+ (aref +ins-base+ icode) (b:rbits r (aref +ins-bits+ icode))))
-               (clen (+ (aref +cpy-base+ ccode) (b:rbits r (aref +cpy-bits+ ccode)))))
-          ;; insert literals
-          (if single-lit-tree
-              (dotimes (k ilen)
-                (unless (= 1 (blk-ntypes blkL))
-                  (blk-maybe-switch r blkL))
-                (out-push out (read-huff r single-lit-tree)))
-              (dotimes (k ilen)
-                (unless (= 1 (blk-ntypes blkL))
-                  (blk-maybe-switch r blkL))
-                (let* ((fp (outbuf-pos out))
-                       (p1 (if (> fp 0) (aref (outbuf-data out) (1- fp)) 0))
-                       (p2 (if (> fp 1) (aref (outbuf-data out) (- fp 2)) 0))
-                       (cid (lit-context (svref cmode (blk-type blkL)) p1 p2))
-                       (tree (svref htreel (svref cmapl (+ (* 64 (blk-type blkL)) cid)))))
-                  (out-push out (read-huff r tree)))))
-          (when (>= (outbuf-pos out) target) (return))
-          ;; distance — DCODE 0 (explicit or implicit dist0) reuses the last
-          ;; distance without pushing; all other codes compute + push.
-          (let ((distance 0) (idx (aref rb 4)) (dcode 0))
-            (if dist0
-                (setf distance (aref rb (logand (+ idx 3) 3)))   ; last distance, no push
-                (progn
-                  (unless (= 1 (blk-ntypes blkD))
-                    (blk-maybe-switch r blkD))
-                  (let ((dtree (or single-dist-tree
-                                   (let* ((cidd (cond ((= clen 2) 0) ((= clen 3) 1)
-                                                      ((= clen 4) 2) (t 3))))
-                                     (svref htreed (svref cmapd (+ (* 4 (blk-type blkD)) cidd)))))))
-                    (setf dcode (read-huff r dtree))
-                    (cond
-                      ((< dcode 16)
-                       (setf distance (+ (aref rb (logand (+ idx (aref +dsc-index+ dcode)) 3))
-                                         (aref +dsc-value+ dcode))))
-                      ((< dcode (+ 16 ndirect)) (setf distance (- dcode 15)))
-                      (t (let* ((d (- dcode ndirect 16))
-                                (ndistbits (+ 1 (ash d (- (1+ npostfix)))))
-                                (dextra (b:rbits r ndistbits))
-                                (hcode (ash d (- npostfix)))
-                                (lcode (logand d postfix-mask))
-                                (offset (- (ash (+ 2 (logand hcode 1)) ndistbits) 4)))
-                           (setf distance (+ (ash (+ offset dextra) npostfix) lcode ndirect 1)))))
-                    ;; push real backward references only — dictionary references
-                    ;; (distance beyond the produced output) do NOT update the ring.
-                    (when (and (/= dcode 0) (<= distance (min window (outbuf-pos out))))
-                      (setf (aref rb (logand idx 3)) distance (aref rb 4) (1+ idx))))))
-            (let ((max-dist (min window (outbuf-pos out))))
-              (when (<= distance 0)
-                (berr "invalid distance ~d" distance))
-              (if (<= distance max-dist)
-                  (out-copy out distance clen)
-                  (out-append-vec out (dict-word clen distance max-dist))))))))
+       ;; Resolve the (block-type, context) -> literal-tree map once per
+       ;; meta-block instead of following CMAPL and HTREEL per literal.
+       (unless single-lit-tree
+         (dotimes (bt nbl-l)
+           (dotimes (cid 64)
+             (setf (svref lit-trees (+ (* 64 bt) cid))
+                   (svref htreel (svref cmapl (+ (* 64 bt) cid)))))))
+       ;; command loop
+       (loop while (< (outbuf-pos out) target) do
+         (unless single-iblock
+           (blk-maybe-switch r blkI))
+         (let* ((cmd (read-huff r (svref htreei (blk-type blkI))))
+                (cell (ash cmd -6))
+                (icode (+ (aref +cmd-ins+ cell) (logand (ash cmd -3) 7)))
+                (ccode (+ (aref +cmd-cpy+ cell) (logand cmd 7)))
+                (dist0 (< cmd 128))
+                (ilen (+ (aref +ins-base+ icode)
+                         (b:rbits r (aref +ins-bits+ icode))))
+                (clen (+ (aref +cpy-base+ ccode)
+                         (b:rbits r (aref +cpy-bits+ ccode)))))
+           ;; Insert literals through a local array and position.  The
+           ;; meta-block output capacity is reserved up front, so no per-run
+           ;; growth check is needed on a valid stream.
+           (let ((data (outbuf-data out))
+                 (pos (outbuf-pos out)))
+             (if single-lit-tree
+                 (dotimes (k ilen)
+                   (unless single-lblock
+                     (blk-maybe-switch r blkL))
+                   (setf (aref data pos) (read-huff r single-lit-tree))
+                   (incf pos))
+                 (let ((bt (blk-type blkL))
+                       (cmodev (svref cmode (blk-type blkL))))
+                   (dotimes (k ilen)
+                     (unless single-lblock
+                       (blk-maybe-switch r blkL)
+                       (setf bt (blk-type blkL)
+                             cmodev (svref cmode bt)))
+                     (let* ((p1 (if (> pos 0) (aref data (1- pos)) 0))
+                            (p2 (if (> pos 1) (aref data (- pos 2)) 0))
+                            (cid (%lit-context cmodev p1 p2))
+                            (tree (svref lit-trees (+ (* 64 bt) cid))))
+                       (setf (aref data pos) (read-huff r tree))
+                       (incf pos)))))
+             (setf (outbuf-pos out) pos))
+           (when (>= (outbuf-pos out) target) (return))
+           ;; distance — DCODE 0 (explicit or implicit dist0) reuses the last
+           ;; distance without pushing; all other codes compute + push.
+           (let ((distance 0) (idx (aref rb 4)) (dcode 0))
+             (if dist0
+                 (setf distance (aref rb (logand (+ idx 3) 3))) ; last, no push
+                 (progn
+                   (unless single-dblock
+                     (blk-maybe-switch r blkD))
+                   (let ((dtree
+                           (or single-dist-tree
+                               (let* ((cidd (cond ((= clen 2) 0)
+                                                  ((= clen 3) 1)
+                                                  ((= clen 4) 2)
+                                                  (t 3))))
+                                 (svref htreed
+                                        (svref cmapd
+                                               (+ (* 4 (blk-type blkD))
+                                                  cidd)))))))
+                     (setf dcode (read-huff r dtree))
+                     (cond
+                       ((< dcode 16)
+                        (setf distance
+                              (+ (aref rb (logand (+ idx
+                                                    (aref +dsc-index+ dcode))
+                                                  3))
+                                 (aref +dsc-value+ dcode))))
+                       ((< dcode (+ 16 ndirect))
+                        (setf distance (- dcode 15)))
+                       (t (let* ((d (- dcode ndirect 16))
+                                 (ndistbits
+                                   (+ 1 (ash d (- (1+ npostfix)))))
+                                 (dextra (b:rbits r ndistbits))
+                                 (hcode (ash d (- npostfix)))
+                                 (lcode (logand d postfix-mask))
+                                 (offset
+                                   (- (ash (+ 2 (logand hcode 1)) ndistbits)
+                                      4)))
+                            (setf distance
+                                  (+ (ash (+ offset dextra) npostfix)
+                                     lcode ndirect 1)))))
+                     ;; push real backward references only — dictionary
+                     ;; references do NOT update the ring.
+                     (when (and (/= dcode 0)
+                                (<= distance
+                                    (min window (outbuf-pos out))))
+                       (setf (aref rb (logand idx 3)) distance
+                             (aref rb 4) (1+ idx))))))
+             (let ((max-dist (min window (outbuf-pos out))))
+               (when (<= distance 0)
+                 (berr "invalid distance ~d" distance))
+               (if (<= distance max-dist)
+                   (out-copy-preallocated out distance clen)
+                   (out-append-vec-preallocated
+                    out (dict-word clen distance max-dist))))))))
     (when (/= (outbuf-pos out) target)
       (berr "meta-block produced ~d, expected ~d" (- (outbuf-pos out) start) mlen))))

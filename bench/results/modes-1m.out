@@ -2,90 +2,87 @@
 Lisp:  SBCL 2.6.9.roswell
 C Brotli: 1.0.9
 Sizes: 1.00 MiB   Datasets: TEXT, HTML, JSON
-Levels: 11   Windows: 22   Modes: 0, 1, 2
-Samples: 1   Target: 0.10s   Consing: off
-CPU:   Intel Xeon Processor (Skylake, IBRS, no TSX)
+C/lisp levels: 11   Windows: 22   Modes: 0, 1, 2
+Samples: 2   Target: 0.10s   Consing: off
+CPU:   AMD Ryzen 7 3700X 8-Core Processor
 
-  TEXT @ 1.00 MiB
-## TEXT — /usr/share/common-licenses/GPL-3 (1.00 MiB)
-
-### compression
-
-| C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
-|----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 11 | 22 | 0 | 9702 | 11686 | 1.204 | 5.6 | 5.1 | 3.4 | 0.62x | 0.67x |
-| 11 | 22 | 1 | 9702 | 11686 | 1.204 | 6.6 | 5.6 | 3.4 | 0.52x | 0.62x |
-| 11 | 22 | 2 | 9704 | 11686 | 1.204 | 6.9 | 6.6 | 3.4 | 0.49x | 0.52x |
-
-### decompression of the C stream
-
-| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
-|----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 11 | 22 | 0 | 328.9 | 50.0 | 107.1 | 0.33x | 2.14x |
-| 11 | 22 | 1 | 415.9 | 52.6 | 120.0 | 0.29x | 2.28x |
-| 11 | 22 | 2 | 480.7 | 71.4 | 136.4 | 0.28x | 1.91x |
-
-### lisp-encoded stream: decoder comparison
-
-| C decode MiB/s | lisp decode MiB/s | lisp/C |
-|---------------:|-------------------:|--------:|
-| 428.5 | 133.0 | 0.31x |
-
-  HTML @ 1.00 MiB
-## HTML — /usr/share/doc/rclone/MANUAL.html (1.00 MiB)
+## TEXT — /usr/share/common-licenses/GPL-3 [fnv1a32=D82FAEC6] (1.00 MiB)
 
 ### compression
 
 | C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 11 | 22 | 0 | 169361 | 192903 | 1.139 | 0.3 | 0.3 | 0.3 | 0.95x | 0.91x |
-| 11 | 22 | 1 | 169361 | 192903 | 1.139 | 0.3 | 0.3 | 0.3 | 1.02x | 1.02x |
-| 11 | 22 | 2 | 169362 | 192903 | 1.139 | 0.3 | 0.3 | 0.3 | 1.07x | 1.10x |
+| 11 | 22 | 0 | 9702 | 11694 | 1.205 | 20.1 | 18.7 | 23.2 | 1.15x | 1.24x |
+| 11 | 22 | 1 | 9702 | 11694 | 1.205 | 19.9 | 18.7 | 23.2 | 1.16x | 1.24x |
+| 11 | 22 | 2 | 9704 | 11694 | 1.205 | 20.3 | 18.9 | 23.2 | 1.14x | 1.23x |
 
 ### decompression of the C stream
 
 | C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 11 | 22 | 0 | 312.5 | 68.2 | 10.4 | 0.03x | 0.15x |
-| 11 | 22 | 1 | 328.9 | 71.4 | 10.9 | 0.03x | 0.15x |
-| 11 | 22 | 2 | 240.4 | 66.7 | 13.9 | 0.06x | 0.21x |
+| 11 | 22 | 0 | 1287.4 | 168.8 | 1014.1 | 0.79x | 6.01x |
+| 11 | 22 | 1 | 1282.8 | 87.4 | 1036.4 | 0.81x | 11.85x |
+| 11 | 22 | 2 | 1296.6 | 87.1 | 1027.5 | 0.79x | 11.79x |
 
 ### lisp-encoded stream: decoder comparison
 
-| C decode MiB/s | lisp decode MiB/s | lisp/C |
-|---------------:|-------------------:|--------:|
-| 312.5 | 15.6 | 0.05x |
+| C q | C decode MiB/s | lisp decode MiB/s | lisp/C |
+|----:|---------------:|-------------------:|--------:|
+| 11 | 597.8 | 1714.0 | 2.87x |
 
-  JSON @ 1.00 MiB
-## JSON — real JSON document or generated records (1.00 MiB)
+## HTML — generated HTML records [fnv1a32=C1F2B2E7] (1.00 MiB)
 
 ### compression
 
 | C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 11 | 22 | 0 | 47684 | 57083 | 1.197 | 0.3 | 0.3 | 1.0 | 3.25x | 3.46x |
-| 11 | 22 | 1 | 47684 | 57083 | 1.197 | 0.3 | 0.3 | 1.0 | 3.26x | 3.18x |
-| 11 | 22 | 2 | 47695 | 57083 | 1.197 | 0.3 | 0.3 | 1.0 | 2.95x | 3.31x |
+| 11 | 22 | 0 | 132230 | 157561 | 1.192 | 0.9 | 0.9 | 1.3 | 1.48x | 1.50x |
+| 11 | 22 | 1 | 132230 | 157561 | 1.192 | 0.9 | 0.9 | 1.3 | 1.48x | 1.49x |
+| 11 | 22 | 2 | 132256 | 157561 | 1.191 | 0.9 | 0.9 | 1.3 | 1.50x | 1.49x |
 
 ### decompression of the C stream
 
 | C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 11 | 22 | 0 | 666.6 | 90.9 | 30.0 | 0.04x | 0.33x |
-| 11 | 22 | 1 | 603.8 | 88.2 | 30.0 | 0.05x | 0.34x |
-| 11 | 22 | 2 | 625.0 | 95.2 | 34.1 | 0.05x | 0.36x |
+| 11 | 22 | 0 | 886.7 | 244.4 | 179.4 | 0.20x | 0.73x |
+| 11 | 22 | 1 | 883.6 | 244.4 | 180.4 | 0.20x | 0.74x |
+| 11 | 22 | 2 | 887.5 | 244.5 | 181.7 | 0.20x | 0.74x |
 
 ### lisp-encoded stream: decoder comparison
 
-| C decode MiB/s | lisp decode MiB/s | lisp/C |
-|---------------:|-------------------:|--------:|
-| 675.6 | 37.5 | 0.06x |
+| C q | C decode MiB/s | lisp decode MiB/s | lisp/C |
+|----:|---------------:|-------------------:|--------:|
+| 11 | 1069.4 | 223.7 | 0.21x |
+
+## JSON — generated JSON records [fnv1a32=0DDFEAA9] (1.00 MiB)
+
+### compression
+
+| C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
+|----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
+| 11 | 22 | 0 | 142301 | 172764 | 1.214 | 0.8 | 0.8 | 1.5 | 1.87x | 1.88x |
+| 11 | 22 | 1 | 142301 | 172764 | 1.214 | 0.8 | 0.8 | 1.5 | 1.86x | 1.87x |
+| 11 | 22 | 2 | 142686 | 172764 | 1.211 | 0.8 | 0.8 | 1.5 | 1.86x | 1.87x |
+
+### decompression of the C stream
+
+| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
+|----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
+| 11 | 22 | 0 | 737.4 | 221.3 | 163.2 | 0.22x | 0.74x |
+| 11 | 22 | 1 | 738.6 | 225.2 | 164.0 | 0.22x | 0.73x |
+| 11 | 22 | 2 | 749.0 | 225.5 | 164.0 | 0.22x | 0.73x |
+
+### lisp-encoded stream: decoder comparison
+
+| C q | C decode MiB/s | lisp decode MiB/s | lisp/C |
+|----:|---------------:|-------------------:|--------:|
+| 11 | 1027.2 | 206.9 | 0.20x |
 
 ## Summary (geometric mean lisp/C, grouped by size/mode/lgwin/q)
 
 | size | mode | lgwin | C q | size (lisp/C) | comp core (lisp/C) | comp 1-shot (lisp/C) | decomp core (lisp/C) | decomp 1-shot (lisp/C) |
 |-----:|-----:|------:|----:|--------------:|-------------------:|---------------------:|---------------------:|-----------------------:|
-| 1.00 MiB | 0 | 22 | 11 | 1.180 | 1.24x | 1.28x | 0.08x | 0.48x |
-| 1.00 MiB | 1 | 22 | 11 | 1.180 | 1.20x | 1.26x | 0.08x | 0.49x |
-| 1.00 MiB | 2 | 22 | 11 | 1.180 | 1.16x | 1.24x | 0.10x | 0.52x |
+| 1.00 MiB | 0 | 22 | 11 | 1.204 | 1.47x | 1.52x | 0.33x | 1.48x |
+| 1.00 MiB | 1 | 22 | 11 | 1.204 | 1.48x | 1.51x | 0.33x | 1.85x |
+| 1.00 MiB | 2 | 22 | 11 | 1.202 | 1.47x | 1.51x | 0.33x | 1.85x |
 

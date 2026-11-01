@@ -3,7 +3,9 @@
   (:export #:octets #:to-octets
            #:brd #:make-brd #:rbit #:rbits #:r-align #:r-bytes #:r-eof-p
            #:peek-bits #:bits-available
-           #:bwr #:make-bwr #:wbits #:w-align #:w-bytes #:bwr-out))
+           #:brd-bytes #:brd-pos #:brd-end #:brd-acc #:brd-nbits #:%word-at
+           #:bwr #:make-bwr #:wbits #:w-align #:w-bytes #:bwr-out
+           #:bwr-pos #:bwr-result))
 (defpackage #:cl-brotli.lisp
   (:use #:cl)
   (:local-nicknames (#:b #:cl-brotli.lisp.bitio))
