@@ -420,15 +420,15 @@ considered so command copy lengths remain the base-word lengths."
                  -15)
             hmask)))
 
-#+sbcl
+#+(and sbcl x86-64 64-bit little-endian)
 (declaim (inline %trailing-zeros))
-#+sbcl
+#+(and sbcl x86-64 64-bit little-endian)
 (defun %trailing-zeros (x)
   (declare (type (unsigned-byte 64) x)
            (optimize (speed 3) (safety 0)))
   (sb-kernel:count-trailing-zeros x))
 
-#+sbcl
+#+(and sbcl x86-64 64-bit little-endian)
 (defun %match-len-sap (sap a b n)
   "Word-at-a-time match extension; A < B and A+MAXL < N, so 8-byte loads
 at both ends stay inside the vector.  On a mismatch inside a word, TZCNT
@@ -497,9 +497,9 @@ or NIL on other implementations."
                      (if sap (%hash4-sap sap i hmask) (%hash4 data i hmask)))
                    #-sbcl
                    (hash (i) (%hash4 data i hmask))
-                   #+sbcl
+                   #+(and sbcl x86-64 64-bit little-endian)
                    (mlen (a b) (%match-len-sap sap a b n))
-                   #-sbcl
+                   #-(and sbcl x86-64 64-bit little-endian)
                    (mlen (a b) (%match-len data a b n))
                    (ins (q h)
                      (let ((old (aref head h)))
