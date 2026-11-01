@@ -102,12 +102,26 @@
 (defun r-bytes (r n)
   (declare (type brd r) (type fixnum n) (optimize (speed 3) (safety 0)))
   (let ((out (make-array n :element-type '(unsigned-byte 8))))
-    (if (zerop (brd-nbits r))
-        (let ((start (brd-pos r)))
-          (unless (<= (+ start n) (brd-end r))
-            (error "brotli: end of input"))
-          (replace out (brd-bytes r) :start2 start :end2 (+ start n))
-          (incf (brd-pos r) n))
+    (if (zerop (mod (brd-nbits r) 8))
+        ;; Byte-aligned: drain whole bytes already in ACC, then bulk-copy.
+        (let* ((acc-bytes (ash (brd-nbits r) -3))
+               (take (min n acc-bytes))
+               (i 0))
+          (declare (type fixnum acc-bytes take i))
+          (loop while (< i take) do
+            (setf (aref out i) (logand (brd-acc r) #xff))
+            (setf (brd-acc r) (ash (brd-acc r) -8))
+            (incf i))
+          (decf (brd-nbits r) (* 8 take))
+          (when (< i n)
+            (let ((start (brd-pos r)) (count (- n i)))
+              (declare (type fixnum start count))
+              (unless (<= (+ start count) (brd-end r))
+                (error "brotli: end of input"))
+              (replace out (brd-bytes r) :start1 i :start2 start
+                       :end2 (+ start count))
+              (incf (brd-pos r) count)))
+          out)
         (dotimes (i n out)
           (if (>= (brd-nbits r) 8)
               (progn
@@ -118,8 +132,7 @@
                 (when (>= (brd-pos r) (brd-end r))
                   (error "brotli: end of input"))
                 (setf (aref out i) (aref (brd-bytes r) (brd-pos r)))
-                (incf (brd-pos r))))))
-    out))
+                (incf (brd-pos r))))))))
 
 (defstruct (bwr (:constructor make-bwr (&optional (capacity 1024))))
   ;; A simple array plus an explicit position: the old adjustable vector with

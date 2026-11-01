@@ -421,18 +421,32 @@ considered so command copy lengths remain the base-word lengths."
             hmask)))
 
 #+sbcl
+(declaim (inline %trailing-zeros))
+#+sbcl
+(defun %trailing-zeros (x)
+  (declare (type (unsigned-byte 64) x)
+           (optimize (speed 3) (safety 0)))
+  (sb-kernel:count-trailing-zeros x))
+
+#+sbcl
 (defun %match-len-sap (sap a b n)
   "Word-at-a-time match extension; A < B and A+MAXL < N, so 8-byte loads
-at both ends stay inside the vector."
+at both ends stay inside the vector.  On a mismatch inside a word, TZCNT
+finds the first differing byte in one step (the same trick as C Brotli's
+FindMatchLengthWithLimit)."
   (declare (type sb-sys:system-area-pointer sap)
            (type fixnum a b n)
            (optimize (speed 3) (safety 0)))
   (let ((len 0) (maxl (- n b)))
     (declare (type fixnum len maxl))
     (loop while (<= (+ len 8) maxl)
-          while (= (sb-sys:sap-ref-64 sap (+ a len))
-                   (sb-sys:sap-ref-64 sap (+ b len)))
-          do (incf len 8))
+          do (let ((x (logxor (sb-sys:sap-ref-64 sap (+ a len))
+                              (sb-sys:sap-ref-64 sap (+ b len)))))
+               (declare (type (unsigned-byte 64) x))
+               (unless (zerop x)
+                 (return-from %match-len-sap
+                   (+ len (ash (%trailing-zeros x) -3))))
+               (incf len 8)))
     (loop while (and (< len maxl)
                      (= (sb-sys:sap-ref-8 sap (+ a len))
                         (sb-sys:sap-ref-8 sap (+ b len))))
@@ -484,10 +498,7 @@ or NIL on other implementations."
                    #-sbcl
                    (hash (i) (%hash4 data i hmask))
                    #+sbcl
-                   (mlen (a b)
-                     (if sap
-                         (%match-len-sap sap a b n)
-                         (%match-len data a b n)))
+                   (mlen (a b) (%match-len-sap sap a b n))
                    #-sbcl
                    (mlen (a b) (%match-len data a b n))
                    (ins (q h)

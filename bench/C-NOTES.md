@@ -36,9 +36,11 @@ The q0 one-pass fragment path is the important one for our largest gap:
 Ported into cl-brotli:
 
 * match-skip for q0–q4 (`skip++ >> 5`);
-* SAP-based 64-bit match extension;
+* SAP-based 64-bit match extension with SBCL's `count-trailing-zeros`
+  (`tzcnt`/`bsf` VOP) finding the first differing byte in one step, matching
+  C's `FindMatchLengthWithLimit`;
 * flat command records, precomputed length/symbol tables, one hash per
-  position, 64-bit. This took q1–q4 from ~0.02–0.11x to 0.09–0.30x C speed.
+  position, 64-bit. This took q1–q4 from ~0.02–0.11x to 0.08–0.29x C speed.
 
 Not yet ported (the structural remainder):
 
@@ -63,6 +65,8 @@ Ported:
 
 * 64-bit reservoir (originally 4-byte refills);
 * 56-bit refill from a pinned input SAP;
+* a byte-aligned fast path in `r-bytes` so stored blocks do not fall back to
+  a per-byte copy when the wide refill leaves whole bytes in the accumulator;
 * typed Huffman/literal-tree arrays and precomputed context→tree maps;
 * preallocated match copies and 4× output growth.
 
@@ -74,3 +78,29 @@ Not yet ported:
 
 The remaining q0/q1 decode deficit is per-literal work, not refill or copying:
 profiles put ~60% in the literal decode loop, with copies around 15%.
+
+## sb-cpu-features and cl-newzlib
+
+`cl-newzlib` uses `sb-cpu-features` for more than one path:
+
+* `util.lisp` requires the bundled `sb-simd` at compile/load time, pushes
+  implementation-availability features, and pushes an AVX2-build feature only
+  when the build host itself supports AVX2 (to prevent SBCL from
+  constant-folding and executing AVX2 during compilation).
+* `simd.lisp` defines AVX2, SSE4.1, and scalar kernels and selects one through
+  `sb-cpu-features:define-cpu-dispatch`; selection happens once per operation,
+  not per inner-loop call.
+* `cpu-init.lisp` re-probes features and re-selects implementations at image
+  startup, so an image moved to another machine uses the new machine's ISA.
+* `pclmul-crc.lisp` uses the PCLMULQDQ flag plus a load-time self-test; CRC is
+  not applicable to Brotli (the format has no checksum).
+* `simd-adler.lisp` uses AVX2 for Adler-32 weighted sums.
+
+For Brotli the only comparable SIMD candidate is match extension. I tried an
+AVX2 kernel with `sb-simd` + `sb-cpu-features`: text q1–q4 regressed by
+10–25%, while HTML/JSON changed only a few percent. The scalar 64-bit + tzcnt
+path (`count-trailing-zeros`) was faster, and it is also what C Brotli uses
+(`BROTLI_TZCNT64`). The AVX2 path was therefore not retained. `sb-cpu-features`
+remains a reasonable optional dependency if a future SIMD copy or histogram
+kernel proves worthwhile, but the q0–q9 gap is dominated by per-symbol
+emission and command planning, not match extension.
