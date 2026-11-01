@@ -287,20 +287,37 @@ RB is the 4-slot ring plus a write index in slot 4."
                 (push (cons len idx) (gethash key h))))))
         (setf *dict-index* h))))
 
+(defparameter +dict-transforms+
+  (loop for tid from 0 below (length +transforms+)
+        for tr = (aref +transforms+ tid)
+        when (and (zerop (length (first tr)))
+                  (member (second tr) '(:identity :upper-first :upper-all))
+                  (zerop (length (third tr))))
+          collect tid)
+  "Dictionary transforms that preserve word length (identity and uppercase).")
+
 (defun dict-match-at (data p n)
-  "Longest base-dictionary word starting at DATA[P], as (values length index)."
+  "Longest dictionary word starting at DATA[P], as
+\(values length index transform-id).  Only length-preserving transforms are
+considered so command copy lengths remain the base-word lengths."
   (let ((cands (gethash (dict-key4 data p) (dict-index)))
-        (best-len 0) (best-idx nil)
+        (best-len 0) (best-idx nil) (best-tid 0)
         (dict (load-dict)))
     (dolist (cand cands)
       (let* ((len (car cand))
              (idx (cdr cand)))
         (when (and (<= len (- n p)) (> len best-len))
           (let ((off (+ (aref +doffset+ len) (* idx len))))
-            (when (loop for i below len
-                        always (= (aref data (+ p i)) (aref dict (+ off i))))
-              (setf best-len len best-idx idx))))))
-    (values best-len best-idx)))
+            (dolist (tid +dict-transforms+)
+              (let* ((base (subseq dict off (+ off len)))
+                     (word (if (zerop tid)
+                               base
+                               (apply-transform base (aref +transforms+ tid)))))
+                (when (loop for i below len
+                            always (= (aref data (+ p i)) (aref word i)))
+                  (setf best-len len best-idx idx best-tid tid)
+                  (return))))))))
+    (values best-len best-idx best-tid)))
 
 ;;; ---- LZ77 (greedy hash-chain match finder) ----------------------------
 
@@ -373,11 +390,12 @@ when DATA is one chunk of a multi-meta-block stream."
                                (incf p))))
                   (if (and use-dict
                            (or (null dict-limit) (< dict-used dict-limit)))
-                      (multiple-value-bind (dict-len dict-idx)
+                      (multiple-value-bind (dict-len dict-idx dict-tid)
                           (dict-match-at data p n)
                         (if (and (>= dict-len 9)
                                  (> dict-len best-len))
-                            (let ((dist (+ (min window (+ base-pos p)) 1 dict-idx)))
+                            (let ((dist (+ (min window (+ base-pos p)) 1 dict-idx
+                                           (* dict-tid (nwords dict-len)))))
                               (push (list (- p lit-start) lit-start dict-len dist t) cmds)
                               (incf dict-used)
                               (ins p)
