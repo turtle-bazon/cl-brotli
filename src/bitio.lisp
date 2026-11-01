@@ -12,26 +12,34 @@
   (bytes nil :type octets) (pos 0 :type fixnum) (end 0 :type fixnum)
   ;; Bit accumulator: ACC holds NBITS unconsumed bits, least-significant bit
   ;; first.  Loading whole bytes at a time avoids the old bit-by-bit loop.
-  (acc 0 :type fixnum) (nbits 0 :type fixnum))
+  (acc 0 :type (unsigned-byte 32)) (nbits 0 :type (integer 0 31)))
 
 (defun r-eof-p (r)
   (and (>= (brd-pos r) (brd-end r)) (zerop (brd-nbits r))))
 
+(defparameter +mask32+
+  (coerce (loop for i from 0 to 24 collect (1- (ash 1 i)))
+          '(simple-array fixnum (25))))
+
 (declaim (inline %fill-bits rbits rbit peek-bits bits-available))
 (defun %fill-bits (r n)
-  (declare (type brd r) (type fixnum n) (optimize (speed 3) (safety 0)))
+  (declare (type brd r) (type (integer 0 24) n)
+           (optimize (speed 3) (safety 0)))
   (loop while (< (brd-nbits r) n) do
     (when (>= (brd-pos r) (brd-end r))
       (error "brotli: end of input"))
     (setf (brd-acc r)
-          (logior (brd-acc r)
-                  (ash (aref (brd-bytes r) (brd-pos r)) (brd-nbits r))))
+          (the (unsigned-byte 32)
+               (logior (brd-acc r)
+                       (ash (aref (brd-bytes r) (brd-pos r))
+                            (the (integer 0 23) (brd-nbits r))))))
     (incf (brd-nbits r) 8)
     (incf (brd-pos r))))
 
 (defun rbits (r n)
   "Read N bits, LSB-first, as an integer."
-  (declare (type brd r) (type fixnum n) (optimize (speed 3) (safety 0)))
+  (declare (type brd r) (type (integer 0 24) n)
+           (optimize (speed 3) (safety 0)))
   (if (zerop n)
       0
       (progn
@@ -45,7 +53,8 @@
 
 (defun peek-bits (r n)
   "Return the next N bits without consuming them."
-  (declare (type brd r) (type fixnum n) (optimize (speed 3) (safety 0)))
+  (declare (type brd r) (type (integer 0 24) n)
+           (optimize (speed 3) (safety 0)))
   (if (zerop n)
       0
       (progn
@@ -54,11 +63,14 @@
 
 (defun bits-available (r)
   "Number of bits remaining, including bits already buffered in ACC."
-  (+ (brd-nbits r) (* 8 (- (brd-end r) (brd-pos r)))))
+  (declare (type brd r) (optimize (speed 3) (safety 0)))
+  (the fixnum (+ (brd-nbits r)
+                 (* 8 (- (brd-end r) (brd-pos r))))))
 
 (defun r-align (r)
   "Discard bits up to the next byte boundary."
   (let ((drop (mod (brd-nbits r) 8)))
+    (declare (type (integer 0 7) drop))
     (when (plusp drop)
       (setf (brd-acc r) (ash (brd-acc r) (- drop)))
       (decf (brd-nbits r) drop))))

@@ -27,13 +27,12 @@
         (t (berr "unsupported WBITS ~d" wbits))))
 
 ;;; ---- decompress -------------------------------------------------------
-(defun %out () (make-array 256 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0))
+(defun %out () (make-outbuf (make-array 256 :element-type '(unsigned-byte 8))))
 (defun %append (out src)
-  (let ((fp (fill-pointer out)) (n (length src)))
-    (when (> (+ fp n) (array-dimension out 0))
-      (adjust-array out (max (+ fp n) (* 2 (array-dimension out 0)))))
-    (setf (fill-pointer out) (+ fp n))
-    (replace out src :start1 fp)))
+  (let ((pos (outbuf-pos out)) (n (length src)))
+    (%grow out (+ pos n))
+    (replace (outbuf-data out) src :start1 pos)
+    (setf (outbuf-pos out) (+ pos n))))
 
 (defun decompress (input)
   "Decode a brotli stream (RFC 7932).  Returns OCTETS.  Handles uncompressed and
@@ -63,7 +62,8 @@ static dictionary span the whole stream."
                   (b:r-align r) (%append out (b:r-bytes r mlen)))
                  (t (decode-compressed-meta-block r out mlen window rb)))))))
         (when (= islast 1) (return-from blocks))))
-    (b:to-octets out)))
+    (let ((data (outbuf-data out)) (pos (outbuf-pos out)))
+      (if (= pos (length data)) data (subseq data 0 pos)))))
 
 ;;; ---- compress (uncompressed/stored meta-blocks) -----------------------
 (defconstant +mlen-max+ #xFFFFFF)   ; 6 nibbles
