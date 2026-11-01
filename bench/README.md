@@ -86,17 +86,17 @@ x86-64). Raw CSV files are in `bench/results/`.
 
 | dataset | pure size | C q5 size | C q11 size | pure/C q5 | pure/C q11 | pure comp MiB/s | C q11 core comp MiB/s | pure dec MiB/s | C q11 core dec MiB/s | C q11 one-shot dec MiB/s |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| text | 12218 | 11568 | 9702 | 1.056 | 1.259 | 5.0 | 6.4 | 125.0 | 408.5 | 46.9 |
-| html | 198383 | 193999 | 169361 | 1.023 | 1.171 | 0.5 | 0.3 | 8.6 | 214.3 | 52.6 |
-| json | 57985 | 57439 | 47684 | 1.010 | 1.216 | 1.6 | 0.3 | 23.8 | 580.0 | 68.2 |
-| source | 93132 | 91102 | 79992 | 1.022 | 1.164 | 1.2 | 0.6 | 17.9 | 260.9 | 50.0 |
-| binary | 309582 | 283510 | 251377 | 1.092 | 1.232 | 1.2 | 0.2 | 6.6 | 150.0 | 40.0 |
-| zeros | 13 | 13 | 14 | 1.000 | 0.929 | 10.9 | 14.7 | 902.5 | 428.5 | 20.8 |
-| random | 1048581 | 1048581 | 1048581 | 1.000 | 1.000 | 14.7 | 0.8 | 183.8 | 4098.1 | 32.3 |
-| periodic | 291 | 269 | 218 | 1.082 | 1.335 | 9.3 | 25.0 | 783.7 | 461.5 | 32.3 |
-| pattern | 306 | 284 | 278 | 1.077 | 1.101 | 8.9 | 22.7 | 753.0 | 328.9 | 32.3 |
-| dict | 57 | 47 | 31 | 1.213 | 1.839 | 9.3 | 20.8 | 868.0 | 367.6 | 21.7 |
-| utf8 | 293 | 262 | 226 | 1.118 | 1.296 | 7.6 | 19.2 | 328.9 | 347.2 | 29.4 |
+| text | 12218 | 11568 | 9702 | 1.056 | 1.259 | 5.2 | 6.2 | 96.8 | 368.7 | 58.8 |
+| html | 198383 | 193999 | 169361 | 1.023 | 1.171 | 0.5 | 0.3 | 10.9 | 240.4 | 51.7 |
+| json | 57985 | 57439 | 47684 | 1.010 | 1.216 | 1.5 | 0.3 | 28.8 | 568.1 | 66.7 |
+| source | 93132 | 91102 | 79992 | 1.022 | 1.164 | 1.5 | 0.6 | 29.4 | 328.9 | 62.5 |
+| binary | 309582 | 283510 | 251377 | 1.092 | 1.232 | 1.2 | 0.2 | 5.6 | 156.2 | 43.5 |
+| zeros | 13 | 13 | 14 | 1.000 | 0.929 | 10.0 | 16.7 | 347.2 | 400.0 | 26.8 |
+| random | 1048581 | 1048581 | 1048581 | 1.000 | 1.000 | 15.6 | 0.7 | 223.2 | 3906.0 | 27.8 |
+| periodic | 291 | 269 | 218 | 1.082 | 1.335 | 8.9 | 20.0 | 230.8 | 480.7 | 35.7 |
+| pattern | 306 | 284 | 278 | 1.077 | 1.101 | 10.0 | 20.8 | 375.0 | 432.5 | 35.7 |
+| dict | 57 | 47 | 31 | 1.213 | 1.839 | 9.6 | 25.0 | 868.0 | 367.6 | 25.9 |
+| utf8 | 293 | 262 | 226 | 1.118 | 1.296 | 10.0 | 22.7 | 811.6 | 416.6 | 31.2 |
 
 Geometric mean pure/C size ratio at q11: **1.201** excluding `periodic`
 (1.213 including it). The pure encoder's ratio is roughly C quality
@@ -108,21 +108,21 @@ Geometric mean pure/C size ratio at q11: **1.201** excluding `periodic`
 |---:|---:|---:|---:|
 | 0 | 0.353 | 0.01x | 0.07x |
 | 1 | 0.404 | 0.01x | 0.14x |
-| 2 | 0.856 | 0.02x | 0.24x |
-| 3 | 0.971 | 0.02x | 0.25x |
-| 4 | 0.999 | 0.04x | 0.22x |
-| 5 | 1.059 | 0.04x | 0.28x |
-| 6 | 1.065 | 0.04x | 0.25x |
-| 7 | 1.065 | 0.05x | 0.23x |
-| 8 | 1.068 | 0.05x | 0.23x |
-| 9 | 1.073 | 0.12x | 0.24x |
-| 10 | 1.070 | 1.46x | 0.21x |
-| 11 | 1.201 | 1.36x | 0.29x |
+| 2 | 0.856 | 0.02x | 0.25x |
+| 3 | 0.971 | 0.02x | 0.28x |
+| 4 | 0.999 | 0.04x | 0.20x |
+| 5 | 1.059 | 0.04x | 0.29x |
+| 6 | 1.065 | 0.04x | 0.21x |
+| 7 | 1.065 | 0.05x | 0.26x |
+| 8 | 1.068 | 0.05x | 0.21x |
+| 9 | 1.073 | 0.12x | 0.23x |
+| 10 | 1.070 | 1.46x | 0.20x |
+| 11 | 1.201 | 1.45x | 0.24x |
 
 Pure compression is about **25× slower than C q4–q5**, but often faster than C
 q11 on literal-heavy data because C q11 spends much more time parsing. Pure
 decompression is about **4–5× slower than the C core** on typical data and
-about **17–19× slower on literal-heavy binary/HTML/JSON**. The bit-reader and
+about **20–28× slower on literal-heavy binary/HTML/JSON**. The bit-reader and
 Huffman-table changes improved pure decode throughput by roughly 1.5–3× over
 the original implementation.
 
@@ -187,7 +187,7 @@ run only on SBCL 2.6.9.
 
 * Encoder ratio is still roughly C q4–q5; closing the q11 gap needs context
   modeling, block splitting, dictionary transforms, and better parsing.
-* Pure decoding is still ~17–20× slower than the C core on literal-heavy
+* Pure decoding is still ~20–28× slower than the C core on literal-heavy
   binary/HTML/JSON; highly compressible streams are near parity or faster.
 * C q11 on 17 MiB random data remains the slowest benchmark case (~0.6 MiB/s).
 

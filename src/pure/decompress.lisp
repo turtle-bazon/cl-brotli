@@ -122,13 +122,16 @@ distance ring buffer (persists across the stream)."
            (cmapd (if (>= ntreesd 2) (read-context-map r (* 4 nbl-d) ntreesd)
                       (make-array (* 4 nbl-d) :initial-element 0)))
            (htreel (make-array ntreesl)) (htreei (make-array nbl-i)) (htreed (make-array ntreesd))
-           (dist-alpha (+ 16 ndirect (ash 48 npostfix))))
+           (dist-alpha (+ 16 ndirect (ash 48 npostfix)))
+           (single-lit-tree nil) (single-dist-tree nil))
        (dotimes (i ntreesl)
          (setf (aref htreel i) (read-prefix-code r 256)))
        (dotimes (i nbl-i)
          (setf (aref htreei i) (read-prefix-code r 704)))
        (dotimes (i ntreesd)
          (setf (aref htreed i) (read-prefix-code r dist-alpha)))
+       (when (= ntreesl 1) (setf single-lit-tree (aref htreel 0)))
+       (when (= ntreesd 1) (setf single-dist-tree (aref htreed 0)))
       ;; command loop
       (loop while (< (fill-pointer out) target) do
         (unless (= 1 (blk-ntypes blkI))
@@ -141,15 +144,20 @@ distance ring buffer (persists across the stream)."
                (ilen (+ (aref +ins-base+ icode) (b:rbits r (aref +ins-bits+ icode))))
                (clen (+ (aref +cpy-base+ ccode) (b:rbits r (aref +cpy-bits+ ccode)))))
           ;; insert literals
-          (dotimes (k ilen)
-            (unless (= 1 (blk-ntypes blkL))
-              (blk-maybe-switch r blkL))
-            (let* ((fp (fill-pointer out))
-                   (p1 (if (> fp 0) (aref out (1- fp)) 0))
-                   (p2 (if (> fp 1) (aref out (- fp 2)) 0))
-                   (cid (lit-context (aref cmode (blk-type blkL)) p1 p2))
-                   (tree (aref htreel (aref cmapl (+ (* 64 (blk-type blkL)) cid)))))
-              (out-push out (read-huff r tree))))
+          (if single-lit-tree
+              (dotimes (k ilen)
+                (unless (= 1 (blk-ntypes blkL))
+                  (blk-maybe-switch r blkL))
+                (out-push out (read-huff r single-lit-tree)))
+              (dotimes (k ilen)
+                (unless (= 1 (blk-ntypes blkL))
+                  (blk-maybe-switch r blkL))
+                (let* ((fp (fill-pointer out))
+                       (p1 (if (> fp 0) (aref out (1- fp)) 0))
+                       (p2 (if (> fp 1) (aref out (- fp 2)) 0))
+                       (cid (lit-context (aref cmode (blk-type blkL)) p1 p2))
+                       (tree (aref htreel (aref cmapl (+ (* 64 (blk-type blkL)) cid)))))
+                  (out-push out (read-huff r tree)))))
           (when (>= (fill-pointer out) target) (return))
           ;; distance — DCODE 0 (explicit or implicit dist0) reuses the last
           ;; distance without pushing; all other codes compute + push.
@@ -159,8 +167,10 @@ distance ring buffer (persists across the stream)."
                 (progn
                   (unless (= 1 (blk-ntypes blkD))
                     (blk-maybe-switch r blkD))
-                  (let* ((cidd (cond ((= clen 2) 0) ((= clen 3) 1) ((= clen 4) 2) (t 3)))
-                         (dtree (aref htreed (aref cmapd (+ (* 4 (blk-type blkD)) cidd)))))
+                  (let ((dtree (or single-dist-tree
+                                   (let* ((cidd (cond ((= clen 2) 0) ((= clen 3) 1)
+                                                      ((= clen 4) 2) (t 3))))
+                                     (aref htreed (aref cmapd (+ (* 4 (blk-type blkD)) cidd)))))))
                     (setf dcode (read-huff r dtree))
                     (cond
                       ((< dcode 16)
