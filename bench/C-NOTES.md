@@ -104,3 +104,28 @@ path (`count-trailing-zeros`) was faster, and it is also what C Brotli uses
 remains a reasonable optional dependency if a future SIMD copy or histogram
 kernel proves worthwhile, but the q0–q9 gap is dominated by per-symbol
 emission and command planning, not match extension.
+
+## Is "beat C at every q0-q9 cell" reachable?
+
+Measured on the 8-core/16-thread Ryzen 7 3700X with chunk-parallel
+compression (each chunk compressed independently; `cl-brotli:compress`, level-
+matched):
+
+| case | 1 thread | 4 chunks | 8 chunks | 16 chunks | C |
+|---|---:|---:|---:|---:|---:|
+| HTML q0, MiB/s | 30.8 | 80.6 | 94.3 | 82.0 | ~493 |
+| JSON q0, MiB/s | 52.7 | 35.1 | 149.9 | 101.9 | ~663 |
+| HTML q1, MiB/s | 34.7 | 57.3 | 92.1 | 87.9 | ~335 |
+| text q1, MiB/s | 253.1 | 235.0 | 125.1 | 109.3 | ~1858 |
+
+Scaling saturates around 3x, not 16x (SMT, allocation/GC contention, thread
+spawn). Even an ideal 16x on HTML q0 would only reach C's single-thread
+throughput before overhead. The ratio cost is also disqualifying for text:
+summing independently compressed chunks was 4.01x the single-stream size at
+4 chunks, 8.00x at 8, and 16.00x at 16 because cross-chunk matches vanish.
+
+Conclusion: beating C at every q0-q9 cell is not achievable here with
+single-threaded portable Lisp, and chunk parallelism does not rescue it
+without destroying text ratio. The realistic wins remain the default q11
+path, q11 round-trip, highly compressible decode, and API-level one-shot
+(where the CFFI wrapper's allocation dominates).
