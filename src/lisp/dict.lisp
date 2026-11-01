@@ -1,5 +1,5 @@
 ;;;; src/dict.lisp — brotli static dictionary + word transforms (RFC 7932 §8).
-(in-package #:cl-brotli.pure)
+(in-package #:cl-brotli.lisp)
 
 (defparameter +ndbits+ #(0 0 0 0 10 10 11 11 10 10 10 10 10 9 9 8 7 7 8 7 7 6 6 5 5))
 (defun nwords (len) (if (>= len 4) (ash 1 (aref +ndbits+ len)) 0))

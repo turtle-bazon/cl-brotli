@@ -5,7 +5,7 @@
 ;;;; the per-stream distance ring buffer, and COMPRESS (stored meta-blocks).
 ;;;; DECOMPRESS is a full RFC 7932 decoder; verified byte-for-byte against the
 ;;;; brotli reference (node/python).
-(in-package #:cl-brotli.pure)
+(in-package #:cl-brotli.lisp)
 
 (define-condition brotli-error (error)
   ((msg :initarg :msg :reader brotli-error-msg))

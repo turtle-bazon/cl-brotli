@@ -1,5 +1,5 @@
 (defsystem "cl-brotli-tests"
-  :description "Tests for cl-brotli (pure and reference differential)"
+  :description "Tests for cl-brotli (Lisp and reference differential)"
   :version "0.0.1.0"
   :author "pesekey"
   :license "GPL-3.0"

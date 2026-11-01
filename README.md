@@ -1,6 +1,6 @@
 # cl-brotli
 
-Pure Common Lisp Brotli codec (RFC 7932), no FFI.
+Common Lisp Brotli codec (RFC 7932), no FFI.
 
 Version: `0.0.1.0`
 
@@ -37,10 +37,10 @@ Roswell SBCL 2.6.9 via `bench/run.sh`.
 
 `cl-brotli-reference` is a test-only system that wraps the system Brotli C
 library through CFFI. It is used as an oracle for differential testing; the
-`cl-brotli` system itself is pure Common Lisp.
+`cl-brotli` system itself is Common Lisp.
 
 ## Attribution
 
-The pure implementation is based on the MIT-licensed `brotli-pure` project by
+The Lisp implementation is based on the MIT-licensed `brotli-pure` project by
 ynniv, adapted and extended for this tree under GPL-3.0. The original MIT
 notice is preserved in `NOTICE`.

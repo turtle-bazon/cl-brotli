@@ -1,5 +1,5 @@
 (defsystem "cl-brotli"
-  :description "Pure Common Lisp Brotli codec (RFC 7932)"
+  :description "Common Lisp Brotli codec (RFC 7932)"
   :version "0.0.1.0"
   :author "pesekey"
   :license "GPL-3.0"
@@ -8,7 +8,7 @@
   :serial t
   :components ((:module "src"
                 :serial t
-                :components ((:module "pure"
+                :components ((:module "lisp"
                               :serial t
                               :components ((:file "packages")
                                            (:file "bitio")

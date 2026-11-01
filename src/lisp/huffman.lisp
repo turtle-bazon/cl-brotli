@@ -1,6 +1,6 @@
 ;;;; src/huffman.lisp — canonical prefix (Huffman) codes, read LSB-first
 ;;;; (DEFLATE/zlib convention).  Simple + complex code descriptions (RFC 7932 §3).
-(in-package #:cl-brotli.pure)
+(in-package #:cl-brotli.lisp)
 
 (defconstant +max-bits+ 15)
 (defconstant +huff-table-bits+ 10)

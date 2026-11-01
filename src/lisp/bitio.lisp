@@ -1,6 +1,6 @@
 ;;;; src/bitio.lisp — brotli bit I/O: LSB-first (low bit of each byte first),
 ;;;; same convention as DEFLATE.
-(in-package #:cl-brotli.pure.bitio)
+(in-package #:cl-brotli.lisp.bitio)
 (deftype octets () '(simple-array (unsigned-byte 8) (*)))
 (defun to-octets (s)
   (cond ((typep s 'octets) s)

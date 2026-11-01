@@ -11,159 +11,159 @@ CPU:   Intel Xeon Processor (Skylake, IBRS, no TSX)
 
 ### compression
 
-| C q | lgwin | mode | C size | pure size | pure/C size | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+| C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 11569 | 11845 | 1.024 | 222.2 | 40.0 | 7.1 | 0.03x | 0.18x |
-| 11 | 22 | 0 | 9702 | 11845 | 1.221 | 17.2 | 12.5 | 7.1 | 0.41x | 0.57x |
+| 5 | 22 | 0 | 11569 | 11686 | 1.010 | 250.0 | 52.6 | 5.7 | 0.02x | 0.11x |
+| 11 | 22 | 0 | 9702 | 11686 | 1.204 | 12.3 | 11.9 | 5.7 | 0.47x | 0.48x |
 
 ### decompression of the C stream
 
-| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 400.0 | 41.7 | 200.0 | 0.50x | 4.80x |
-| 11 | 22 | 0 | 375.0 | 47.6 | 363.6 | 0.97x | 7.64x |
+| 5 | 22 | 0 | 571.4 | 40.0 | 352.9 | 0.62x | 8.82x |
+| 11 | 22 | 0 | 428.5 | 43.5 | 333.3 | 0.78x | 7.67x |
 
-### pure-encoded stream: decoder comparison
+### lisp-encoded stream: decoder comparison
 
-| C decode MiB/s | pure decode MiB/s | pure/C |
+| C decode MiB/s | lisp decode MiB/s | lisp/C |
 |---------------:|-------------------:|--------:|
-| 444.4 | 444.4 | 1.00x |
+| 428.5 | 363.6 | 0.85x |
 
   SOURCE @ 4.00 MiB
 ## SOURCE — cl-newzlib + pesekey source (stable corpus) (4.00 MiB)
 
 ### compression
 
-| C q | lgwin | mode | C size | pure size | pure/C size | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+| C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 91103 | 92803 | 1.019 | 111.1 | 33.3 | 3.8 | 0.03x | 0.11x |
-| 11 | 22 | 0 | 79992 | 92803 | 1.160 | 2.4 | 2.4 | 3.8 | 1.56x | 1.57x |
+| 5 | 22 | 0 | 91103 | 90741 | 0.996 | 125.0 | 32.3 | 2.2 | 0.02x | 0.07x |
+| 11 | 22 | 0 | 79992 | 90741 | 1.134 | 2.5 | 2.2 | 2.2 | 0.87x | 0.97x |
 
 ### decompression of the C stream
 
-| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 545.4 | 47.6 | 66.7 | 0.12x | 1.40x |
-| 11 | 22 | 0 | 500.0 | 71.4 | 62.5 | 0.13x | 0.88x |
+| 5 | 22 | 0 | 461.5 | 47.6 | 76.9 | 0.17x | 1.62x |
+| 11 | 22 | 0 | 400.0 | 71.4 | 76.9 | 0.19x | 1.08x |
 
-### pure-encoded stream: decoder comparison
+### lisp-encoded stream: decoder comparison
 
-| C decode MiB/s | pure decode MiB/s | pure/C |
+| C decode MiB/s | lisp decode MiB/s | lisp/C |
 |---------------:|-------------------:|--------:|
-| 363.6 | 90.9 | 0.25x |
+| 400.0 | 111.1 | 0.28x |
 
   RANDOM @ 4.00 MiB
 ## RANDOM — generated xorshift32 bytes (4.00 MiB)
 
 ### compression
 
-| C q | lgwin | mode | C size | pure size | pure/C size | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+| C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 4194320 | 4194309 | 1.000 | 29.4 | 19.6 | 14.9 | 0.51x | 0.76x |
-| 11 | 22 | 0 | 4194320 | 4194309 | 1.000 | 0.6 | 0.6 | 14.9 | 22.99x | 23.07x |
+| 5 | 22 | 0 | 4194320 | 4194309 | 1.000 | 55.6 | 25.0 | 17.5 | 0.32x | 0.70x |
+| 11 | 22 | 0 | 4194320 | 4194309 | 1.000 | 0.7 | 0.7 | 17.5 | 25.60x | 24.81x |
 
 ### decompression of the C stream
 
-| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 1499.9 | 38.5 | 250.0 | 0.17x | 6.50x |
-| 11 | 22 | 0 | 1834.8 | 37.0 | 181.8 | 0.10x | 4.91x |
+| 5 | 22 | 0 | 1911.9 | 40.0 | 285.7 | 0.15x | 7.14x |
+| 11 | 22 | 0 | 2132.1 | 47.6 | 250.0 | 0.12x | 5.25x |
 
-### pure-encoded stream: decoder comparison
+### lisp-encoded stream: decoder comparison
 
-| C decode MiB/s | pure decode MiB/s | pure/C |
+| C decode MiB/s | lisp decode MiB/s | lisp/C |
 |---------------:|-------------------:|--------:|
-| 2984.9 | 307.7 | 0.10x |
+| 2999.8 | 352.9 | 0.12x |
 
   PERIODIC @ 4.00 MiB
 ## PERIODIC — 0..255 ramp repeated (4.00 MiB)
 
 ### compression
 
-| C q | lgwin | mode | C size | pure size | pure/C size | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+| C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 269 | 291 | 1.082 | 428.5 | 55.6 | 12.5 | 0.03x | 0.22x |
-| 11 | 22 | 0 | 218 | 291 | 1.335 | 17.5 | 13.9 | 12.5 | 0.71x | 0.90x |
+| 5 | 22 | 0 | 269 | 291 | 1.082 | 500.0 | 62.5 | 9.8 | 0.02x | 0.16x |
+| 11 | 22 | 0 | 218 | 291 | 1.335 | 28.6 | 15.6 | 9.8 | 0.34x | 0.63x |
 
 ### decompression of the C stream
 
-| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 461.5 | 35.7 | 444.4 | 0.96x | 12.44x |
-| 11 | 22 | 0 | 461.5 | 31.2 | 307.7 | 0.67x | 9.85x |
+| 5 | 22 | 0 | 428.5 | 38.5 | 545.4 | 1.27x | 14.18x |
+| 11 | 22 | 0 | 600.0 | 38.5 | 500.0 | 0.83x | 13.00x |
 
-### pure-encoded stream: decoder comparison
+### lisp-encoded stream: decoder comparison
 
-| C decode MiB/s | pure decode MiB/s | pure/C |
+| C decode MiB/s | lisp decode MiB/s | lisp/C |
 |---------------:|-------------------:|--------:|
-| 375.0 | 600.0 | 1.60x |
+| 600.0 | 666.6 | 1.11x |
 
   PATTERN @ 4.00 MiB
 ## PATTERN — 256-byte pseudo-random pattern repeated (4.00 MiB)
 
 ### compression
 
-| C q | lgwin | mode | C size | pure size | pure/C size | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+| C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 284 | 307 | 1.081 | 375.0 | 43.5 | 11.1 | 0.03x | 0.26x |
-| 11 | 22 | 0 | 278 | 307 | 1.104 | 21.3 | 12.8 | 11.1 | 0.52x | 0.87x |
+| 5 | 22 | 0 | 284 | 307 | 1.081 | 400.0 | 58.8 | 9.4 | 0.02x | 0.16x |
+| 11 | 22 | 0 | 278 | 307 | 1.104 | 22.7 | 15.2 | 9.4 | 0.42x | 0.62x |
 
 ### decompression of the C stream
 
-| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 444.4 | 30.3 | 428.5 | 0.96x | 14.14x |
-| 11 | 22 | 0 | 333.3 | 30.3 | 400.0 | 1.20x | 13.20x |
+| 5 | 22 | 0 | 461.5 | 33.3 | 428.5 | 0.93x | 12.86x |
+| 11 | 22 | 0 | 545.4 | 40.0 | 400.0 | 0.73x | 10.00x |
 
-### pure-encoded stream: decoder comparison
+### lisp-encoded stream: decoder comparison
 
-| C decode MiB/s | pure decode MiB/s | pure/C |
+| C decode MiB/s | lisp decode MiB/s | lisp/C |
 |---------------:|-------------------:|--------:|
-| 363.6 | 521.7 | 1.43x |
+| 400.0 | 428.5 | 1.07x |
 
   TEXT @ 16.00 MiB
 ## TEXT — /usr/share/common-licenses/GPL-3 (16.00 MiB)
 
 ### compression
 
-| C q | lgwin | mode | C size | pure size | pure/C size | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+| C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 11626 | 11845 | 1.019 | 363.6 | 38.8 | 6.7 | 0.02x | 0.17x |
-| 11 | 22 | 0 | 9715 | 11845 | 1.219 | 15.8 | 9.8 | 6.7 | 0.43x | 0.69x |
+| 5 | 22 | 0 | 11626 | 11686 | 1.005 | 363.6 | 49.4 | 4.9 | 0.01x | 0.10x |
+| 11 | 22 | 0 | 9715 | 11686 | 1.203 | 16.6 | 10.4 | 4.9 | 0.30x | 0.47x |
 
 ### decompression of the C stream
 
-| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 500.0 | 85.1 | 363.6 | 0.73x | 4.27x |
-| 11 | 22 | 0 | 400.0 | 72.7 | 444.4 | 1.11x | 6.11x |
+| 5 | 22 | 0 | 500.0 | 93.0 | 400.0 | 0.80x | 4.30x |
+| 11 | 22 | 0 | 444.4 | 71.4 | 333.3 | 0.75x | 4.67x |
 
-### pure-encoded stream: decoder comparison
+### lisp-encoded stream: decoder comparison
 
-| C decode MiB/s | pure decode MiB/s | pure/C |
+| C decode MiB/s | lisp decode MiB/s | lisp/C |
 |---------------:|-------------------:|--------:|
-| 500.0 | 421.0 | 0.84x |
+| 444.4 | 444.4 | 1.00x |
 
   SOURCE @ 16.00 MiB
 ## SOURCE — cl-newzlib + pesekey source (stable corpus) (16.00 MiB)
 
 ### compression
 
-| C q | lgwin | mode | C size | pure size | pure/C size | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+| C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 91160 | 92803 | 1.018 | 166.7 | 37.0 | 5.4 | 0.03x | 0.15x |
-| 11 | 22 | 0 | 80005 | 92803 | 1.160 | 5.9 | 5.7 | 5.4 | 0.92x | 0.95x |
+| 5 | 22 | 0 | 91160 | 90741 | 0.995 | 266.6 | 51.9 | 3.9 | 0.01x | 0.07x |
+| 11 | 22 | 0 | 80005 | 90741 | 1.134 | 6.7 | 6.2 | 3.9 | 0.58x | 0.62x |
 
 ### decompression of the C stream
 
-| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 500.0 | 83.3 | 173.9 | 0.35x | 2.09x |
-| 11 | 22 | 0 | 500.0 | 100.0 | 210.5 | 0.42x | 2.11x |
+| 5 | 22 | 0 | 571.4 | 97.6 | 181.8 | 0.32x | 1.86x |
+| 11 | 22 | 0 | 363.6 | 72.7 | 200.0 | 0.55x | 2.75x |
 
-### pure-encoded stream: decoder comparison
+### lisp-encoded stream: decoder comparison
 
-| C decode MiB/s | pure decode MiB/s | pure/C |
+| C decode MiB/s | lisp decode MiB/s | lisp/C |
 |---------------:|-------------------:|--------:|
 | 500.0 | 210.5 | 0.42x |
 
@@ -172,193 +172,193 @@ CPU:   Intel Xeon Processor (Skylake, IBRS, no TSX)
 
 ### compression
 
-| C q | lgwin | mode | C size | pure size | pure/C size | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+| C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 16777257 | 16777224 | 1.000 | 40.8 | 19.4 | 15.8 | 0.39x | 0.81x |
-| 11 | 22 | 0 | 16777268 | 16777224 | 1.000 | 0.6 | 0.5 | 15.8 | 28.49x | 29.30x |
+| 5 | 22 | 0 | 16777257 | 16777224 | 1.000 | 49.4 | 25.3 | 16.5 | 0.33x | 0.65x |
+| 11 | 22 | 0 | 16777268 | 16777224 | 1.000 | 0.6 | 0.6 | 16.5 | 27.20x | 28.86x |
 
 ### decompression of the C stream
 
-| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 1333.3 | 35.7 | 210.5 | 0.16x | 5.89x |
-| 11 | 22 | 0 | 1999.9 | 53.3 | 166.7 | 0.08x | 3.13x |
+| 5 | 22 | 0 | 1999.9 | 40.8 | 235.3 | 0.12x | 5.76x |
+| 11 | 22 | 0 | 1999.9 | 47.6 | 166.7 | 0.08x | 3.50x |
 
-### pure-encoded stream: decoder comparison
+### lisp-encoded stream: decoder comparison
 
-| C decode MiB/s | pure decode MiB/s | pure/C |
+| C decode MiB/s | lisp decode MiB/s | lisp/C |
 |---------------:|-------------------:|--------:|
-| 2999.8 | 250.0 | 0.08x |
+| 2999.8 | 200.0 | 0.07x |
 
   PERIODIC @ 16.00 MiB
 ## PERIODIC — 0..255 ramp repeated (16.00 MiB)
 
 ### compression
 
-| C q | lgwin | mode | C size | pure size | pure/C size | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+| C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 327 | 291 | 0.890 | 333.3 | 46.0 | 10.3 | 0.03x | 0.22x |
-| 11 | 22 | 0 | 232 | 291 | 1.254 | 12.7 | 10.9 | 10.3 | 0.81x | 0.95x |
+| 5 | 22 | 0 | 327 | 291 | 0.890 | 444.4 | 62.5 | 9.9 | 0.02x | 0.16x |
+| 11 | 22 | 0 | 232 | 291 | 1.254 | 15.7 | 11.0 | 9.9 | 0.63x | 0.90x |
 
 ### decompression of the C stream
 
-| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 666.6 | 78.4 | 500.0 | 0.75x | 6.37x |
-| 11 | 22 | 0 | 400.0 | 61.5 | 333.3 | 0.83x | 5.42x |
+| 5 | 22 | 0 | 571.4 | 70.2 | 363.6 | 0.64x | 5.18x |
+| 11 | 22 | 0 | 400.0 | 60.6 | 333.3 | 0.83x | 5.50x |
 
-### pure-encoded stream: decoder comparison
+### lisp-encoded stream: decoder comparison
 
-| C decode MiB/s | pure decode MiB/s | pure/C |
+| C decode MiB/s | lisp decode MiB/s | lisp/C |
 |---------------:|-------------------:|--------:|
-| 500.0 | 444.4 | 0.89x |
+| 444.4 | 413.8 | 0.93x |
 
   PATTERN @ 16.00 MiB
 ## PATTERN — 256-byte pseudo-random pattern repeated (16.00 MiB)
 
 ### compression
 
-| C q | lgwin | mode | C size | pure size | pure/C size | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+| C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 297 | 307 | 1.034 | 363.6 | 47.1 | 10.5 | 0.03x | 0.22x |
-| 11 | 22 | 0 | 291 | 307 | 1.055 | 16.4 | 10.7 | 10.5 | 0.64x | 0.98x |
+| 5 | 22 | 0 | 297 | 307 | 1.034 | 363.6 | 54.8 | 10.7 | 0.03x | 0.20x |
+| 11 | 22 | 0 | 291 | 307 | 1.055 | 17.8 | 10.9 | 10.7 | 0.60x | 0.98x |
 
 ### decompression of the C stream
 
-| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 666.6 | 67.8 | 444.4 | 0.67x | 6.56x |
-| 11 | 22 | 0 | 444.4 | 58.8 | 363.6 | 0.82x | 6.18x |
+| 5 | 22 | 0 | 615.3 | 74.1 | 444.4 | 0.72x | 6.00x |
+| 11 | 22 | 0 | 666.6 | 71.4 | 400.0 | 0.60x | 5.60x |
 
-### pure-encoded stream: decoder comparison
+### lisp-encoded stream: decoder comparison
 
-| C decode MiB/s | pure decode MiB/s | pure/C |
+| C decode MiB/s | lisp decode MiB/s | lisp/C |
 |---------------:|-------------------:|--------:|
-| 444.4 | 413.8 | 0.93x |
+| 571.4 | 571.4 | 1.00x |
 
   TEXT @ 17.00 MiB
 ## TEXT — /usr/share/common-licenses/GPL-3 (17.00 MiB)
 
 ### compression
 
-| C q | lgwin | mode | C size | pure size | pure/C size | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+| C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 11683 | 11858 | 1.015 | 354.1 | 48.3 | 6.8 | 0.02x | 0.14x |
-| 11 | 22 | 0 | 9728 | 11858 | 1.219 | 15.8 | 11.4 | 6.8 | 0.43x | 0.59x |
+| 5 | 22 | 0 | 11683 | 11699 | 1.001 | 386.3 | 44.3 | 6.0 | 0.02x | 0.13x |
+| 11 | 22 | 0 | 9728 | 11699 | 1.203 | 15.0 | 10.5 | 6.0 | 0.40x | 0.57x |
 
 ### decompression of the C stream
 
-| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 472.2 | 74.6 | 184.8 | 0.39x | 2.48x |
-| 11 | 22 | 0 | 472.2 | 90.4 | 223.7 | 0.47x | 2.47x |
+| 5 | 22 | 0 | 425.0 | 85.0 | 236.1 | 0.56x | 2.78x |
+| 11 | 22 | 0 | 425.0 | 73.3 | 236.1 | 0.56x | 3.22x |
 
-### pure-encoded stream: decoder comparison
+### lisp-encoded stream: decoder comparison
 
-| C decode MiB/s | pure decode MiB/s | pure/C |
+| C decode MiB/s | lisp decode MiB/s | lisp/C |
 |---------------:|-------------------:|--------:|
-| 472.2 | 250.0 | 0.53x |
+| 607.1 | 303.6 | 0.50x |
 
   SOURCE @ 17.00 MiB
 ## SOURCE — cl-newzlib + pesekey source (stable corpus) (17.00 MiB)
 
 ### compression
 
-| C q | lgwin | mode | C size | pure size | pure/C size | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+| C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 91217 | 92816 | 1.018 | 223.7 | 40.5 | 4.9 | 0.02x | 0.12x |
-| 11 | 22 | 0 | 80018 | 92816 | 1.160 | 5.7 | 5.5 | 4.9 | 0.87x | 0.90x |
+| 5 | 22 | 0 | 91217 | 90754 | 0.995 | 283.3 | 40.5 | 4.2 | 0.01x | 0.10x |
+| 11 | 22 | 0 | 80018 | 90754 | 1.134 | 6.4 | 5.4 | 4.2 | 0.66x | 0.78x |
 
 ### decompression of the C stream
 
-| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 531.2 | 81.7 | 163.5 | 0.31x | 2.00x |
-| 11 | 22 | 0 | 425.0 | 68.5 | 163.5 | 0.38x | 2.38x |
+| 5 | 22 | 0 | 607.1 | 73.3 | 146.5 | 0.24x | 2.00x |
+| 11 | 22 | 0 | 531.2 | 98.8 | 125.0 | 0.24x | 1.26x |
 
-### pure-encoded stream: decoder comparison
+### lisp-encoded stream: decoder comparison
 
-| C decode MiB/s | pure decode MiB/s | pure/C |
+| C decode MiB/s | lisp decode MiB/s | lisp/C |
 |---------------:|-------------------:|--------:|
-| 531.2 | 157.4 | 0.30x |
+| 472.2 | 212.5 | 0.45x |
 
   RANDOM @ 17.00 MiB
 ## RANDOM — generated xorshift32 bytes (17.00 MiB)
 
 ### compression
 
-| C q | lgwin | mode | C size | pure size | pure/C size | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+| C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 17825836 | 17825801 | 1.000 | 40.1 | 19.7 | 18.4 | 0.46x | 0.94x |
-| 11 | 22 | 0 | 17825848 | 17825801 | 1.000 | 0.5 | 0.5 | 18.4 | 34.78x | 34.77x |
+| 5 | 22 | 0 | 17825836 | 17825801 | 1.000 | 37.3 | 21.8 | 18.7 | 0.50x | 0.86x |
+| 11 | 22 | 0 | 17825848 | 17825801 | 1.000 | 0.6 | 0.6 | 18.7 | 31.23x | 31.38x |
 
 ### decompression of the C stream
 
-| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 2124.9 | 42.5 | 212.5 | 0.10x | 5.00x |
-| 11 | 22 | 0 | 2124.9 | 39.7 | 177.1 | 0.08x | 4.46x |
+| 5 | 22 | 0 | 1961.4 | 39.3 | 193.2 | 0.10x | 4.91x |
+| 11 | 22 | 0 | 1961.4 | 40.9 | 157.4 | 0.08x | 3.85x |
 
-### pure-encoded stream: decoder comparison
+### lisp-encoded stream: decoder comparison
 
-| C decode MiB/s | pure decode MiB/s | pure/C |
+| C decode MiB/s | lisp decode MiB/s | lisp/C |
 |---------------:|-------------------:|--------:|
-| 2549.8 | 202.4 | 0.08x |
+| 2999.8 | 212.5 | 0.07x |
 
   PERIODIC @ 17.00 MiB
 ## PERIODIC — 0..255 ramp repeated (17.00 MiB)
 
 ### compression
 
-| C q | lgwin | mode | C size | pure size | pure/C size | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+| C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 384 | 303 | 0.789 | 303.6 | 41.3 | 9.9 | 0.03x | 0.24x |
-| 11 | 22 | 0 | 244 | 303 | 1.242 | 14.0 | 10.8 | 9.9 | 0.71x | 0.92x |
+| 5 | 22 | 0 | 384 | 303 | 0.789 | 425.0 | 45.7 | 8.9 | 0.02x | 0.19x |
+| 11 | 22 | 0 | 244 | 303 | 1.242 | 17.8 | 12.8 | 8.9 | 0.50x | 0.69x |
 
 ### decompression of the C stream
 
-| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 472.2 | 53.1 | 212.5 | 0.45x | 4.00x |
-| 11 | 22 | 0 | 531.2 | 65.4 | 170.0 | 0.32x | 2.60x |
+| 5 | 22 | 0 | 531.2 | 77.3 | 250.0 | 0.47x | 3.24x |
+| 11 | 22 | 0 | 607.1 | 67.5 | 202.4 | 0.33x | 3.00x |
 
-### pure-encoded stream: decoder comparison
+### lisp-encoded stream: decoder comparison
 
-| C decode MiB/s | pure decode MiB/s | pure/C |
+| C decode MiB/s | lisp decode MiB/s | lisp/C |
 |---------------:|-------------------:|--------:|
-| 425.0 | 265.6 | 0.62x |
+| 386.3 | 250.0 | 0.65x |
 
   PATTERN @ 17.00 MiB
 ## PATTERN — 256-byte pseudo-random pattern repeated (17.00 MiB)
 
 ### compression
 
-| C q | lgwin | mode | C size | pure size | pure/C size | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+| C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 309 | 319 | 1.032 | 472.2 | 50.6 | 10.4 | 0.02x | 0.21x |
-| 11 | 22 | 0 | 304 | 319 | 1.049 | 13.7 | 10.0 | 10.4 | 0.76x | 1.04x |
+| 5 | 22 | 0 | 309 | 319 | 1.032 | 425.0 | 45.7 | 8.4 | 0.02x | 0.18x |
+| 11 | 22 | 0 | 304 | 319 | 1.049 | 16.7 | 11.5 | 8.4 | 0.51x | 0.74x |
 
 ### decompression of the C stream
 
-| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |
+| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |
 |----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|
-| 5 | 22 | 0 | 531.2 | 53.8 | 265.6 | 0.50x | 4.94x |
-| 11 | 22 | 0 | 472.2 | 77.3 | 250.0 | 0.53x | 3.24x |
+| 5 | 22 | 0 | 531.2 | 64.4 | 236.1 | 0.44x | 3.67x |
+| 11 | 22 | 0 | 708.3 | 90.4 | 212.5 | 0.30x | 2.35x |
 
-### pure-encoded stream: decoder comparison
+### lisp-encoded stream: decoder comparison
 
-| C decode MiB/s | pure decode MiB/s | pure/C |
+| C decode MiB/s | lisp decode MiB/s | lisp/C |
 |---------------:|-------------------:|--------:|
-| 472.2 | 283.3 | 0.60x |
+| 472.2 | 250.0 | 0.53x |
 
-## Summary (geometric mean pure/C, grouped by size/mode/lgwin/q)
+## Summary (geometric mean lisp/C, grouped by size/mode/lgwin/q)
 
-| size | mode | lgwin | C q | size (pure/C) | comp core (pure/C) | comp 1-shot (pure/C) | decomp core (pure/C) | decomp 1-shot (pure/C) |
+| size | mode | lgwin | C q | size (lisp/C) | comp core (lisp/C) | comp 1-shot (lisp/C) | decomp core (lisp/C) | decomp 1-shot (lisp/C) |
 |-----:|-----:|------:|----:|--------------:|-------------------:|---------------------:|---------------------:|-----------------------:|
-| 4.00 MiB | 0 | 22 | 5 | 1.041 | 0.05x | 0.24x | 0.39x | 5.99x |
-| 4.00 MiB | 0 | 22 | 11 | 1.159 | 1.41x | 1.74x | 0.39x | 5.32x |
-| 16.00 MiB | 0 | 22 | 5 | 0.991 | 0.05x | 0.25x | 0.46x | 4.66x |
-| 16.00 MiB | 0 | 22 | 11 | 1.134 | 1.42x | 1.78x | 0.48x | 4.22x |
-| 17.00 MiB | 0 | 22 | 5 | 0.966 | 0.04x | 0.24x | 0.31x | 3.45x |
-| 17.00 MiB | 0 | 22 | 11 | 1.130 | 1.48x | 1.78x | 0.30x | 2.94x |
+| 4.00 MiB | 0 | 22 | 5 | 1.033 | 0.04x | 0.17x | 0.45x | 7.14x |
+| 4.00 MiB | 0 | 22 | 11 | 1.150 | 1.08x | 1.35x | 0.40x | 5.63x |
+| 16.00 MiB | 0 | 22 | 5 | 0.984 | 0.03x | 0.17x | 0.42x | 4.28x |
+| 16.00 MiB | 0 | 22 | 11 | 1.125 | 1.12x | 1.50x | 0.44x | 4.25x |
+| 17.00 MiB | 0 | 22 | 5 | 0.959 | 0.03x | 0.21x | 0.31x | 3.18x |
+| 17.00 MiB | 0 | 22 | 11 | 1.122 | 1.16x | 1.48x | 0.25x | 2.56x |
 

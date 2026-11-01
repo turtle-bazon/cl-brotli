@@ -1,5 +1,5 @@
 ;;;; src/decompress.lisp — brotli compressed meta-block decoder (RFC 7932 §9-10).
-(in-package #:cl-brotli.pure)
+(in-package #:cl-brotli.lisp)
 
 ;;; length-code base/extra tables
 (defparameter +ins-bits+ #(0 0 0 0 0 0 1 1 2 2 3 3 4 4 5 5 6 7 8 9 10 12 14 24))

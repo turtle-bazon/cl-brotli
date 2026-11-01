@@ -7,7 +7,7 @@
 ;;;; use the ring buffer's "last distance" (code 0) when they repeat.  The output
 ;;;; is a standard brotli stream, decodable by the reference (node/python).
 ;;;; COMPRESS falls back to stored meta-blocks when entropy coding wouldn't help.
-(in-package #:cl-brotli.pure)
+(in-package #:cl-brotli.lisp)
 
 ;;; ---- canonical code construction --------------------------------------
 
@@ -370,39 +370,58 @@ when DATA is one chunk of a multi-meta-block stream."
                (prev (make-array n :initial-element -1))
                (cmds '()) (lit-start 0) (p 0) (max-chain 128) (last (- n min-match))
                (dict-used 0))
-          (flet ((ins (q) (let ((h (%hash4 data q hmask)))
-                            (setf (aref prev q) (aref head h) (aref head h) q))))
+          (labels ((ins (q)
+                     (let ((h (%hash4 data q hmask)))
+                       (setf (aref prev q) (aref head h) (aref head h) q)))
+                 (find-match (pos)
+                   (let ((cand (aref head (%hash4 data pos hmask)))
+                         (best-len 0) (best-dist 0) (chain max-chain))
+                     (loop while (and (>= cand 0) (> chain 0)) do
+                       (when (> (- pos cand) window) (return))
+                       (let ((ml (%match-len data cand pos n)))
+                         (when (> ml best-len)
+                           (setf best-len ml best-dist (- pos cand))))
+                       (setf cand (aref prev cand)) (decf chain))
+                     (values best-len best-dist)))
+                 (emit-normal (best-len best-dist inserted)
+                   (unless inserted (ins p))
+                   (if (>= best-len min-match)
+                       (progn
+                         (push (list (- p lit-start) lit-start best-len best-dist nil) cmds)
+                         (loop for q from (1+ p) below (min (+ p best-len) (1+ last))
+                               do (ins q))
+                         (incf p best-len)
+                         (setf lit-start p))
+                       (incf p))))
             (loop while (<= p last) do
-              (let* ((h (%hash4 data p hmask)) (cand (aref head h))
-                     (best-len 0) (best-dist 0) (chain max-chain))
-                (loop while (and (>= cand 0) (> chain 0)) do
-                  (when (> (- p cand) window) (return))
-                  (let ((ml (%match-len data cand p n)))
-                    (when (> ml best-len) (setf best-len ml best-dist (- p cand))))
-                  (setf cand (aref prev cand)) (decf chain))
-                (labels ((use-normal-match ()
-                           (ins p)
-                           (if (>= best-len min-match)
-                               (progn
-                                 (push (list (- p lit-start) lit-start best-len best-dist nil) cmds)
-                                 (loop for q from (1+ p) below (min (+ p best-len) (1+ last)) do (ins q))
-                                 (incf p best-len) (setf lit-start p))
-                               (incf p))))
-                  (if (and use-dict
-                           (or (null dict-limit) (< dict-used dict-limit)))
-                      (multiple-value-bind (dict-len dict-idx dict-tid)
-                          (dict-match-at data p n)
-                        (if (and (>= dict-len 9)
-                                 (> dict-len best-len))
-                            (let ((dist (+ (min window (+ base-pos p)) 1 dict-idx
-                                           (* dict-tid (nwords dict-len)))))
-                              (push (list (- p lit-start) lit-start dict-len dist t) cmds)
-                              (incf dict-used)
-                              (ins p)
-                              (loop for q from (1+ p) below (min (+ p dict-len) (1+ last)) do (ins q))
-                              (incf p dict-len) (setf lit-start p))
-                            (use-normal-match)))
-                      (use-normal-match))))))
+              (multiple-value-bind (best-len best-dist) (find-match p)
+                (let ((dict-p nil))
+                  (when (and use-dict
+                             (or (null dict-limit) (< dict-used dict-limit)))
+                    (multiple-value-bind (dict-len dict-idx dict-tid)
+                        (dict-match-at data p n)
+                      (when (and (>= dict-len 9) (> dict-len best-len))
+                        (setf dict-p t)
+                        (let ((dist (+ (min window (+ base-pos p)) 1 dict-idx
+                                       (* dict-tid (nwords dict-len)))))
+                          (push (list (- p lit-start) lit-start dict-len dist t) cmds)
+                          (incf dict-used)
+                          (ins p)
+                          (loop for q from (1+ p) below (min (+ p dict-len) (1+ last))
+                                do (ins q))
+                          (incf p dict-len)
+                          (setf lit-start p)))))
+                  (unless dict-p
+                    (if (and (>= best-len min-match) (< best-len 64) (< p last))
+                        (progn
+                          (ins p)
+                          (multiple-value-bind (next-len next-dist)
+                              (find-match (1+ p))
+                            (declare (ignore next-dist))
+                            (if (and (>= next-len min-match) (> next-len best-len))
+                                (incf p)
+                                (emit-normal best-len best-dist t))))
+                        (emit-normal best-len best-dist nil)))))))
           (when (< lit-start n) (push (list (- n lit-start) lit-start 0 0 nil) cmds))
           (nreverse cmds)))))
 

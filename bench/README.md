@@ -5,17 +5,17 @@ Compares `cl-brotli` with the system C Brotli library through the existing
 
 The harness measures three things for the same input:
 
-* `cl-brotli:compress` / `cl-brotli:decompress` — the public pure-Lisp API.
+* `cl-brotli:compress` / `cl-brotli:decompress` — the public Lisp API.
 * `BrotliEncoderCompress` / `BrotliDecoderDecompress` called directly with
   preallocated foreign buffers — C library cost without Lisp allocation or
   output copying.
 * `cl-brotli.reference:compress` / `decompress` — the one-shot CFFI wrapper
   used by the test suite, including its allocation and output-copy overhead.
 
-Every C stream is decoded by both decoders, and every pure stream is decoded
+Every C stream is decoded by both decoders, and every lisp stream is decoded
 by both decoders, before it is timed. Throughput is MiB/s of uncompressed data.
-`pure/C` speed > 1 means `cl-brotli` is faster; `pure/C` size > 1 means the
-pure encoder produced a larger stream.
+`lisp/C` speed > 1 means `cl-brotli` is faster; `lisp/C` size > 1 means the
+lisp encoder produced a larger stream.
 
 ## Running
 
@@ -74,7 +74,7 @@ ratios are stable across 1 MiB, 4 MiB, and 16 MiB.
   `4 * encoded-size`, so highly compressed streams can pay for several full C
   decodes. The C-core column is the fair library-only number; the one-shot
   column is what the existing test helper actually costs.
-* `cl-brotli` has no quality, window, or mode parameter. Pure rows therefore
+* `cl-brotli` has no quality, window, or mode parameter. Lisp rows therefore
   use its automatic choices; C rows vary those parameters.
 
 ## Current results
@@ -84,46 +84,46 @@ x86-64). Raw CSV files are in `bench/results/`.
 
 ### 1 MiB, C quality 11, lgwin 22, generic mode
 
-| dataset | pure size | C q5 size | C q11 size | pure/C q5 | pure/C q11 | pure comp MiB/s | C q11 core comp MiB/s | pure dec MiB/s | C q11 core dec MiB/s | C q11 one-shot dec MiB/s |
+| dataset | lisp size | C q5 size | C q11 size | lisp/C q5 | lisp/C q11 | lisp comp MiB/s | C q11 core comp MiB/s | lisp dec MiB/s | C q11 core dec MiB/s | C q11 one-shot dec MiB/s |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| text | 11845 | 11568 | 9702 | 1.024 | 1.221 | 6.2 | 5.7 | 120.0 | 367.6 | 47.6 |
-| html | 197366 | 193999 | 169361 | 1.017 | 1.165 | 0.5 | 0.3 | 9.6 | 189.4 | 48.4 |
-| json | 57983 | 57439 | 47684 | 1.009 | 1.216 | 1.4 | 0.2 | 25.9 | 520.8 | 71.4 |
-| source | 92803 | 91102 | 79992 | 1.019 | 1.160 | 1.1 | 0.5 | 22.7 | 347.2 | 57.7 |
-| binary | 309582 | 283510 | 251377 | 1.092 | 1.232 | 0.9 | 0.2 | 7.4 | 142.8 | 41.7 |
-| zeros | 13 | 13 | 14 | 1.000 | 0.929 | 10.0 | 15.6 | 390.6 | 420.1 | 22.7 |
-| random | 1048581 | 1048581 | 1048581 | 1.000 | 1.000 | 14.7 | 0.9 | 260.9 | 4310.1 | 32.6 |
-| periodic | 291 | 269 | 218 | 1.082 | 1.335 | 9.3 | 23.8 | 791.1 | 480.7 | 37.5 |
-| pattern | 306 | 284 | 278 | 1.077 | 1.101 | 10.0 | 20.8 | 352.9 | 367.6 | 34.1 |
-| dict | 57 | 47 | 31 | 1.213 | 1.839 | 7.8 | 22.7 | 880.2 | 446.4 | 25.0 |
-| utf8 | 293 | 262 | 226 | 1.118 | 1.296 | 9.6 | 23.8 | 347.2 | 505.0 | 26.3 |
+| text | 11686 | 11568 | 9702 | 1.010 | 1.204 | 3.3 | 6.1 | 105.3 | 419.4 | 55.6 |
+| html | 192903 | 193999 | 169361 | 0.994 | 1.139 | 0.3 | 0.3 | 10.4 | 260.4 | 60.0 |
+| json | 57083 | 57439 | 47684 | 0.994 | 1.197 | 1.0 | 0.3 | 28.6 | 568.2 | 83.3 |
+| source | 90741 | 91102 | 79992 | 0.996 | 1.134 | 0.8 | 0.6 | 20.8 | 300.0 | 66.7 |
+| binary | 296645 | 283510 | 251377 | 1.046 | 1.180 | 1.0 | 0.2 | 6.4 | 160.2 | 41.7 |
+| zeros | 13 | 13 | 14 | 1.000 | 0.929 | 10.0 | 15.6 | 428.5 | 457.8 | 25.0 |
+| random | 1048581 | 1048581 | 1048581 | 1.000 | 1.000 | 19.2 | 0.8 | 223.2 | 4385.7 | 43.5 |
+| periodic | 291 | 269 | 218 | 1.082 | 1.335 | 8.6 | 26.3 | 769.2 | 461.5 | 31.2 |
+| pattern | 306 | 284 | 278 | 1.077 | 1.101 | 10.9 | 21.7 | 240.4 | 375.0 | 32.6 |
+| dict | 57 | 47 | 31 | 1.213 | 1.839 | 7.6 | 21.7 | 954.1 | 390.6 | 35.7 |
+| utf8 | 293 | 262 | 226 | 1.118 | 1.296 | 10.0 | 21.7 | 231.5 | 450.4 | 30.3 |
 
-Geometric mean pure/C size ratio at q11: **1.201** excluding `periodic`
-(1.213 including it). The pure encoder's ratio is roughly C quality
-**q4–q5** on text-like data.
+Geometric mean lisp/C size ratio at q11: **1.183** excluding `periodic`
+(1.196 including it). The lisp encoder is now at or slightly better than C
+q5 on text-like data, with a ~13–20% gap to q11.
 
 ### Quality sweep summary (geometric mean across datasets, excluding `periodic`)
 
-| C q | size (pure/C) | compress (pure/C core) | decompress (pure/C core) |
+| C q | size (lisp/C) | compress (lisp/C core) | decompress (lisp/C core) |
 |---:|---:|---:|---:|
-| 0 | 0.370 | 0.01x | 0.08x |
-| 1 | 0.420 | 0.01x | 0.14x |
-| 2 | 0.865 | 0.02x | 0.25x |
-| 3 | 0.973 | 0.02x | 0.33x |
-| 4 | 0.998 | 0.03x | 0.24x |
-| 5 | 1.057 | 0.04x | 0.25x |
-| 6 | 1.062 | 0.04x | 0.26x |
-| 7 | 1.063 | 0.04x | 0.24x |
-| 8 | 1.065 | 0.05x | 0.24x |
-| 9 | 1.071 | 0.12x | 0.23x |
-| 10 | 1.082 | 1.38x | 0.18x |
-| 11 | 1.209 | 1.34x | 0.26x |
+| 0 | 0.366 | 0.01x | 0.07x |
+| 1 | 0.415 | 0.00x | 0.14x |
+| 2 | 0.855 | 0.01x | 0.24x |
+| 3 | 0.963 | 0.02x | 0.24x |
+| 4 | 0.988 | 0.03x | 0.21x |
+| 5 | 1.046 | 0.03x | 0.25x |
+| 6 | 1.051 | 0.03x | 0.25x |
+| 7 | 1.051 | 0.04x | 0.29x |
+| 8 | 1.054 | 0.04x | 0.25x |
+| 9 | 1.059 | 0.10x | 0.28x |
+| 10 | 1.070 | 1.14x | 0.21x |
+| 11 | 1.196 | 1.16x | 0.23x |
 
-Pure compression is about **25× slower than C q4–q5**, but often faster than C
-q11 on literal-heavy data because C q11 spends much more time parsing. Pure
+Lisp compression is about **25× slower than C q4–q5**, but often faster than C
+q11 on literal-heavy data because C q11 spends much more time parsing. Lisp
 decompression is about **4–5× slower than the C core** on typical data and
-about **20–28× slower on literal-heavy binary/HTML/JSON**. The bit-reader and
-Huffman-table changes improved pure decode throughput by roughly 1.5–3× over
+about **15–25× slower on literal-heavy binary/HTML/JSON**. The bit-reader and
+Huffman-table changes improved lisp decode throughput by roughly 1.5–3× over
 the original implementation.
 
 ### Size boundary
@@ -133,12 +133,12 @@ longer treats the 0..255 ramp as incompressible. The remaining 17 MiB penalty
 is from independently compressing each chunk, so matches cannot cross the
 chunk boundary:
 
-| dataset | size | C q11 size | pure size | pure/C |
+| dataset | size | C q11 size | lisp size | lisp/C |
 |---|---:|---:|---:|---:|
-| text | 16 MiB | 9715 | 11845 | 1.22 |
-| text | 17 MiB | 9728 | 11858 | 1.22 |
-| source | 16 MiB | 80005 | 92803 | 1.16 |
-| source | 17 MiB | 80018 | 92816 | 1.16 |
+| text | 16 MiB | 9715 | 11686 | 1.20 |
+| text | 17 MiB | 9728 | 11699 | 1.20 |
+| source | 16 MiB | 80005 | 90741 | 1.13 |
+| source | 17 MiB | 80018 | 90754 | 1.13 |
 | periodic | 1 KiB | 216 | 289 | 1.34 |
 | periodic | 1 MiB | 218 | 291 | 1.33 |
 | periodic | 16 MiB | 232 | 291 | 1.25 |
@@ -148,15 +148,15 @@ chunk boundary:
 
 ### Window sweep
 
-On 1 MiB text-like data, pure chooses an automatic window of 21 bits. C q11
-needs a larger window to match it; at `lgwin` 10–14 C is much worse than pure:
+On 1 MiB text-like data, lisp chooses an automatic window of 21 bits. C q11
+needs a larger window to match it; at `lgwin` 10–14 C is much worse than lisp:
 
-| dataset | C q11 lgwin 14 | C q11 lgwin 16 | C q11 lgwin 22 | pure |
+| dataset | C q11 lgwin 14 | C q11 lgwin 16 | C q11 lgwin 22 | lisp |
 |---|---:|---:|---:|---:|
-| text | 278610 | 9790 | 9702 | 11845 |
-| html | 229097 | 185376 | 169361 | 197366 |
-| source | 208249 | 195375 | 79992 | 92803 |
-| binary | 268554 | 261544 | 251377 | 309582 |
+| text | 278610 | 9790 | 9702 | 11686 |
+| html | 229097 | 185376 | 169361 | 192903 |
+| source | 208249 | 195375 | 79992 | 90741 |
+| binary | 268554 | 261544 | 251377 | 296645 |
 
 C `mode` 0/1/2 made no meaningful difference at q11 on text/HTML/JSON.
 
@@ -173,8 +173,11 @@ The benchmark was used to drive these changes:
   32-entry secondary tables for long codes);
 * fast single-tree literal and distance decode paths;
 * unlimited dictionary matching for text-like data;
+* length-preserving dictionary transforms (identity, upper-first, upper-all);
+* one-step lazy matching in the LZ77 parser;
 * implicit-distance command symbols and short distance-ring codes in the
   encoder;
+* implementation tree and package renamed from `pure` to `lisp`;
 * rejection of non-positive resolved distances;
 * regression tests for the periodic ramp, multi-block input, and invalid
   distances.
@@ -188,9 +191,9 @@ run only on SBCL 2.6.9.
 
 ## Remaining gaps
 
-* Encoder ratio is still roughly C q4–q5; closing the q11 gap needs context
-  modeling, block splitting, dictionary transforms, and better parsing.
-* Pure decoding is still ~20–28× slower than the C core on literal-heavy
+* Encoder ratio is at C q5 on text-like data; closing the q11 gap needs
+  context modeling, block splitting, and length-changing dictionary transforms.
+* Lisp decoding is still ~15–25× slower than the C core on literal-heavy
   binary/HTML/JSON; highly compressible streams are near parity or faster.
 * C q11 on 17 MiB random data remains the slowest benchmark case (~0.6 MiB/s).
 

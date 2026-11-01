@@ -8,7 +8,7 @@
 ;;;;
 ;;;; The harness measures the same input through:
 ;;;;
-;;;;   * cl-brotli:compress / decompress          -- the public pure-Lisp API
+;;;;   * cl-brotli:compress / decompress          -- the public Lisp API
 ;;;;   * C core BrotliEncoderCompress / BrotliDecoderDecompress
 ;;;;     with preallocated foreign buffers        -- library cost without
 ;;;;                                                 Lisp allocation/copying
@@ -16,7 +16,7 @@
 ;;;;                                                 used by the tests
 ;;;;
 ;;;; Every stream is cross-checked with both decoders before it is timed.
-;;;; Throughput is MiB/s of uncompressed data.  "pure/C" > 1 means cl-brotli
+;;;; Throughput is MiB/s of uncompressed data.  "lisp/C" > 1 means cl-brotli
 ;;;; is faster (or, for sizes, larger).
 
 ;;; ------------------------------------------------------------------
@@ -194,7 +194,7 @@ least one byte so zero-length inputs still have a valid pointer."
 (defun repo-source-octets ()
   (let* ((root (project-root))
          (files (append
-                 (directory (merge-pathnames "src/pure/*.lisp" root))
+                 (directory (merge-pathnames "src/lisp/*.lisp" root))
                  (directory (merge-pathnames "src/*.lisp" root))
                  (list (merge-pathnames "README.md" root)
                        (merge-pathnames "NOTICE" root)
@@ -409,7 +409,7 @@ when cl-brotli itself is edited."
 
 (defun measure-consing (thunk &key (reps 1))
   "Return Lisp bytes consed per call.  Foreign C-core allocation is not
-included; this is mostly useful for the pure Lisp side and the CFFI wrapper."
+included; this is mostly useful for the lisp Lisp side and the CFFI wrapper."
   (funcall thunk)
   (let ((before (sb-ext:get-bytes-consed)))
     (dotimes (i reps)
@@ -425,18 +425,18 @@ included; this is mostly useful for the pure Lisp side and the CFFI wrapper."
   lgwin
   level
   c-size
-  pure-size
+  lisp-size
   c-comp-core
   c-comp-one-shot
-  pure-comp
+  lisp-comp
   c-decomp-core
   c-decomp-one-shot
-  pure-decomp
-  pure-stream-c-decomp
-  pure-stream-pure-decomp
-  pure-comp-consed
+  lisp-decomp
+  lisp-stream-c-decomp
+  lisp-stream-lisp-decomp
+  lisp-comp-consed
   c-comp-consed
-  pure-decomp-consed
+  lisp-decomp-consed
   c-decomp-consed)
 
 (defun print-table-row (fmt &rest args)
@@ -468,53 +468,53 @@ included; this is mostly useful for the pure Lisp side and the CFFI wrapper."
   (format t "~%"))
 
 (defun print-compression-table (rows)
-  (print-table-row "| C q | lgwin | mode | C size | pure size | pure/C size | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |")
+  (print-table-row "| C q | lgwin | mode | C size | lisp size | lisp/C size | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |")
   (print-table-row "|----:|------:|-----:|-------:|----------:|------------:|-------------:|-----------------:|-----------:|------------:|----------------:|")
   (dolist (r rows)
     (let* ((n (bench-row-size r))
            (c-size (bench-row-c-size r))
-           (pure-size (bench-row-pure-size r))
+           (lisp-size (bench-row-lisp-size r))
            (c-core (mib-per-second n (bench-row-c-comp-core r)))
            (c-one (mib-per-second n (bench-row-c-comp-one-shot r)))
-           (pure (mib-per-second n (bench-row-pure-comp r))))
+           (lisp (mib-per-second n (bench-row-lisp-comp r))))
       (print-table-row "| ~D | ~D | ~D | ~D | ~D | ~,3f | ~,1f | ~,1f | ~,1f | ~,2fx | ~,2fx |"
                        (bench-row-level r) (bench-row-lgwin r) (bench-row-mode r)
-                       c-size pure-size
-                       (if (zerop c-size) 0.0 (/ pure-size (float c-size)))
-                       c-core c-one pure
-                       (speed-ratio pure c-core)
-                       (speed-ratio pure c-one)))))
+                       c-size lisp-size
+                       (if (zerop c-size) 0.0 (/ lisp-size (float c-size)))
+                       c-core c-one lisp
+                       (speed-ratio lisp c-core)
+                       (speed-ratio lisp c-one)))))
 
 (defun print-decompression-table (rows)
-  (print-table-row "| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | pure MiB/s | pure/C core | pure/C one-shot |")
+  (print-table-row "| C q | lgwin | mode | C core MiB/s | C one-shot MiB/s | lisp MiB/s | lisp/C core | lisp/C one-shot |")
   (print-table-row "|----:|------:|-----:|-------------:|-----------------:|-----------:|------------:|----------------:|")
   (dolist (r rows)
     (let* ((n (bench-row-size r))
            (c-core (mib-per-second n (bench-row-c-decomp-core r)))
            (c-one (mib-per-second n (bench-row-c-decomp-one-shot r)))
-           (pure (mib-per-second n (bench-row-pure-decomp r))))
+           (lisp (mib-per-second n (bench-row-lisp-decomp r))))
       (print-table-row "| ~D | ~D | ~D | ~,1f | ~,1f | ~,1f | ~,2fx | ~,2fx |"
                        (bench-row-level r) (bench-row-lgwin r) (bench-row-mode r)
-                       c-core c-one pure
-                       (speed-ratio pure c-core)
-                       (speed-ratio pure c-one)))))
+                       c-core c-one lisp
+                       (speed-ratio lisp c-core)
+                       (speed-ratio lisp c-one)))))
 
-(defun print-pure-stream-table (row)
+(defun print-lisp-stream-table (row)
   (let* ((n (bench-row-size row))
-         (c (mib-per-second n (bench-row-pure-stream-c-decomp row)))
-         (pure (mib-per-second n (bench-row-pure-stream-pure-decomp row))))
-    (print-table-row "| C decode MiB/s | pure decode MiB/s | pure/C |")
+         (c (mib-per-second n (bench-row-lisp-stream-c-decomp row)))
+         (lisp (mib-per-second n (bench-row-lisp-stream-lisp-decomp row))))
+    (print-table-row "| C decode MiB/s | lisp decode MiB/s | lisp/C |")
     (print-table-row "|---------------:|-------------------:|--------:|")
-    (print-table-row "| ~,1f | ~,1f | ~,2fx |" c pure (speed-ratio pure c))))
+    (print-table-row "| ~,1f | ~,1f | ~,2fx |" c lisp (speed-ratio lisp c))))
 
 (defun print-consing-table (row)
-  (print-table-row "| operation | pure Lisp consed | C one-shot consed |")
+  (print-table-row "| operation | lisp Lisp consed | C one-shot consed |")
   (print-table-row "|-----------|-----------------:|------------------:|")
   (print-table-row "| compress | ~D | ~D |"
-                   (bench-row-pure-comp-consed row)
+                   (bench-row-lisp-comp-consed row)
                    (bench-row-c-comp-consed row))
   (print-table-row "| decompress (C stream) | ~D | ~D |"
-                   (bench-row-pure-decomp-consed row)
+                   (bench-row-lisp-decomp-consed row)
                    (bench-row-c-decomp-consed row)))
 
 (defun print-dataset-report (rows dataset size description)
@@ -523,16 +523,16 @@ included; this is mostly useful for the pure Lisp side and the CFFI wrapper."
   (print-compression-table rows)
   (format t "~%### decompression of the C stream~%~%")
   (print-decompression-table rows)
-  (format t "~%### pure-encoded stream: decoder comparison~%~%")
-  (print-pure-stream-table (first rows))
-  (when (bench-row-pure-comp-consed (first rows))
+  (format t "~%### lisp-encoded stream: decoder comparison~%~%")
+  (print-lisp-stream-table (first rows))
+  (when (bench-row-lisp-comp-consed (first rows))
     (format t "~%### Lisp allocation (bytes consed per call; C core foreign allocation excluded)~%~%")
     (print-consing-table (first rows)))
   (format t "~%"))
 
 (defun print-summary (all-rows)
-  (format t "## Summary (geometric mean pure/C, grouped by size/mode/lgwin/q)~%~%")
-  (print-table-row "| size | mode | lgwin | C q | size (pure/C) | comp core (pure/C) | comp 1-shot (pure/C) | decomp core (pure/C) | decomp 1-shot (pure/C) |")
+  (format t "## Summary (geometric mean lisp/C, grouped by size/mode/lgwin/q)~%~%")
+  (print-table-row "| size | mode | lgwin | C q | size (lisp/C) | comp core (lisp/C) | comp 1-shot (lisp/C) | decomp core (lisp/C) | decomp 1-shot (lisp/C) |")
   (print-table-row "|-----:|-----:|------:|----:|--------------:|-------------------:|---------------------:|---------------------:|-----------------------:|")
   (let ((keys (remove-duplicates
                (mapcar (lambda (r)
@@ -555,28 +555,28 @@ included; this is mostly useful for the pure Lisp side and the CFFI wrapper."
                             (mapcar (lambda (r)
                                       (if (zerop (bench-row-c-size r))
                                           0.0
-                                          (/ (bench-row-pure-size r)
+                                          (/ (bench-row-lisp-size r)
                                              (float (bench-row-c-size r)))))
                                     rows))
                            (geometric-mean
                             (mapcar (lambda (r)
                                       (speed-ratio (bench-row-c-comp-core r)
-                                                   (bench-row-pure-comp r)))
+                                                   (bench-row-lisp-comp r)))
                                     rows))
                            (geometric-mean
                             (mapcar (lambda (r)
                                       (speed-ratio (bench-row-c-comp-one-shot r)
-                                                   (bench-row-pure-comp r)))
+                                                   (bench-row-lisp-comp r)))
                                     rows))
                            (geometric-mean
                             (mapcar (lambda (r)
                                       (speed-ratio (bench-row-c-decomp-core r)
-                                                   (bench-row-pure-decomp r)))
+                                                   (bench-row-lisp-decomp r)))
                                     rows))
                            (geometric-mean
                             (mapcar (lambda (r)
                                       (speed-ratio (bench-row-c-decomp-one-shot r)
-                                                   (bench-row-pure-decomp r)))
+                                                   (bench-row-lisp-decomp r)))
                                     rows)))))))
   (format t "~%"))
 
@@ -584,11 +584,11 @@ included; this is mostly useful for the pure Lisp side and the CFFI wrapper."
 ;;; Benchmark core
 ;;; ------------------------------------------------------------------
 
-(defun validate-pure-stream (data pure-compressed)
-  (unless (equalp data (cl-brotli:decompress pure-compressed))
-    (error "pure stream did not decode with cl-brotli"))
-  (unless (equalp data (cl-brotli.reference:decompress pure-compressed))
-    (error "pure stream did not decode with the C reference")))
+(defun validate-lisp-stream (data lisp-compressed)
+  (unless (equalp data (cl-brotli:decompress lisp-compressed))
+    (error "lisp stream did not decode with cl-brotli"))
+  (unless (equalp data (cl-brotli.reference:decompress lisp-compressed))
+    (error "lisp stream did not decode with the C reference")))
 
 (defun validate-c-stream (data c-compressed level lgwin mode)
   (unless (equalp data (cl-brotli:decompress c-compressed))
@@ -605,33 +605,33 @@ included; this is mostly useful for the pure Lisp side and the CFFI wrapper."
          (samples (getf options :samples))
          (target (getf options :target))
          (consing (getf options :consing))
-         (pure-compressed (cl-brotli:compress data))
-         (pure-size (length pure-compressed))
-         (pure-comp-time nil)
-         (pure-comp-consed nil)
-         (pure-stream-c-time nil)
-         (pure-stream-pure-time nil)
+         (lisp-compressed (cl-brotli:compress data))
+         (lisp-size (length lisp-compressed))
+         (lisp-comp-time nil)
+         (lisp-comp-consed nil)
+         (lisp-stream-c-time nil)
+         (lisp-stream-lisp-time nil)
          (rows '()))
-    ;; Correctness: the pure encoder's stream must decode with both decoders.
-    (validate-pure-stream data pure-compressed)
+    ;; Correctness: the lisp encoder's stream must decode with both decoders.
+    (validate-lisp-stream data lisp-compressed)
     (multiple-value-bind (median best reps)
         (measure (lambda () (cl-brotli:compress data))
                  :target target :samples samples)
       (declare (ignore best reps))
-      (setf pure-comp-time median))
+      (setf lisp-comp-time median))
     (when consing
-      (setf pure-comp-consed
+      (setf lisp-comp-consed
             (measure-consing (lambda () (cl-brotli:compress data)))))
-    ;; Decode the pure stream with both decoders.
-    (let ((cc (make-c-decompressor pure-compressed n)))
+    ;; Decode the lisp stream with both decoders.
+    (let ((cc (make-c-decompressor lisp-compressed n)))
       (unwind-protect
            (progn
-             (multiple-value-bind (c-time pure-time)
+             (multiple-value-bind (c-time lisp-time)
                  (measure-pair (lambda () (c-decompress-core cc))
-                               (lambda () (cl-brotli:decompress pure-compressed))
+                               (lambda () (cl-brotli:decompress lisp-compressed))
                                :target target :samples samples)
-               (setf pure-stream-c-time c-time
-                     pure-stream-pure-time pure-time)))
+               (setf lisp-stream-c-time c-time
+                     lisp-stream-lisp-time lisp-time)))
         (free-c-decompressor cc)))
     (dolist (mode (getf options :modes))
       (dolist (lgwin (getf options :windows))
@@ -655,7 +655,7 @@ included; this is mostly useful for the pure Lisp side and the CFFI wrapper."
                                      (lambda () (cl-brotli.reference:compress
                                                  data :quality level :lgwin lgwin :mode mode))
                                      :target target :samples samples)
-                     ;; Time pure vs C-core decompression of the C stream.
+                     ;; Time lisp vs C-core decompression of the C stream.
                      (let ((cd (make-c-decompressor c-compressed n)))
                        (unwind-protect
                             (progn
@@ -666,7 +666,7 @@ included; this is mostly useful for the pure Lisp side and the CFFI wrapper."
                          (free-c-decompressor cd)))
                      (let ((cd (make-c-decompressor c-compressed n)))
                        (unwind-protect
-                            (multiple-value-bind (c-dec-core pure-dec)
+                            (multiple-value-bind (c-dec-core lisp-dec)
                                 (measure-pair (lambda () (c-decompress-core cd))
                                               (lambda () (cl-brotli:decompress c-compressed))
                                               :target target :samples samples)
@@ -680,23 +680,23 @@ included; this is mostly useful for the pure Lisp side and the CFFI wrapper."
                                             :description (getf spec :description)
                                             :size n :mode mode :lgwin lgwin :level level
                                             :c-size c-size
-                                            :pure-size pure-size
+                                            :lisp-size lisp-size
                                             :c-comp-core c-core-time
                                             :c-comp-one-shot c-one-time
-                                            :pure-comp pure-comp-time
+                                            :lisp-comp lisp-comp-time
                                             :c-decomp-core c-dec-core
                                             :c-decomp-one-shot c-dec-one
-                                            :pure-decomp pure-dec
-                                            :pure-stream-c-decomp pure-stream-c-time
-                                            :pure-stream-pure-decomp pure-stream-pure-time
-                                            :pure-comp-consed pure-comp-consed
+                                            :lisp-decomp lisp-dec
+                                            :lisp-stream-c-decomp lisp-stream-c-time
+                                            :lisp-stream-lisp-decomp lisp-stream-lisp-time
+                                            :lisp-comp-consed lisp-comp-consed
                                             :c-comp-consed (and consing
                                                                 (measure-consing
                                                                  (lambda ()
                                                                    (cl-brotli.reference:compress
                                                                     data :quality level
                                                                     :lgwin lgwin :mode mode))))
-                                            :pure-decomp-consed (and consing
+                                            :lisp-decomp-consed (and consing
                                                                      (measure-consing
                                                                       (lambda ()
                                                                         (cl-brotli:decompress c-compressed))))
@@ -747,12 +747,12 @@ included; this is mostly useful for the pure Lisp side and the CFFI wrapper."
 (defun write-csv (path rows)
   (with-open-file (stream path :direction :output :if-exists :supersede
                                :if-does-not-exist :create)
-    (let ((columns '(dataset description size mode lgwin level c-size pure-size
-                      c-comp-core c-comp-one-shot pure-comp
-                      c-decomp-core c-decomp-one-shot pure-decomp
-                      pure-stream-c-decomp pure-stream-pure-decomp
-                      pure-comp-consed c-comp-consed
-                      pure-decomp-consed c-decomp-consed)))
+    (let ((columns '(dataset description size mode lgwin level c-size lisp-size
+                      c-comp-core c-comp-one-shot lisp-comp
+                      c-decomp-core c-decomp-one-shot lisp-decomp
+                      lisp-stream-c-decomp lisp-stream-lisp-decomp
+                      lisp-comp-consed c-comp-consed
+                      lisp-decomp-consed c-decomp-consed)))
       (format stream "~{~A~^,~}~%" (mapcar #'string-downcase
                                            (mapcar #'symbol-name columns)))
       (dolist (row rows)
