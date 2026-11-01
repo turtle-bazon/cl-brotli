@@ -10,7 +10,7 @@
   (single nil)
   (table nil :type (or null simple-vector))
   (table-bits 0 :type fixnum)
-  (subtables nil :type (or null vector)))
+  (subtables nil :type (or null simple-vector)))
 
 (defun %reverse-bits (value bits)
   (let ((result 0))
@@ -27,7 +27,7 @@ prefix, so codes up to 15 bits decode in two lookups."
     (dotimes (s n)
       (let ((l (aref lengths s)))
         (when (plusp l)
-          (incf (aref count l))
+          (incf (svref count l))
           (incf nonzero)
           (setf last s)
           (when (> l maxlen) (setf maxlen l)))))
@@ -36,7 +36,7 @@ prefix, so codes up to 15 bits decode in two lookups."
     (let ((offs (make-array (+ 2 +max-bits+) :initial-element 0))
           (symbol (make-array n :initial-element 0)))
       (loop for l from 1 to +max-bits+ do
-        (setf (aref offs (1+ l)) (+ (aref offs l) (aref count l))))
+        (setf (aref offs (1+ l)) (+ (aref offs l) (svref count l))))
       (dotimes (s n)
         (let ((l (aref lengths s)))
           (when (plusp l)
@@ -49,11 +49,11 @@ prefix, so codes up to 15 bits decode in two lookups."
              (next (make-array (1+ +max-bits+) :initial-element 0)))
         (let ((code 0))
           (loop for bits from 1 to +max-bits+ do
-            (setf code (ash (+ code (aref count (1- bits))) 1)
+            (setf code (ash (+ code (svref count (1- bits))) 1)
                   (aref next bits) code)))
         (loop for len from 1 to maxlen do
-          (let ((start (- (aref offs len) (aref count len))))
-            (dotimes (k (aref count len))
+          (let ((start (- (aref offs len) (svref count len))))
+            (dotimes (k (svref count len))
               (let* ((sym (aref symbol (+ start k)))
                      (code (aref next len)))
                 (incf (aref next len))
@@ -63,7 +63,7 @@ prefix, so codes up to 15 bits decode in two lookups."
                           (stride (ash 1 len)))
                       (loop for base from rev below (ash 1 table-bits)
                             by stride
-                            do (setf (aref table base) entry)))
+                            do (setf (svref table base) entry)))
                     (let* ((rem (- len table-bits))
                            (prefix (ash code (- rem)))
                            (rev-prefix (%reverse-bits prefix table-bits)))
@@ -82,12 +82,13 @@ prefix, so codes up to 15 bits decode in two lookups."
                         (entry (logior (ash sym 4) rem))
                         (stride (ash 1 rem)))
                    (loop for base from rev below (length sub) by stride
-                         do (setf (aref sub base) entry)))))
-             (setf (aref table prefix) (ash (1+ sub-index) 4))
+                         do (setf (svref sub base) entry)))))
+             (setf (svref table prefix) (ash (1+ sub-index) 4))
              (vector-push-extend sub subtables)))
          groups)
         (make-huff :count count :symbol symbol :table table
-                   :table-bits table-bits :subtables subtables)))))
+                   :table-bits table-bits
+                   :subtables (coerce subtables 'simple-vector))))))
 
 (declaim (inline read-huff))
 
@@ -98,9 +99,9 @@ prefix, so codes up to 15 bits decode in two lookups."
              (type fixnum code first index))
     (loop for len from 1 to +max-bits+ do
       (setf code (logior code (b:rbit r)))
-      (let ((c (aref count len)))
+      (let ((c (svref count len)))
         (when (< (- code first) c)
-          (return-from read-huff-slow (aref sym (+ index (- code first)))))
+          (return-from read-huff-slow (svref sym (+ index (- code first)))))
         (incf index c) (incf first c) (setf first (ash first 1) code (ash code 1))))
     (berr "invalid prefix code")))
 
@@ -112,7 +113,7 @@ prefix, so codes up to 15 bits decode in two lookups."
     (declare (type simple-vector table)
              (type fixnum table-bits))
     (if (and table (>= (b:bits-available r) table-bits))
-        (let ((entry (aref table (b:peek-bits r table-bits))))
+        (let ((entry (svref table (b:peek-bits r table-bits))))
           (declare (type fixnum entry))
           (cond
             ((plusp (logand entry 15))
@@ -124,9 +125,9 @@ prefix, so codes up to 15 bits decode in two lookups."
              (if (>= (b:bits-available r) (+ table-bits 5))
                  (progn
                    (b:rbits r table-bits)
-                   (let* ((sub (aref (huff-subtables h)
+                   (let* ((sub (svref (huff-subtables h)
                                      (1- (ash entry -4))))
-                          (entry2 (aref sub (b:peek-bits r 5))))
+                          (entry2 (svref sub (b:peek-bits r 5))))
                      (declare (type vector sub)
                               (type fixnum entry2))
                      (if (plusp (logand entry2 15))

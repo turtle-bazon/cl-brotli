@@ -17,10 +17,6 @@
 (defun r-eof-p (r)
   (and (>= (brd-pos r) (brd-end r)) (zerop (brd-nbits r))))
 
-(defparameter +mask32+
-  (coerce (loop for i from 0 to 24 collect (1- (ash 1 i)))
-          '(simple-array fixnum (25))))
-
 (declaim (inline %fill-bits rbits rbit peek-bits bits-available))
 (defun %fill-bits (r n)
   (declare (type brd r) (type (integer 0 24) n)

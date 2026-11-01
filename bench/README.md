@@ -86,17 +86,17 @@ x86-64). Raw CSV files are in `bench/results/`.
 
 | dataset | lisp size | C q5 size | C q11 size | lisp/C q5 | lisp/C q11 | lisp comp MiB/s | C q11 core comp MiB/s | lisp dec MiB/s | C q11 core dec MiB/s | C q11 one-shot dec MiB/s |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| text | 11686 | 11568 | 9702 | 1.010 | 1.204 | 3.4 | 5.3 | 195.3 | 420.1 | 47.6 |
-| html | 192903 | 193999 | 169361 | 0.994 | 1.139 | 0.3 | 0.3 | 15.6 | 187.5 | 60.0 |
-| json | 57083 | 57439 | 47684 | 0.994 | 1.197 | 1.0 | 0.3 | 55.6 | 625.0 | 83.3 |
-| source | 90741 | 91102 | 79992 | 0.996 | 1.134 | 0.8 | 0.6 | 34.5 | 297.6 | 78.9 |
-| binary | 296645 | 283510 | 251377 | 1.046 | 1.180 | 0.8 | 0.2 | 10.0 | 195.3 | 43.5 |
-| zeros | 13 | 13 | 14 | 1.000 | 0.929 | 13.9 | 14.7 | 1700.6 | 367.6 | 29.4 |
-| random | 1048581 | 1048581 | 1048581 | 1.000 | 1.000 | 21.7 | 0.8 | 965.2 | 4716.7 | 38.5 |
-| periodic | 291 | 269 | 218 | 1.082 | 1.335 | 8.3 | 23.8 | 1243.7 | 446.4 | 35.7 |
-| pattern | 306 | 284 | 278 | 1.077 | 1.101 | 9.3 | 19.2 | 1381.1 | 390.6 | 31.2 |
-| dict | 57 | 47 | 31 | 1.213 | 1.839 | 7.4 | 29.4 | 1953.0 | 509.1 | 33.3 |
-| utf8 | 293 | 262 | 226 | 1.118 | 1.296 | 10.0 | 19.2 | 694.4 | 442.5 | 37.0 |
+| text | 11686 | 11568 | 9702 | 1.010 | 1.204 | 3.6 | 7.6 | 200.0 | 514.4 | 46.9 |
+| html | 192903 | 193999 | 169361 | 0.994 | 1.139 | 0.3 | 0.3 | 16.7 | 257.2 | 58.8 |
+| json | 57083 | 57439 | 47684 | 0.994 | 1.197 | 1.0 | 0.2 | 47.6 | 559.3 | 74.1 |
+| source | 90741 | 91102 | 79992 | 0.996 | 1.134 | 0.7 | 0.6 | 34.5 | 333.3 | 62.5 |
+| binary | 296645 | 283510 | 251377 | 1.046 | 1.180 | 0.9 | 0.2 | 10.9 | 157.9 | 50.0 |
+| zeros | 13 | 13 | 14 | 1.000 | 0.929 | 8.1 | 9.3 | 600.0 | 381.7 | 25.0 |
+| random | 1048581 | 1048581 | 1048581 | 1.000 | 1.000 | 16.7 | 0.9 | 932.8 | 4385.7 | 38.5 |
+| periodic | 291 | 269 | 218 | 1.082 | 1.335 | 8.3 | 26.3 | 520.8 | 525.2 | 33.3 |
+| pattern | 306 | 284 | 278 | 1.077 | 1.101 | 10.0 | 22.7 | 568.1 | 416.6 | 37.5 |
+| dict | 57 | 47 | 31 | 1.213 | 1.839 | 6.6 | 22.7 | 625.0 | 527.4 | 27.8 |
+| utf8 | 293 | 262 | 226 | 1.118 | 1.296 | 10.0 | 20.8 | 1344.0 | 347.2 | 30.3 |
 
 Geometric mean lisp/C size ratio at q11: **1.183** excluding `periodic`
 (1.196 including it). The lisp encoder is now at or slightly better than C
@@ -106,23 +106,23 @@ q5 on text-like data, with a ~13–20% gap to q11.
 
 | C q | size (lisp/C) | compress (lisp/C core) | decompress (lisp/C core) |
 |---:|---:|---:|---:|
-| 0 | 0.366 | 0.01x | 0.14x |
-| 1 | 0.415 | 0.00x | 0.22x |
-| 2 | 0.855 | 0.01x | 0.38x |
-| 3 | 0.963 | 0.02x | 0.57x |
-| 4 | 0.988 | 0.03x | 0.56x |
-| 5 | 1.046 | 0.03x | 0.46x |
-| 6 | 1.051 | 0.03x | 0.48x |
-| 7 | 1.051 | 0.04x | 0.43x |
-| 8 | 1.054 | 0.04x | 0.44x |
-| 9 | 1.059 | 0.10x | 0.37x |
-| 10 | 1.070 | 1.15x | 0.43x |
-| 11 | 1.196 | 1.19x | 0.54x |
+| 0 | 0.366 | 0.01x | 0.16x |
+| 1 | 0.415 | 0.00x | 0.25x |
+| 2 | 0.855 | 0.01x | 0.46x |
+| 3 | 0.963 | 0.02x | 0.44x |
+| 4 | 0.988 | 0.02x | 0.54x |
+| 5 | 1.046 | 0.03x | 0.49x |
+| 6 | 1.051 | 0.03x | 0.43x |
+| 7 | 1.051 | 0.04x | 0.44x |
+| 8 | 1.054 | 0.04x | 0.45x |
+| 9 | 1.059 | 0.10x | 0.48x |
+| 10 | 1.070 | 1.08x | 0.50x |
+| 11 | 1.196 | 1.11x | 0.39x |
 
 Lisp compression is about **25× slower than C q4–q5**, but often faster than C
 q11 on literal-heavy data because C q11 spends much more time parsing. Lisp
 decompression is about **4–5× slower than the C core** on typical data and
-about **11–20× slower on literal-heavy binary/HTML/JSON**. The bit-reader and
+about **10–15× slower on literal-heavy binary/HTML/JSON**. The bit-reader and
 Huffman-table changes improved lisp decode throughput by roughly 1.5–3× over
 the original implementation.
 
@@ -195,7 +195,7 @@ run only on SBCL 2.6.9.
 
 * Encoder ratio is at C q5 on text-like data; closing the q11 gap needs
   context modeling, block splitting, and length-changing dictionary transforms.
-* Lisp decoding is still ~11–20× slower than the C core on literal-heavy
+* Lisp decoding is still ~10–15× slower than the C core on literal-heavy
   binary/HTML/JSON; highly compressible streams are at parity or faster.
 * C q11 on 17 MiB random data remains the slowest benchmark case (~0.6 MiB/s).
 
