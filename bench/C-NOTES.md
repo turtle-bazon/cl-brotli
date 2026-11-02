@@ -369,3 +369,31 @@ drop to 0.076/0.081 ms. The plan-commands record array no longer uses
 geomeans: q2 0.63->0.64, q4 0.76->0.78, q5 0.76->0.78, q6 0.74->0.79,
 q7 0.87->0.89, q8 0.85->0.88, q9 1.98->2.04, q10 12.63->13.06,
 q11 11.01->11.39.
+
+## Decoder Huffman representation and stored-block copies
+
+`BUILD-HUFF` allocated a 1024-entry `GROUPS` vector and a length-sorted
+`SYMBOL` vector per tree, filled the primary table with 8-byte fixnums, and
+`READ-COMPLEX-PREFIX` built its code-length vector out of 8-byte elements.
+`R-BYTES` also allocated a fresh vector for every stored meta-block, which
+`%APPEND` immediately copied again.
+
+The decoder now:
+
+* uses `(unsigned-byte 16)` entries for primary and secondary Huffman tables
+  (the largest entry is `704*16+15`), halving the 10-bit table from 8 KiB to
+  2 KiB and shrinking every subtable from 256 to 64 bytes;
+* keeps code lengths in `(unsigned-byte 8)` vectors instead of generic
+  vectors, which also makes the `HUFF-LENGTHS` type declaration honest;
+* fills the primary table directly and allocates secondary tables lazily,
+  without the 1024-entry `GROUPS` vector or per-code lists;
+* builds the length-sorted symbol permutation only when the end-of-stream
+  slow decoder actually runs;
+* reverses bits with a 256-byte lookup table instead of a per-bit loop;
+* copies stored meta-blocks straight into the output buffer with
+  `R-BYTES-INTO`, removing one full-size allocation and copy.
+
+BINARY q11 decompression consing drops from 3.35 MB to 1.56 MB per MiB of
+output (RANDOM 2.10->1.05 MB). Level-matched decompression geomeans rise
+q2 1.43->1.81, q3 1.79->2.00, q5 1.48->1.65, q7 1.54->1.75, q11 1.64->1.78;
+q0/q1 decode geomeans rise 0.35->0.45 and 0.41->0.47.

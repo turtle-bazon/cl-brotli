@@ -58,7 +58,14 @@
                (cond
                  ;; ISUNCOMPRESSED bit is present only for non-last meta-blocks
                  ((and (= islast 0) (= (b:rbit r) 1))
-                  (b:r-align r) (%append out (b:r-bytes r mlen)))
+                  (b:r-align r)
+                  ;; Copy straight into the output buffer; the old
+                  ;; R-BYTES + APPEND path allocated and copied each stored
+                  ;; block twice.
+                  (let ((pos (outbuf-pos out)))
+                    (%grow out (+ pos mlen))
+                    (b:r-bytes-into r (outbuf-data out) pos mlen)
+                    (setf (outbuf-pos out) (+ pos mlen))))
                  (t (decode-compressed-meta-block r out mlen window rb)))))))
         (when (= islast 1) (return-from blocks))))
     (let ((data (outbuf-data out)) (pos (outbuf-pos out)))
