@@ -628,8 +628,9 @@ Odd levels use the 17-bit hash / 6-byte minimum match; even levels use the
 15-bit hash / 5-byte minimum match. q10/q11 keep the lazy chain + dictionary
 as the ratio-oriented levels.
 
-Level-matched compression geomeans jump: q2 0.62->1.16, q3 0.69->1.18,
-q4 0.78->1.49, q5 0.76->2.11, q6 0.75->1.96, q7 0.87->2.63, q8 0.83->2.51,
-q9 1.99->6.73. Output size ratios at q2-q9 become 1.27-1.56x C. Above one
-16 MiB meta-block the fast-fragment path falls back to the chain parser so
-multi-block streams still work.
+All q0-q9 use the 15-bit hash / 5-byte minimum match variant. Level-matched
+geomeans jump: q2 0.62->1.17, q3 0.69->1.30, q4 0.78->1.49, q5 0.76->2.13,
+q6 0.75->2.19, q7 0.87->2.65, q8 0.83->2.75, q9 1.99->6.70. Output size
+ratios at q2-q9 become 1.27-1.56x C. Above one 16 MiB meta-block the
+fast-fragment path falls back to the chain parser so multi-block streams
+still work.
