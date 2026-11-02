@@ -280,6 +280,17 @@ The caller must ensure two bytes per symbol plus eight bytes of slack."
     (replace (bwr-out w) vec :start1 pos)
     (setf (bwr-pos w) (+ pos n))))
 
+(defun w-bytes-range (w vec start end)
+  "Append VEC[START..END) without an intermediate SUBSEQ."
+  (declare (type bwr w)
+           (type (simple-array (unsigned-byte 8) (*)) vec)
+           (type fixnum start end)
+           (optimize (speed 3) (safety 0)))
+  (let ((pos (bwr-pos w)) (n (- end start)))
+    (%w-grow w (+ pos n))
+    (replace (bwr-out w) vec :start1 pos :start2 start :end2 end)
+    (setf (bwr-pos w) (+ pos n))))
+
 (defun bwr-result (w)
   "The bytes written so far as a fresh simple octet vector."
   (declare (type bwr w))

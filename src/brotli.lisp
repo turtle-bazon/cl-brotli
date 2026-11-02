@@ -84,7 +84,8 @@ static dictionary span the whole stream."
   "Encode INPUT as a valid brotli stream of uncompressed (stored) meta-blocks.
 Reference-decodable; no actual compression.  Used as the fallback when entropy
 coding would not shrink the data (see COMPRESS in encode.lisp)."
-  (let* ((data (b:to-octets input)) (n (length data)) (w (b:make-bwr 1024)))
+  (let* ((data (b:to-octets input)) (n (length data))
+         (w (b:make-bwr (max 1024 (+ n 1024)))))
     (write-wbits w 16)
     (if (zerop n)
         (progn (b:wbits w 1 1) (b:wbits w 1 1))                          ; ISLAST + ISLASTEMPTY
@@ -98,7 +99,7 @@ coding would not shrink the data (see COMPRESS in encode.lisp)."
               (b:wbits w m1 (* 4 nib))                                   ; MLEN-1
               (b:wbits w 1 1)                                            ; ISUNCOMPRESSED
               (b:w-align w)
-              (b:w-bytes w (subseq data pos (+ pos chunk)))
+              (b:w-bytes-range w data pos (+ pos chunk))
               (incf pos chunk)))
           (b:wbits w 1 1) (b:wbits w 1 1)))                             ; final empty last block
     (b:w-align w)

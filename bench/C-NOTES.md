@@ -350,3 +350,12 @@ keys collide exactly; ~64 false collisions for 16K keys, below the 163
 acceptance threshold) and type/inline `dict-key4`. The check drops to
 ~0.13 ms. Level-matched geomeans rose q0 0.35->0.39, q1 0.24->0.31,
 q7 0.74->0.81, q9 1.74->1.85, q11 9.25->10.32.
+
+## Stored-block fast path
+
+`compress-stored` started the writer at 1 KiB and copied each chunk twice
+(`subseq` + `replace`). On RANDOM this cost ~2 ms/MiB. Preallocate n+1024
+and add `w-bytes-range` to `replace` directly from the input. RANDOM
+q0/q5/q9/q11 go 503->950 MiB/s. Level geomeans rise q0 0.39->0.42,
+q2 0.57->0.63, q5 0.70->0.76, q7 0.81->0.87, q9 1.85->1.98,
+q11 10.32->11.01.
