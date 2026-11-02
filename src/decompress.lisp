@@ -175,7 +175,9 @@ visible, and MODE is loop-invariant between block switches."
               (incf copied n)))))
 
 (defun out-copy (out distance len)
-  (declare (optimize (speed 3) (safety 0)))
+  (declare (optimize (speed 3) (safety 0))
+           (type outbuf out)
+           (type fixnum distance len))
   (when (<= distance 0)
     (berr "invalid distance ~d" distance))
   (let ((fp (outbuf-pos out))
@@ -185,10 +187,11 @@ visible, and MODE is loop-invariant between block switches."
     (%copy-match-bytes (outbuf-data out) fp src distance len)))
 
 (defun out-copy-preallocated (out distance len)
-  "Like OUT-COPY, but the meta-block capacity was reserved up front."
-  (declare (optimize (speed 3) (safety 0)))
-  (when (<= distance 0)
-    (berr "invalid distance ~d" distance))
+  "Like OUT-COPY, but the meta-block capacity was reserved up front.  The
+caller has already validated DISTANCE."
+  (declare (optimize (speed 3) (safety 0))
+           (type outbuf out)
+           (type fixnum distance len))
   (let ((fp (outbuf-pos out))
         (src (- (outbuf-pos out) distance)))
     (setf (outbuf-pos out) (+ fp len))

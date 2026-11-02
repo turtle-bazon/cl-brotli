@@ -243,3 +243,12 @@ C q0/q1 per-block code adaptation was also measured: 128 KiB meta-blocks
 with fresh literal/command/distance trees cost 20-35% speed and did not
 improve ratio on the 1 MiB corpus (the single-block trees already adapt
 well), so the fast writer keeps one meta-block.
+
+A second decoder pass typed the copy entry points (`out-copy`,
+`out-copy-preallocated`) and removed a distance check that the command loop
+already performed. That removed the remaining generic `<=`/`-` from the
+match path. q0/q1 decode now reaches 995/707 MiB/s on text, 165/152 on HTML,
+209/172 on JSON, 157/146 on source, and 139/145 on binary; geomeans are
+0.34x/0.48x of C. A 64-bit short-copy experiment and a reader mask table
+were both measured and reverted (slightly slower than the unrolled byte copy
+and inline `ash 1 n`, respectively).
