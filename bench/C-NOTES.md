@@ -590,3 +590,12 @@ Combining a command code and its insert/copy extra bits into one 39-bit
 slower: q0 HTML 146->131 MiB/s, JSON 210->202, SOURCE 282->279, TEXT
 1264->1223. The extra 64-bit mask path and the per-command branch cost more
 than the second `WBITS-RAW` call it replaced.
+
+### Bucket retry as a standalone matcher
+
+The bucket matcher was retried as a separate top-level function (so its
+`FIND-MATCH` could be inlined) with the last-distance seed. It still wins on
+literal-heavy data (q6 HTML 23.6->29.2 MiB/s, JSON 23.4->30.8) but loses on
+text/source/binary (q5 TEXT 361->278, q9 SOURCE 34.2->26.1, q9 BINARY
+16.8->12.7) and grows HTML q5 by 7.2%. The chain matcher remains; a future
+attempt would need a cheap per-input choice, not a global switch.
