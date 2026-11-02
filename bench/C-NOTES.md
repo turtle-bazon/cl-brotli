@@ -599,3 +599,23 @@ literal-heavy data (q6 HTML 23.6->29.2 MiB/s, JSON 23.4->30.8) but loses on
 text/source/binary (q5 TEXT 361->278, q9 SOURCE 34.2->26.1, q9 BINARY
 16.8->12.7) and grows HTML q5 by 7.2%. The chain matcher remains; a future
 attempt would need a cheap per-input choice, not a global switch.
+
+## Copying C's distance cache / BackwardReferenceScore
+
+A direct port of C's `PrepareDistanceCache` (4/10/16 entries),
+`BackwardReferenceScore`, `BackwardReferenceScoreUsingLastDistance`, and the
+`cost_diff_lazy = 175` lazy rule was measured. It improves compression ratio
+substantially: q2 JSON 218955->204171 (-6.7%), HTML 244582->238952 (-2.3%),
+BINARY 341166->330879 (-3.0%); q5 HTML 177029->172469, q9 HTML
+164187->160491. But it costs 5-15% speed on the current linked-chain matcher
+(q2 TEXT 731->675, q5 HTML 28.6->26.8, q9 SOURCE 34.2->31.5; q9 BINARY
+16.8->15.6).
+
+A cheaper 4-entry cache checked only after a chain miss was worse still:
+q5 HTML 28.6->22.1, q9 HTML 14.4->10.7, because literal-heavy inputs have
+many chain misses. The C code can afford the cache because its candidates
+come from a contiguous bucket ring; our chain cannot.
+
+Conclusion: a partial copy of C's matcher is a ratio/speed tradeoff, not a
+win. Getting both requires porting the whole H6 bucket hasher + parser
+structure, not just the cache/score pieces. The fast chain matcher is kept.
