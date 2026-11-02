@@ -12,6 +12,7 @@
   (single nil)
   (table nil :type (or null simple-vector))
   (table-bits 0 :type fixnum)
+  (mask 0 :type fixnum)
   (subtables nil :type (or null simple-vector)))
 
 (defun %reverse-bits (value bits)
@@ -90,7 +91,16 @@ prefix, so codes up to 15 bits decode in two lookups."
                 (vector-push-extend sub subtables)))))
         (make-huff :count count :symbol symbol :table table
                    :table-bits table-bits
+                   :mask (1- (ash 1 table-bits))
                    :subtables (coerce subtables 'simple-vector))))))
+
+(declaim (inline consume-bits))
+(defun consume-bits (r n)
+  "Discard N bits that PEEK-BITS has already made available."
+  (declare (type b:brd r) (type fixnum n)
+           (optimize (speed 3) (safety 0)))
+  (setf (b:brd-acc r) (ash (b:brd-acc r) (- n)))
+  (decf (b:brd-nbits r) n))
 
 (declaim (inline read-huff))
 
@@ -123,28 +133,36 @@ redundant on the fast path."
     ;; end-of-input; the canonical slow walk can decode the remaining bits.
     (if (or (>= (b:brd-nbits r) table-bits)
             (>= (b:bits-available r) table-bits))
-        (let ((entry (svref table (b:peek-bits r table-bits))))
+        (let ((entry (svref table
+                            (progn
+                              (unless (>= (b:brd-nbits r) table-bits)
+                                (b::%fill-bits r table-bits))
+                              (logand (b:brd-acc r) (huff-mask h))))))
           (declare (type fixnum entry))
           (cond
             ((plusp (logand entry 15))
              (let ((len (logand entry 15)))
                (declare (type fixnum len))
-               (b:rbits r len)
+               (consume-bits r len)
                (ash entry -4)))
             ((plusp entry)
              (if (or (>= (b:brd-nbits r) (+ table-bits 5))
                      (>= (b:bits-available r) (+ table-bits 5)))
                  (progn
-                   (b:rbits r table-bits)
+                   (consume-bits r table-bits)
                    (let* ((subs (huff-subtables h))
                           (sub (svref subs (1- (ash entry -4))))
-                          (entry2 (svref sub (b:peek-bits r 5))))
+                          (entry2 (svref sub
+                                          (progn
+                                            (unless (>= (b:brd-nbits r) 5)
+                                              (b::%fill-bits r 5))
+                                            (logand (b:brd-acc r) #x1F)))))
                      (declare (type simple-vector subs sub)
                               (type fixnum entry2))
                      (if (plusp (logand entry2 15))
                          (let ((rem (logand entry2 15)))
                            (declare (type fixnum rem))
-                           (b:rbits r rem)
+                           (consume-bits r rem)
                            (ash entry2 -4))
                          (berr "invalid prefix code"))))
                  (read-huff-slow r h)))

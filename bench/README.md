@@ -142,16 +142,16 @@ all **eleven** datasets, including the tiny highly-compressible ones.
 
 | q | text | html | json | source | binary | geomean |
 |---:|---:|---:|---:|---:|---:|---:|
-| 0 | 1142.4 / 208.4 / 5.48x | 120.9 / 492.0 / 0.25x | 181.3 / 659.5 / 0.27x | 238.7 / 230.9 / 1.03x | 120.6 / 468.7 / 0.26x | 0.35x |
-| 1 | 1047.3 / 1882.1 / 0.56x | 121.9 / 333.5 / 0.37x | 176.3 / 387.2 / 0.46x | 238.4 / 292.1 / 0.82x | 115.5 / 329.0 / 0.35x | 0.24x |
-| 2 | 513.9 / 1080.2 / 0.48x | 73.7 / 181.1 / 0.41x | 79.4 / 240.7 / 0.33x | 134.5 / 345.8 / 0.39x | 55.9 / 185.5 / 0.30x | 0.45x |
-| 3 | 509.3 / 999.1 / 0.51x | 68.1 / 152.5 / 0.45x | 80.0 / 200.7 / 0.40x | 133.7 / 294.0 / 0.45x | 53.3 / 146.6 / 0.36x | 0.48x |
-| 4 | 497.5 / 827.5 / 0.60x | 63.2 / 120.2 / 0.53x | 66.4 / 146.3 / 0.45x | 120.8 / 221.3 / 0.55x | 50.3 / 99.5 / 0.51x | 0.56x |
-| 5 | 339.1 / 641.6 / 0.53x | 28.1 / 68.2 / 0.41x | 27.6 / 62.4 / 0.44x | 54.8 / 123.3 / 0.44x | 27.2 / 52.2 / 0.52x | 0.57x |
-| 6 | 333.6 / 628.0 / 0.53x | 23.8 / 59.9 / 0.40x | 23.2 / 58.7 / 0.39x | 48.3 / 106.6 / 0.45x | 23.5 / 48.1 / 0.49x | 0.56x |
-| 7 | 325.0 / 295.1 / 1.10x | 20.7 / 45.1 / 0.46x | 20.4 / 41.2 / 0.50x | 44.8 / 90.4 / 0.50x | 21.6 / 38.8 / 0.56x | 0.64x |
-| 8 | 339.1 / 580.4 / 0.58x | 16.5 / 39.7 / 0.41x | 17.0 / 32.0 / 0.53x | 38.7 / 78.6 / 0.49x | 19.0 / 33.0 / 0.57x | 0.61x |
-| 9 | 337.6 / 169.2 / 2.00x | 14.1 / 22.9 / 0.62x | 14.5 / 22.3 / 0.65x | 34.7 / 49.4 / 0.70x | 17.2 / 22.7 / 0.76x | 1.47x |
+| 0 | 1154.0 / 207.5 / 5.56x | 122.2 / 485.6 / 0.25x | 181.1 / 655.6 / 0.28x | 244.6 / 236.5 / 1.03x | 118.6 / 460.0 / 0.26x | 0.32x |
+| 1 | 1060.6 / 1772.5 / 0.60x | 121.9 / 335.5 / 0.36x | 176.2 / 389.5 / 0.45x | 243.3 / 294.3 / 0.83x | 113.7 / 320.7 / 0.35x | 0.28x |
+| 2 | 516.4 / 1076.6 / 0.48x | 74.2 / 184.1 / 0.40x | 78.8 / 244.5 / 0.32x | 134.6 / 345.4 / 0.39x | 55.4 / 181.4 / 0.31x | 0.45x |
+| 3 | 511.1 / 1028.8 / 0.50x | 68.2 / 152.1 / 0.45x | 80.2 / 207.4 / 0.39x | 134.7 / 290.9 / 0.46x | 53.5 / 144.7 / 0.37x | 0.49x |
+| 4 | 512.5 / 840.8 / 0.61x | 64.8 / 128.4 / 0.50x | 68.0 / 143.4 / 0.47x | 123.9 / 237.0 / 0.52x | 50.5 / 98.1 / 0.51x | 0.55x |
+| 5 | 349.8 / 650.9 / 0.54x | 28.6 / 64.0 / 0.45x | 28.4 / 68.6 / 0.41x | 53.2 / 120.4 / 0.44x | 26.6 / 51.2 / 0.52x | 0.57x |
+| 6 | 338.9 / 639.0 / 0.53x | 23.9 / 63.5 / 0.38x | 23.6 / 54.1 / 0.44x | 48.0 / 109.5 / 0.44x | 22.2 / 47.3 / 0.47x | 0.54x |
+| 7 | 332.4 / 305.5 / 1.09x | 20.9 / 41.6 / 0.50x | 20.9 / 40.9 / 0.51x | 43.4 / 88.3 / 0.49x | 21.2 / 37.9 / 0.56x | 0.64x |
+| 8 | 342.7 / 584.8 / 0.59x | 16.7 / 39.8 / 0.42x | 17.4 / 35.2 / 0.49x | 37.4 / 74.6 / 0.50x | 18.6 / 31.2 / 0.60x | 0.62x |
+| 9 | 338.9 / 169.8 / 2.00x | 14.2 / 23.5 / 0.60x | 14.9 / 21.9 / 0.68x | 34.1 / 48.2 / 0.71x | 16.9 / 22.2 / 0.76x | 1.46x |
 
 The chain and fast-fragment work changed the low levels. q0 is 5.48x faster
 than C on text and **1.03x on source** (faster), but 0.25-0.27x on
@@ -170,24 +170,25 @@ all **eleven** datasets.
 
 | q | text | html | json | source | binary | geomean |
 |---:|---:|---:|---:|---:|---:|---:|
-| 0 | 1039.4 / 2691.2 / 0.39x | 174.5 / 565.9 / 0.31x | 229.7 / 758.8 / 0.30x | 166.9 / 481.3 / 0.35x | 146.9 / 403.9 / 0.36x | 0.34x |
-| 1 | 702.0 / 1712.4 / 0.41x | 160.2 / 565.8 / 0.28x | 187.9 / 637.8 / 0.29x | 154.6 / 515.9 / 0.30x | 154.0 / 404.0 / 0.38x | 0.41x |
+| 0 | 1120.7 / 2693.0 / 0.42x | 188.2 / 567.8 / 0.33x | 246.1 / 755.4 / 0.33x | 184.1 / 491.4 / 0.37x | 156.4 / 395.3 / 0.40x | 0.36x |
+| 1 | 742.8 / 1705.4 / 0.44x | 172.4 / 569.9 / 0.30x | 198.9 / 632.5 / 0.31x | 165.7 / 517.4 / 0.32x | 161.6 / 394.9 / 0.41x | 0.56x |
 
-q0/q1 decode is around 0.34-0.42x / 0.41-0.55x across datasets (C's measured
-decode time varies between runs; up from 0.28x/0.35x a few rounds ago). A
-direct 704-entry command LUT removes the per-command cell/sub-code
-arithmetic; the copy entry points are typed and inlined; and the NPOSTFIX=0
-distance path uses constant shifts. Text is ~0.39-0.45x, literal-heavy
-HTML/JSON/source/binary is 0.28-0.38x. A register-resident
-bulk literal decoder was measured and reverted (5-7% slower in SBCL); the
-gap is per-literal Huffman decode, while q2 and above are at/above parity.
+q0/q1 decode is now 0.36x/0.56x across datasets (up from 0.28x/0.35x a few
+rounds ago; C's measured decode time varies). A direct 704-entry command LUT
+removes the per-command cell/sub-code arithmetic; the copy entry points are
+typed and inlined; READ-HUFF now consumes bits directly instead of calling
+RBITS to discard them; and the primary-table mask is precomputed in the HUFF
+object. Text is 0.42x/0.44x, literal-heavy HTML/JSON/source/binary is
+0.30-0.41x. A register-resident bulk literal decoder was measured and
+reverted (5-7% slower in SBCL); the gap is per-literal Huffman decode, while
+q2 and above are at/above parity.
 
 ### Higher levels
 
 | q | size (lisp/C) | compression (lisp/C) | decompression (lisp/C) |
 |---:|---:|---:|---:|
-| 10 | 1.075 | 9.50x | 1.34x |
-| 11 | 1.202 | 8.20x | 1.35x |
+| 10 | 1.075 | 9.51x | 1.36x |
+| 11 | 1.202 | 8.04x | 1.41x |
 
 q10/q11 are included for completeness. They are not representative of the
 low-level behavior: the encoder spends much more time parsing, which is where
@@ -197,18 +198,18 @@ C q11 is slow, while C q0-q9 are much faster than the lisp encoder.
 
 | C q | size (lisp/C) | compress (lisp/C core) | decompress (lisp/C core) |
 |---:|---:|---:|---:|
-| 0 | 0.532 | 0.35x | 0.34x |
-| 1 | 0.611 | 0.24x | 0.41x |
-| 2 | 0.956 | 0.45x | 1.26x |
-| 3 | 1.057 | 0.48x | 1.58x |
-| 4 | 1.077 | 0.56x | 1.47x |
-| 5 | 1.058 | 0.57x | 1.36x |
-| 6 | 1.061 | 0.56x | 1.38x |
-| 7 | 1.060 | 0.64x | 1.31x |
-| 8 | 1.060 | 0.61x | 1.32x |
-| 9 | 1.064 | 1.47x | 1.31x |
-| 10 | 1.075 | 9.50x | 1.34x |
-| 11 | 1.202 | 8.20x | 1.35x |
+| 0 | 0.532 | 0.32x | 0.36x |
+| 1 | 0.611 | 0.28x | 0.56x |
+| 2 | 0.956 | 0.45x | 1.29x |
+| 3 | 1.057 | 0.49x | 1.55x |
+| 4 | 1.077 | 0.55x | 1.43x |
+| 5 | 1.058 | 0.57x | 1.40x |
+| 6 | 1.061 | 0.54x | 1.46x |
+| 7 | 1.060 | 0.64x | 1.40x |
+| 8 | 1.060 | 0.62x | 1.39x |
+| 9 | 1.064 | 1.46x | 1.39x |
+| 10 | 1.075 | 9.51x | 1.36x |
+| 11 | 1.202 | 8.04x | 1.41x |
 ### Size boundary
 
 Multi-meta-block encoding keeps ratios stable across the 16 MiB boundary. The
@@ -360,6 +361,9 @@ The benchmark was used to drive these changes:
   removed a redundant distance check, specialized the NPOSTFIX=0 distance
   path, and replaced the RFC cell/sub-code arithmetic with a direct 704-entry
   insert/copy LUT; this improved q0/q1 decode by ~70-80%;
+* made READ-HUFF consume bits directly (no RBITS refill/unused mask) and
+  precomputed the primary-table mask in the HUFF object; another ~10% on
+  q0/q1 decode;
 * level-matched benchmark rows and a microsecond-resolution timer.
 
 An AVX2 match-extender was evaluated through `sb-simd` and `sb-cpu-features`
@@ -385,12 +389,12 @@ level against both decoders). Benchmarks are run only on SBCL 2.6.9.
   size of C q0. The remaining literal-heavy gap is mainly SBCL codegen
   versus the hand-written C emitter plus C's block splitting/command-code
   adaptation.
-* q0/q1 decode is around 0.34-0.42x / 0.41-0.55x across all eleven datasets
-  (C timing varies between runs). Text is ~0.39-0.45x; literal-heavy
-  HTML/JSON/source/binary is 0.28-0.38x. A 704-entry command LUT,
-  typed/inlined copy path, NPOSTFIX=0 distance path, and typed decode-loop
-  scalars gave ~70-80% over the older decoder. Fast per-literal Huffman
-  decode is the remaining gap.
+* q0/q1 decode is 0.36x/0.56x across all eleven datasets (C timing varies
+  between runs). Text is 0.42x/0.44x; literal-heavy HTML/JSON/source/binary
+  is 0.30-0.41x. A 704-entry command LUT, typed/inlined copy path,
+  NPOSTFIX=0 distance path, direct bit consumption, and a precomputed
+  primary-table mask gave ~90% over the older decoder. Fast per-literal
+  Huffman decode is the remaining gap.
 * The encoder builds the plain entropy-coded stream, adds a dictionary pass
   when the level enables it and the input is text-like, and only builds the
   stored fallback when the candidates are not already smaller than the input.

@@ -306,3 +306,12 @@ records shared by both passes. Output sizes are identical. q0 HTML
 100->121, JSON 162->181, source 202->239, binary 104->121 MiB/s; q0
 source now beats C (1.03x). Initial capacity is `n/32` commands: a larger
 preallocation (`n/8`) made text slower by zeroing more memory.
+
+## Decoder: direct bit consumption and precomputed table mask
+
+`READ-HUFF` called `RBITS` only to discard bits, even though `PEEK-BITS`
+had already filled the reservoir. Replace that with `CONSUME-BITS` (shift
+and decrement, no refill, no unused mask), and store the primary-table mask
+in the `HUFF` object instead of recomputing `(ash 1 table-bits)` on every
+peek. q0/q1 decode: text 1121/743 MiB/s, HTML 188/172, JSON 246/199,
+source 184/166, binary 156/162; geomeans 0.36x/0.56x of C.
