@@ -1412,12 +1412,14 @@ meta-block."
        (let* ((cmds (lz77 data window :use-dict use-dict
                                    :dict-limit dict-limit :base-pos 0
                                    :max-chain max-chain :lazy lazy))
-              (blocks (partition-commands cmds #.(ash 1 24)))
+              (remaining (partition-commands cmds #.(ash 1 24)))
               (pos 0))
-         (dolist (block blocks)
-           (let ((outlen (reduce #'+ block :key #'command-output-length
-                                       :initial-value 0)))
-             (write-mlen-header w outlen nil)
+         (loop while remaining do
+           (let* ((block (pop remaining))
+                  (lastp (null remaining))
+                  (outlen (reduce #'+ block :key #'command-output-length
+                                        :initial-value 0)))
+             (write-mlen-header w outlen lastp)
              (write-compressed-block-body w data 0 window use-dict dict-limit
                                           rb :max-chain max-chain
                                              :lazy lazy :short-dist short-dist
@@ -1426,8 +1428,7 @@ meta-block."
                                              :cmds block)
              (incf pos outlen)))
          (unless (= pos n)
-           (error "multi-block encoder produced ~D bytes, expected ~D" pos n))
-         (b:wbits w 1 1) (b:wbits w 1 1))))                ; final empty last block
+           (error "multi-block encoder produced ~D bytes, expected ~D" pos n)))))
     (b:w-align w)
     (b:bwr-result w)))
 

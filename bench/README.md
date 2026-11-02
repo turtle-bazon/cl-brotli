@@ -366,6 +366,11 @@ The benchmark was used to drive these changes:
   q11 decompression consing drops 3.35->1.56 MB per MiB, and level-matched
   decompression geomeans rise q2 1.43->1.75, q5 1.48->1.62, q11 1.64->1.81
   (the all-eleven geomean is noisy; see the per-dataset ratios);
+* grow large decoder output buffers by 1.5x instead of 4x, reserve the last
+  compressed block and large stored blocks exactly, and have the multi-block
+  encoder mark its final data block ISLAST instead of appending an empty
+  block. A 17 MiB decode now allocates 34 MB instead of 101 MB (text and
+  incompressible random); 1 MiB results are unchanged;
 * compare dictionary candidates byte-by-byte (with the UTF-8 case transforms
   applied on the fly) instead of allocating `subseq`/`apply-transform`
   temporaries for every candidate and transform; q11-encoder allocation for

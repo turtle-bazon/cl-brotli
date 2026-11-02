@@ -63,10 +63,20 @@
                   ;; R-BYTES + APPEND path allocated and copied each stored
                   ;; block twice.
                   (let ((pos (outbuf-pos out)))
-                    (%grow out (+ pos mlen))
+                    ;; Stored blocks are the incompressible fallback and
+                    ;; are normally written in 16 MiB chunks.  Reserve their
+                    ;; exact size so the final SUBSEQ at the end of
+                    ;; %DECOMPRESS is unnecessary.
+                    (%grow-exact out (+ pos mlen))
                     (b:r-bytes-into r (outbuf-data out) pos mlen)
                     (setf (outbuf-pos out) (+ pos mlen))))
-                 (t (decode-compressed-meta-block r out mlen window rb)))))))
+                 (t
+                  ;; For the last non-empty block we know the exact final
+                  ;; size, so reserve it and avoid both growth overshoot and
+                  ;; the final SUBSEQ copy.
+                  (when (= islast 1)
+                    (%grow-exact out (+ (outbuf-pos out) mlen)))
+                  (decode-compressed-meta-block r out mlen window rb)))))))
         (when (= islast 1) (return-from blocks))))
     (let ((data (outbuf-data out)) (pos (outbuf-pos out)))
       (if (= pos (length data)) data (subseq data 0 pos)))))

@@ -426,3 +426,23 @@ than 2x between runs, so the aggregate geomean is much noisier than the
 per-dataset ratios. On the five representative corpora the decode ratios are
 stable; for the recorded run HTML q0/q11 is 0.34/0.30, JSON 0.33/0.33,
 SOURCE 0.38/0.42, and BINARY 0.41/0.33.
+
+## Decoder output growth for large streams
+
+`%GROW` quadrupled the output buffer whenever a new meta-block needed more
+room. For a 17 MiB result that meant a 16 MiB buffer, then a 64 MiB buffer,
+then a final 17 MiB `SUBSEQ`: ~101 MB consed per decode. Two changes:
+
+* large buffers (>= 64 KiB) grow by 1.5x rather than 4x, so the second block
+  of a 17 MiB stream allocates 24 MiB rather than 64 MiB;
+* `%GROW-EXACT` reserves the known final size for the last compressed block
+  and for stored blocks, so the final `SUBSEQ` disappears. The multi-block
+  encoder now marks its last data block ISLAST instead of appending a
+  separate empty last meta-block, which lets the decoder use that exact
+  reservation.
+
+17 MiB decompression consing drops 101->34 MB for both tiled text and
+incompressible random data; 1 MiB streams are unchanged. Our 17 MiB streams
+still cross-decode with the C reference, and the 94 tests (including the
+multi-block case) pass. This targets allocation and large-stream latency,
+not the 1 MiB quality-sweep ratios.

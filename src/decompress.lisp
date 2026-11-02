@@ -106,10 +106,24 @@ visible, and MODE is loop-invariant between block switches."
   (pos 0 :type fixnum))
 
 (defun %grow (out need)
+  (let* ((data (outbuf-data out)) (len (length data)))
+    (when (> need len)
+      ;; Small buffers quadruple to avoid repeated copies; large ones grow by
+      ;; 1.5x.  A 4x jump on the second block of a 16 MiB stream otherwise
+      ;; allocated 64 MiB for a 17 MiB result.
+      (let ((new (make-array (max need
+                                  (if (< len 65536)
+                                      (* 4 len)
+                                      (+ len (ash len -1))))
+                              :element-type '(unsigned-byte 8))))
+        (replace new data)
+        (setf (outbuf-data out) new)))))
+
+(defun %grow-exact (out need)
+  "Reserve exactly NEED bytes, without the usual growth overshoot."
   (let ((data (outbuf-data out)))
     (when (> need (length data))
-      (let ((new (make-array (max need (* 4 (length data)))
-                              :element-type '(unsigned-byte 8))))
+      (let ((new (make-array need :element-type '(unsigned-byte 8))))
         (replace new data)
         (setf (outbuf-data out) new)))))
 
