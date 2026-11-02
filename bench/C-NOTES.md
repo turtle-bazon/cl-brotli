@@ -324,3 +324,9 @@ makes a separate pass over the command vector. Output is bit-identical.
 q0 text/HTML/source/binary reach 1160/121/248/122 MiB/s; q0 source is
 1.06x C. The full-harness geomean change is within run-to-run noise, but
 the pipeline is now one pass shorter.
+
+Extending the flat 32-bit command vector to the generic q2-q11 matcher was
+also measured. The microbenchmark showed large q2-q4 text gains (+44-49%),
+but the level-matched harness regressed q5-q11 (q9 geomean 1.47->1.40,
+q11 8.20->7.78) with unchanged sizes, so the list-based generic path was
+kept; only q0/q1 use the flat vector and fused histograms.
