@@ -543,3 +543,15 @@ unchanged and the SBCL bug is avoided.
 Microbenchmark medians: q0 TEXT 1218->1298 MiB/s, HTML 118->135, JSON
 176->204, SOURCE 253->274, BINARY 119->125; q1 similar. Level-matched q0
 geomean rises 0.43->0.48, q0 text is 6.65x C, and q0 source is 1.20x C.
+
+## Batched writer capacity checks
+
+`W-ENSURE` is a normal function, and both writers called it once per command.
+Keep a local `SLACK` counter instead: when the current command's worst-case
+byte cost (`32 + 2*ins` for q0/q1, `24 + 2*ins` for the generic writer)
+exceeds the slack, reserve another 64 KiB and decrement by the cost. The
+output size is unchanged.
+
+q0 HTML 135->146 MiB/s, JSON 200->210, SOURCE 274->282, BINARY 125->129;
+q1 HTML 129->139, JSON 194->201, SOURCE 264->272. The generic q2-q11 writer
+uses the same scheme; the gain there is smaller because the matcher dominates.

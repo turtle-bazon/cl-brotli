@@ -1099,8 +1099,8 @@ histograms.  The MLEN header must already have been written."
            (cmd-map +q0-cmd-map+)
            (dist-rc (or (etree-rcodes dist-et) +empty-fixnums+))
            (dist-ln (or (etree-lengths dist-et) +empty-fixnums+))
-           (last-dist -1))
-      (declare (type fixnum last-dist)
+           (last-dist -1) (slack 0))
+      (declare (type fixnum last-dist slack)
                (type (simple-array fixnum (*))
                      lit-rc lit-ln cmd-rc cmd-ln cmd-map dist-rc dist-ln))
       ;; NBLTYPES 1/1/1, NPOSTFIX=0, NDIRECT=0, context mode 0,
@@ -1144,9 +1144,17 @@ histograms.  The MLEN header must already have been written."
                  (cpy (aref cv (+ base 2)))
                  (dist (aref cv (+ base 3))))
             (declare (type fixnum ins lit-start cpy dist))
+            ;; Ensure capacity in 64 KiB chunks instead of once per command.
+            ;; The per-command upper bound is 32 bytes of command/distance
+            ;; overhead plus two bytes per literal.
+            (let ((cost (+ 32 (* 2 ins))))
+              (declare (type fixnum cost))
+              (when (> cost slack)
+                (setf slack 65536)
+                (b:w-ensure w (+ slack cost)))
+              (decf slack cost))
             (cond
               ((and (plusp ins) (plusp cpy))
-               (b:w-ensure w (+ 32 (* 2 ins)))
                (multiple-value-bind (cc e nb) (q0-insert-len ins)
                  (emit-cmd cc e nb))
                (unless lit-single
@@ -1162,14 +1170,12 @@ histograms.  The MLEN header must already have been written."
                  (when (>= (aref cmd-map cc) 128)
                    (emit-dist 64 0 0))))
               ((plusp cpy)
-               (b:w-ensure w 32)
                (multiple-value-bind (cc e nb) (q0-copy-len cpy)
                  (emit-cmd cc e nb))
                (multiple-value-bind (cc e nb) (q0-distance dist)
                  (emit-dist cc e nb))
                (setf last-dist dist))
               (t
-               (b:w-ensure w (+ 32 (* 2 ins)))
                (multiple-value-bind (cc e nb) (q0-insert-len ins)
                  (emit-cmd cc e nb))
                (unless lit-single
@@ -1318,9 +1324,11 @@ list covering exactly this block."
               (lit-rc (or (etree-rcodes lit) +empty-fixnums+))
               (lit-ln (or (etree-lengths lit) +empty-fixnums+))
               (dist-rc (or (etree-rcodes dist) +empty-fixnums+))
-              (dist-ln (or (etree-lengths dist) +empty-fixnums+)))
+              (dist-ln (or (etree-lengths dist) +empty-fixnums+))
+              (slack 0))
           (declare (type (simple-array fixnum (*))
-                         cmd-rc cmd-ln lit-rc lit-ln dist-rc dist-ln))
+                         cmd-rc cmd-ln lit-rc lit-ln dist-rc dist-ln)
+                   (type fixnum slack))
           (dotimes (k ncmd)
             (let ((b (* k +cmd-stride+)))
               (declare (type fixnum b))
@@ -1331,7 +1339,13 @@ list covering exactly this block."
                 ;; at most ~13 bytes of command/distance overhead plus two
                 ;; bytes per literal (code lengths are <= 15 bits), plus the
                 ;; eight-byte slack the raw writer needs for its final store.
-                (b:w-ensure w (+ 24 (* 2 ins)))
+                ;; Reserve 64 KiB at a time instead of checking per command.
+                (let ((cost (+ 24 (* 2 ins))))
+                  (declare (type fixnum cost))
+                  (when (> cost slack)
+                    (setf slack 65536)
+                    (b:w-ensure w (+ slack cost)))
+                  (decf slack cost))
                 (unless cmd-single
                   (b:%wbits-raw w (aref cmd-rc (aref recs (+ b 2)))
                                 (aref cmd-ln (aref recs (+ b 2)))))
