@@ -555,3 +555,15 @@ output size is unchanged.
 q0 HTML 135->146 MiB/s, JSON 200->210, SOURCE 274->282, BINARY 125->129;
 q1 HTML 129->139, JSON 194->201, SOURCE 264->272. The generic q2-q11 writer
 uses the same scheme; the gain there is smaller because the matcher dominates.
+
+## Last-distance seeding in the chain matcher
+
+C checks the last distances before walking its hash bucket. The chain matcher
+now checks the previous emitted distance first and uses a hit as the initial
+`BEST-LEN`; the 4-byte probe then rejects more chain candidates. Dictionary
+matches do not update this cache.
+
+Sizes shrink slightly with neutral speed: BINARY q2 345482->341166, q5
+298766->295846; SOURCE q2 115830->115640; HTML/JSON q5 and q9 also lose a few
+dozen bytes. q11 compression geomean reaches 16.59x. A four-entry distance
+cache (C uses 4/10/16 entries) is the natural next step.

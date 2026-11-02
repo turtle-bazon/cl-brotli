@@ -640,10 +640,10 @@ or NIL on other implementations."
                (prev (and chained
                           (make-array n :element-type '(unsigned-byte 32))))
                (cmds '()) (lit-start 0) (p 0) (last (- n min-match))
-               (skip 32) (dict-used 0))
+               (skip 32) (dict-used 0) (last-dist 0))
           (declare (type (simple-array (unsigned-byte 32) (*)) head)
                    (type (or null (simple-array (unsigned-byte 32) (*))) prev)
-                   (type fixnum p lit-start last skip dict-used))
+                   (type fixnum p lit-start last skip dict-used last-dist))
           (labels (#+sbcl
                    (hash (i)
                      (if sap (%hash4-sap sap i hmask) (%hash4 data i hmask)))
@@ -670,6 +670,16 @@ or NIL on other implementations."
                      t)
                    (find-match (pos h)
                      (let ((cand (aref head h)) (best-len 0) (best-dist 0))
+                       ;; C checks the last distance before walking the
+                       ;; chain.  A good hit also raises BEST-LEN, which
+                       ;; makes PROBE-OK reject more chain candidates.
+                       (when (plusp last-dist)
+                         (let ((prev (- pos last-dist)))
+                           (when (and (>= prev 0) (<= last-dist window)
+                                      (probe-ok prev pos best-len))
+                             (let ((ml (mlen prev pos)))
+                               (when (> ml best-len)
+                                 (setf best-len ml best-dist last-dist))))))
                        (if chained
                            (let ((chain max-chain))
                              (loop while (and (/= cand #xFFFFFFFF) (> chain 0)) do
@@ -692,6 +702,7 @@ or NIL on other implementations."
                            (push (list (- p lit-start) lit-start best-len
                                        best-dist nil)
                                  cmds)
+                           (setf last-dist best-dist)
                            (when (and chained insert-interior)
                              ;; C's StoreRange: for a short distance relative
                              ;; to the match, only store the tail positions to
