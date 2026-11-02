@@ -754,25 +754,256 @@ compression ratio for encoder throughput."
 
 ;;; ---- compressed meta-block --------------------------------------------
 
-(defun fast-literal-histogram (data)
-  "C Brotli's q0 literal histogram: exact for short inputs, every 29th byte
-for longer ones, with +1 for every symbol (so sampled symbols stay encodable)
-and the first 11 observations weighted by 3 to compensate for LZ77."
-  (declare (type (simple-array (unsigned-byte 8) (*)) data)
+;;; ---- C Brotli's q0/q1 fast-fragment entropy coding --------------------
+
+(defun q0-cmd-symbol (c)
+  "Map C's 64 fast command codes onto the full Brotli command alphabet."
+  (declare (type fixnum c))
+  (cond ((< c 8) c)
+        ((< c 16) (+ 64 (- c 8)))
+        ((< c 24) (+ 128 (- c 16)))
+        ((< c 32) (+ 192 (- c 24)))
+        ((< c 40) (+ 384 (- c 32)))
+        ((< c 48) (+ 128 (* 8 (- c 40))))
+        ((< c 56) (+ 256 (* 8 (- c 48))))
+        (t (+ 448 (* 8 (- c 56))))))
+
+(defparameter +q0-cmd-map+
+  (let ((v (make-array 64 :element-type 'fixnum)))
+    (dotimes (c 64 v) (setf (aref v c) (q0-cmd-symbol c)))))
+
+;; C's kCmdHistoSeed: a prior that keeps every command code the fast path can
+;; emit encodable and avoids degenerate one-symbol command trees.
+(defparameter +q0-seed-cmd+
+  #(0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
+    0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1
+    1 1 1 1 1 1 1 1 0 1 1 1 1 1 1 1
+    1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1))
+
+(defparameter +q0-seed-dist+
+  #(1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+    1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
+    1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
+    1 1 1 1 1 1 1 1 1 1 1 1 0 0 0 0))
+
+(defun make-fixed-etree (lengths n)
+  (let ((codes (canonical-codes lengths n)))
+    (make-etree :lengths lengths :codes codes
+                :rcodes (reversed-codes codes lengths n))))
+
+(defun fast-cmd-etree (et)
+  "Map a 64-symbol fast command etree onto the full 704-symbol alphabet."
+  (if (etree-single et)
+      (make-etree :single (aref +q0-cmd-map+ (etree-single et)))
+      (let ((full (make-array 704 :element-type 'fixnum :initial-element 0))
+            (fl (etree-lengths et)))
+        (dotimes (c 64)
+          (let ((d (aref fl c)))
+            (when (plusp d)
+              (setf (aref full (aref +q0-cmd-map+ c)) d))))
+        (make-fixed-etree full 704))))
+
+(declaim (inline q0-insert-len q0-copy-len q0-copy-last-len q0-distance))
+(defun q0-insert-len (insert)
+  (declare (type fixnum insert) (optimize (speed 3) (safety 0)))
+  (cond ((< insert 6) (values (+ insert 40) 0 0))
+        ((< insert 130)
+         (let* ((tail (- insert 2))
+                (nb (- (integer-length tail) 2))
+                (prefix (ash tail (- nb))))
+           (values (+ (* nb 2) prefix 42)
+                   (- tail (ash prefix nb)) nb)))
+        ((< insert 2114)
+         (let* ((tail (- insert 66))
+                (nb (1- (integer-length tail))))
+           (values (+ nb 50) (- tail (ash 1 nb)) nb)))
+        ((< insert 6210) (values 61 (- insert 2114) 12))
+        ((< insert 22594) (values 62 (- insert 6210) 14))
+        (t (values 63 (- insert 22594) 24))))
+
+(defun q0-copy-len (copylen)
+  (declare (type fixnum copylen) (optimize (speed 3) (safety 0)))
+  (cond ((< copylen 10) (values (+ copylen 14) 0 0))
+        ((< copylen 134)
+         (let* ((tail (- copylen 6))
+                (nb (- (integer-length tail) 2))
+                (prefix (ash tail (- nb))))
+           (values (+ (* nb 2) prefix 20)
+                   (- tail (ash prefix nb)) nb)))
+        ((< copylen 2118)
+         (let* ((tail (- copylen 70))
+                (nb (1- (integer-length tail))))
+           (values (+ nb 28) (- tail (ash 1 nb)) nb)))
+        (t (values 39 (- copylen 2118) 24))))
+
+(defun q0-copy-last-len (copylen)
+  (declare (type fixnum copylen) (optimize (speed 3) (safety 0)))
+  (cond ((< copylen 12) (values (- copylen 4) 0 0))
+        ((< copylen 72)
+         (let* ((tail (- copylen 8))
+                (nb (- (integer-length tail) 2))
+                (prefix (ash tail (- nb))))
+           (values (+ (* nb 2) prefix 4)
+                   (- tail (ash prefix nb)) nb)))
+        ((< copylen 136)
+         (let ((tail (- copylen 8)))
+           (values (+ (ash tail -5) 30) (logand tail 31) 5)))
+        ((< copylen 2120)
+         (let* ((tail (- copylen 72))
+                (nb (1- (integer-length tail))))
+           (values (+ nb 28) (- tail (ash 1 nb)) nb)))
+        (t (values 39 (- copylen 2120) 24))))
+
+(defun q0-distance (distance)
+  (declare (type fixnum distance) (optimize (speed 3) (safety 0)))
+  (let* ((d (+ distance 3))
+         (nb (- (integer-length d) 2))
+         (prefix (logand (ash d (- nb)) 1))
+         (offset (ash (+ 2 prefix) nb)))
+    (values (+ (* 2 (1- nb)) prefix 80)
+            (- d offset) nb)))
+
+(defun q0-histograms (data cmds)
+  "Return (values LITFREQ CMDFREQ DISTFREQ) for the fast command list CMDS.
+CMDFREQ is over the 64 fast command codes; DISTFREQ is over distance
+symbols 0..63.  The command/distance histograms start from C's seed."
+  (declare (type (simple-array (unsigned-byte 8) (*)) data))
+  (let ((litf (make-array 256 :element-type 'fixnum :initial-element 0))
+        (cmdf (make-array 64 :element-type 'fixnum :initial-element 0))
+        (distf (make-array 64 :element-type 'fixnum :initial-element 0))
+        (last-dist -1))
+    (declare (type (simple-array fixnum (256)) litf)
+             (type (simple-array fixnum (64)) cmdf distf)
+             (type fixnum last-dist))
+    (replace cmdf +q0-seed-cmd+)
+    (replace distf +q0-seed-dist+)
+    (dolist (c cmds)
+      (let ((ins (car c))
+            (lit-start (cadr c))
+            (cpy (caddr c))
+            (dist (cadddr c)))
+        (declare (type fixnum ins lit-start cpy dist))
+        (loop for i from lit-start below (+ lit-start ins)
+              do (incf (aref litf (aref data i))))
+        (cond
+          ((and (plusp ins) (plusp cpy))
+           (multiple-value-bind (cc e nb) (q0-insert-len ins)
+             (declare (ignore e nb))
+             (incf (aref cmdf cc)))
+           (if (= dist last-dist)
+               (incf (aref distf 0))
+               (progn
+                 (multiple-value-bind (cc e nb) (q0-distance dist)
+                   (declare (ignore e nb))
+                   (incf (aref distf (- cc 64))))
+                 (setf last-dist dist)))
+           (multiple-value-bind (cc e nb) (q0-copy-last-len cpy)
+             (declare (ignore e nb))
+             (incf (aref cmdf cc))
+             (when (>= (aref +q0-cmd-map+ cc) 128)
+               (incf (aref distf 0)))))
+          ((plusp cpy)
+           (multiple-value-bind (cc e nb) (q0-copy-len cpy)
+             (declare (ignore e nb))
+             (incf (aref cmdf cc)))
+           (multiple-value-bind (cc e nb) (q0-distance dist)
+             (declare (ignore e nb))
+             (incf (aref distf (- cc 64))))
+           (setf last-dist dist))
+          (t
+           (multiple-value-bind (cc e nb) (q0-insert-len ins)
+             (declare (ignore e nb))
+             (incf (aref cmdf cc)))))))
+    (values litf cmdf distf)))
+
+(defun write-fast-block-body (w data cmds)
+  "Emit a q0/q1 meta-block body from the fast-fragment command list, using
+the fast command/distance alphabet with trees built from the actual histograms.
+The MLEN header must already have been written."
+  (declare (type b:bwr w)
+           (type (simple-array (unsigned-byte 8) (*)) data)
            (optimize (speed 3) (safety 0)))
-  (let* ((n (length data))
-         (sampled (>= n 32768))
-         (h (make-array 256 :element-type 'fixnum :initial-element 0)))
-    (declare (type fixnum n)
-             (type (simple-array fixnum (256)) h))
-    (if sampled
-        (loop for i from 0 below n by 29
-              do (incf (aref h (aref data i))))
-        (dotimes (i n) (incf (aref h (aref data i)))))
-    (dotimes (b 256)
-      (let ((c (aref h b)))
-        (incf (aref h b) (+ (if sampled 1 0) (* 2 (min c 11))))))
-    h))
+  (multiple-value-bind (litf cmdf distf) (q0-histograms data cmds)
+    (let* ((lit (build-etree litf 256 15))
+           (cmd-et (fast-cmd-etree (build-etree cmdf 64 15)))
+           (dist-et (build-etree distf 64 14))
+           (lit-single (etree-single lit))
+           (cmd-single (etree-single cmd-et))
+           (dist-single (etree-single dist-et))
+           (lit-rc (or (etree-rcodes lit) +empty-fixnums+))
+           (lit-ln (or (etree-lengths lit) +empty-fixnums+))
+           (cmd-rc (or (etree-rcodes cmd-et) +empty-fixnums+))
+           (cmd-ln (or (etree-lengths cmd-et) +empty-fixnums+))
+           (cmd-map +q0-cmd-map+)
+           (dist-rc (or (etree-rcodes dist-et) +empty-fixnums+))
+           (dist-ln (or (etree-lengths dist-et) +empty-fixnums+))
+           (last-dist -1))
+      (declare (type fixnum last-dist)
+               (type (simple-array fixnum (*))
+                     lit-rc lit-ln cmd-rc cmd-ln cmd-map dist-rc dist-ln))
+      ;; NBLTYPES 1/1/1, NPOSTFIX=0, NDIRECT=0, context mode 0,
+      ;; NTREESL=1, NTREESD=1; then literal, command, distance codes.
+      (b:wbits w 0 1) (b:wbits w 0 1) (b:wbits w 0 1)
+      (b:wbits w 0 2)
+      (b:wbits w 0 4)
+      (b:wbits w 0 2)
+      (b:wbits w 0 1) (b:wbits w 0 1)
+      (write-etree w lit 256)
+      (write-etree w cmd-et 704)
+      (write-etree w dist-et 64)
+      (macrolet ((emit-cmd (code extra nbits)
+                   `(unless cmd-single
+                      (let ((c ,code))
+                        (declare (type fixnum c))
+                        (b:%wbits-raw w (aref cmd-rc (aref cmd-map c))
+                                      (aref cmd-ln (aref cmd-map c)))
+                        (when (plusp ,nbits)
+                          (b:%wbits-raw w ,extra ,nbits)))))
+                 (emit-dist (code extra nbits)
+                   `(unless dist-single
+                      (let ((c ,code))
+                        (declare (type fixnum c))
+                        (b:%wbits-raw w (aref dist-rc (- c 64))
+                                      (aref dist-ln (- c 64)))
+                        (when (plusp ,nbits)
+                          (b:%wbits-raw w ,extra ,nbits))))))
+        (dolist (c cmds)
+          (let ((ins (car c))
+                (lit-start (cadr c))
+                (cpy (caddr c))
+                (dist (cadddr c)))
+            (declare (type fixnum ins lit-start cpy dist))
+            (cond
+              ((and (plusp ins) (plusp cpy))
+               (b:w-ensure w (+ 32 (* 2 ins)))
+               (multiple-value-bind (cc e nb) (q0-insert-len ins)
+                 (emit-cmd cc e nb))
+               (unless lit-single
+                 (b:w-emit-run w data lit-start (+ lit-start ins) lit-rc lit-ln))
+               (if (= dist last-dist)
+                   (emit-dist 64 0 0)
+                   (progn
+                     (multiple-value-bind (cc e nb) (q0-distance dist)
+                       (emit-dist cc e nb))
+                     (setf last-dist dist)))
+               (multiple-value-bind (cc e nb) (q0-copy-last-len cpy)
+                 (emit-cmd cc e nb)
+                 (when (>= (aref cmd-map cc) 128)
+                   (emit-dist 64 0 0))))
+              ((plusp cpy)
+               (b:w-ensure w 32)
+               (multiple-value-bind (cc e nb) (q0-copy-len cpy)
+                 (emit-cmd cc e nb))
+               (multiple-value-bind (cc e nb) (q0-distance dist)
+                 (emit-dist cc e nb))
+               (setf last-dist dist))
+              (t
+               (b:w-ensure w (+ 32 (* 2 ins)))
+               (multiple-value-bind (cc e nb) (q0-insert-len ins)
+                 (emit-cmd cc e nb))
+               (unless lit-single
+                 (b:w-emit-run w data lit-start (+ lit-start ins) lit-rc lit-ln))))))))))
+
 
 ;;; Flat command records: 10 fixnums per command.  A struct per command was
 ;;; ~15% of low-quality compression time; CPY is not needed by the emitter,
@@ -784,7 +1015,7 @@ and the first 11 observations weighted by 3 to compensate for LZ77."
 (defun plan-commands (data cmds
                       &optional (rb (make-array 5 :element-type 'fixnum
                                                   :initial-contents '(16 15 11 4 4)))
-                      &key (short-dist t) (precomputed-litfreq nil))
+                      &key (short-dist t))
   "Turn raw LZ77 commands into flat fixnum records and tally literal/command/
 distance frequencies.  Returns (values RECS NCOMMANDS LITFREQ CMDFREQ DISTFREQ).
 RB is the distance ring shared by all meta-blocks of the stream; it must
@@ -795,8 +1026,7 @@ per command."
          (recs (make-array (* +cmd-stride+ ncmd)
                            :element-type 'fixnum :initial-element 0))
          (ri 0)
-         (litfreq (or precomputed-litfreq
-                      (make-array 256 :element-type 'fixnum :initial-element 0)))
+         (litfreq (make-array 256 :element-type 'fixnum :initial-element 0))
          (cmdfreq (make-array 704 :element-type 'fixnum :initial-element 0))
          (distfreq (make-array 64 :element-type 'fixnum :initial-element 0)))
     (declare (type fixnum ri)
@@ -830,9 +1060,8 @@ per command."
                      (dcode -1) (dxv 0) (dxb 0))
                 (declare (type fixnum csym dcode dxv dxb))
                 (incf (aref cmdfreq csym))
-                (unless precomputed-litfreq
-                  (loop for i from lit-start below (+ lit-start ins)
-                        do (incf (aref litfreq (aref data i)))))
+                (loop for i from lit-start below (+ lit-start ins)
+                      do (incf (aref litfreq (aref data i))))
                 (when copyp
                   (unless dist0
                     (if repeat
@@ -874,8 +1103,7 @@ per command."
 
 (defun write-compressed-block-body (w data base-pos window use-dict dict-limit rb
                                     &key (max-chain 128) (lazy t) (short-dist t)
-                                      (skip-match nil) (insert-interior t) cmds
-                                      (sample-literals nil))
+                                      (skip-match nil) (insert-interior t) cmds)
   "Write the NBLTYPES/trees/commands part of a compressed meta-block.  The
 MLEN header must already have been written.  RB is the stream-wide distance
 ring shared with the decoder.  CMDS, when supplied, is a precomputed command
@@ -886,8 +1114,7 @@ list covering exactly this block."
            (type (or null fixnum) dict-limit)
            (type (simple-array fixnum (*)) rb)
            (type fixnum max-chain))
-  (let ((sampled (and sample-literals (null cmds))))
-    (multiple-value-bind (recs ncmd litf cmdf distf)
+  (multiple-value-bind (recs ncmd litf cmdf distf)
         (plan-commands
          data
          (or cmds
@@ -895,11 +1122,10 @@ list covering exactly this block."
                             :base-pos base-pos :max-chain max-chain :lazy lazy
                             :skip-match skip-match
                             :insert-interior insert-interior))
-         rb :short-dist short-dist
-         :precomputed-litfreq (and sampled (fast-literal-histogram data)))
+         rb :short-dist short-dist)
       (declare (type (simple-array fixnum (*)) recs litf cmdf distf)
                (type fixnum ncmd))
-      (let ((lit (build-etree litf 256 (if sampled 8 15)))
+      (let ((lit (build-etree litf 256 15))
             (cmd (build-etree cmdf 704 15))
             (dist (build-etree distf 64 15)))
         (b:wbits w 0 1) (b:wbits w 0 1) (b:wbits w 0 1)   ; NBLTYPES L/I/D = 1
@@ -956,7 +1182,7 @@ list covering exactly this block."
                       (b:%wbits-raw w (aref dist-rc dcode)
                                     (aref dist-ln dcode)))
                     (b:%wbits-raw w (aref recs (+ b 8))
-                                  (aref recs (+ b 9)))))))))))))
+                                  (aref recs (+ b 9))))))))))))
 
 (defun command-output-length (cmd)
   (+ (first cmd) (third cmd)))
@@ -1041,7 +1267,7 @@ whole and moved to the next block when necessary."
 (defun compress-entropy (input &key (use-dict nil) (dict-limit nil)
                                     (max-chain 128) (lazy t) (short-dist t)
                                     (skip-match nil) (insert-interior t)
-                                    (sample-literals nil))
+                                    (fast-fragment nil))
   "Entropy-coded brotli stream for INPUT.  Inputs larger than one meta-block
 are split into <= 2^24-byte compressed meta-blocks followed by an empty last
 meta-block."
@@ -1058,11 +1284,17 @@ meta-block."
        (b:wbits w 1 1) (b:wbits w 1 1))                    ; ISLAST + ISLASTEMPTY
       ((<= n #.(ash 1 24))
        (write-mlen-header w n t)
-       (write-compressed-block-body w data 0 window use-dict dict-limit rb
-                                    :max-chain max-chain :lazy lazy
-                                    :short-dist short-dist
-                                    :skip-match skip-match
-                                    :insert-interior insert-interior))
+       (if fast-fragment
+           (write-fast-block-body
+            w data
+            (lz77 data window
+                   :max-chain max-chain :lazy nil :skip-match t
+                   :use-dict nil :insert-interior nil))
+           (write-compressed-block-body w data 0 window use-dict dict-limit rb
+                                        :max-chain max-chain :lazy lazy
+                                        :short-dist short-dist
+                                        :skip-match skip-match
+                                        :insert-interior insert-interior)))
       (t
        (let* ((cmds (lz77 data window :use-dict use-dict
                                    :dict-limit dict-limit :base-pos 0
@@ -1078,8 +1310,7 @@ meta-block."
                                              :lazy lazy :short-dist short-dist
                                              :skip-match skip-match
                                              :insert-interior insert-interior
-                                             :cmds block
-                                             :sample-literals sample-literals)
+                                             :cmds block)
              (incf pos outlen)))
          (unless (= pos n)
            (error "multi-block encoder produced ~D bytes, expected ~D" pos n))
@@ -1126,8 +1357,9 @@ enable the static dictionary."
     ;; ~30x larger than C q0 on text-like data.  The stored fallback is still
     ;; used whenever entropy coding cannot beat the input size.
     (0 '(:max-chain 1 :lazy nil :use-dict nil :short-dist nil :skip-match t
-          :insert-interior nil :sample-literals t))
-    (1 '(:max-chain 2 :lazy nil :use-dict nil :short-dist nil :skip-match t :insert-interior nil))
+          :insert-interior nil :fast-fragment t))
+    (1 '(:max-chain 2 :lazy nil :use-dict nil :short-dist nil :skip-match t
+          :insert-interior nil :fast-fragment t))
     (2 '(:max-chain 4 :lazy nil :use-dict nil :short-dist nil :skip-match t :insert-interior nil))
     (3 '(:max-chain 8 :lazy nil :use-dict nil :short-dist nil :skip-match t :insert-interior nil))
     (4 '(:max-chain 16 :lazy nil :use-dict nil :short-dist nil :skip-match t :insert-interior nil))
@@ -1155,7 +1387,7 @@ already smaller than the input."
                (short-dist (getf params :short-dist t))
                (skip-match (getf params :skip-match nil))
                (insert-interior (getf params :insert-interior t))
-               (sample-literals (getf params :sample-literals nil))
+               (fast-fragment (getf params :fast-fragment nil))
                (dict-ok (and (getf params :use-dict) (text-like-data-p data)))
                (plain (compress-entropy data :use-dict nil
                                                :max-chain max-chain
@@ -1163,7 +1395,7 @@ already smaller than the input."
                                                :short-dist short-dist
                                                :skip-match skip-match
                                                :insert-interior insert-interior
-                                               :sample-literals sample-literals))
+                                               :fast-fragment fast-fragment))
                (best plain))
           (when dict-ok
             (let ((alt (compress-entropy data :use-dict t
@@ -1172,7 +1404,7 @@ already smaller than the input."
                                                 :short-dist short-dist
                                                 :skip-match skip-match
                                                 :insert-interior insert-interior
-                                                :sample-literals sample-literals)))
+                                                :fast-fragment fast-fragment)))
               (when (< (length alt) (length best)) (setf best alt))))
           (when (>= (length best) (+ n 32))
             (let ((stored (compress-stored data)))

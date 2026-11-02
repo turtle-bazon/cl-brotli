@@ -185,13 +185,16 @@ The q0/q1 gap was not table tuning. `c/enc/compress_fragment.c` and
 * q0's precomputed 64-symbol command/distance prefix code
   (`kDefaultCommandDepths`, `kDefaultCommandBits`, `kDefaultCommandCode`).
 
-Ported into cl-brotli: the matcher (`%LZ77-FRAGMENT`) and q0's sampled
-literal histogram (`FAST-LITERAL-HISTOGRAM`). q1 text went from 354 to
-926 MiB/s, q0 text from 707 to 954 MiB/s, and q0 output is now 0.34-0.95x
-the size of C q0 because the sampled pre-LZ77 histogram replaces the exact
-post-LZ77 one.
+Ported into cl-brotli: the matcher (`%LZ77-FRAGMENT`), the fast
+insert/copy/distance alphabet mapped onto the full 704-symbol command
+alphabet, and a two-phase fast writer (`WRITE-FAST-BLOCK-BODY`) that builds
+the command and distance trees from the actual histograms and the literal
+tree from the exact emitted literals. The sampled pre-LZ77 histogram was
+evaluated first; the exact emitted-literal histogram gives a better ratio at
+similar speed.
 
-Not yet ported: q0's one-pass emission with the fixed command alphabet.
+Not ported: C's per-block literal/command-code adaptation
+(`ShouldMergeBlock` plus rebuilding `cmd_code` from the previous block).
 `BuildAndStoreCommandPrefixCode` maps the 64 fast codes onto the full
 704-symbol command alphabet (`0..7 -> 0..7`, `8..15 -> 64..71`,
 `16..23 -> 128..135`, `24..31 -> 192..199`, `32..39 -> 384..391`,
@@ -199,3 +202,26 @@ Not yet ported: q0's one-pass emission with the fixed command alphabet.
 64..127 map to distance symbols 0..63). A faithful port needs that mapping,
 the default depth/bit tables, and emission during the scan instead of the
 flat command records.
+
+## Fast command/distance entropy coding (final q0/q1 writer)
+
+`WRITE-FAST-BLOCK-BODY` uses the fragment matcher's command list and C's
+fast alphabet:
+
+* fast insert/copy/distance codes (`q0-insert-len`, `q0-copy-len`,
+  `q0-copy-last-len`, `q0-distance`) mapped to full command symbols by
+  `q0-cmd-symbol`;
+* command and distance trees built from the actual histograms, seeded with
+  `kCmdHistoSeed` so every emittable code has a nonzero depth and the tree
+  is never single-symbol;
+* the literal tree from the exact emitted-literal histogram (max 15 bits);
+* explicit-distance copy-last commands (copy length >= 72) are followed by
+  a distance-0 symbol, matching `EmitCopyLenLastDistance`;
+* the distance tree is dynamic, so the full lgwin window is used. C's fast
+  path caps backward distances at 18 bits; removing that cap is what keeps
+  source/text ratio at 0.35-0.46x of C instead of ~0.9x.
+
+Measured q0: text 1169 MiB/s, source 205, JSON 164, HTML 103, binary 103;
+q0 output is 0.35-0.99x C size. q1: text 1062, source 213, JSON 144,
+HTML 108. The remaining gap is SBCL codegen versus the hand-written C
+emitter and C's per-block code adaptation.
