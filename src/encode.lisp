@@ -344,7 +344,11 @@ RB is the 4-slot ring plus a write index in slot 4."
 
 (defvar *dict-index* nil)
 
+(declaim (inline dict-key4))
 (defun dict-key4 (vec pos)
+  (declare (type (simple-array (unsigned-byte 8) (*)) vec)
+           (type fixnum pos)
+           (optimize (speed 3) (safety 0)))
   (logior (aref vec pos) (ash (aref vec (1+ pos)) 8)
           (ash (aref vec (+ pos 2)) 16) (ash (aref vec (+ pos 3)) 24)))
 
@@ -1386,13 +1390,23 @@ compresses extremely well."
         (when (> c maxfreq) (setf maxfreq c))))
     (and (> unique 230)
          (< maxfreq (/ sample 10))
-         (let ((table (make-hash-table :test #'eql :size sample))
+         ;; A 2^21-bit hashed set: equal 4-byte keys collide exactly, and
+         ;; the false-collision rate for 16K keys is ~64, below the
+         ;; acceptance threshold.  Far cheaper than an EQL hash table.
+         (let ((bits (make-array (ash 1 18) :element-type '(unsigned-byte 8)
+                                 :initial-element 0))
                (duplicates 0))
+           (declare (type (simple-array (unsigned-byte 8) (262144)) bits)
+                    (type fixnum duplicates))
            (loop for i from 0 below (- sample 3) do
-             (let ((key (dict-key4 data i)))
-               (if (gethash key table)
+             (let* ((key (dict-key4 data i))
+                    (h (logand (* key #x9E3779B1) #x1FFFFF))
+                    (byte (ash h -3))
+                    (mask (ash 1 (logand h 7))))
+               (declare (type fixnum key h byte mask))
+               (if (logtest (aref bits byte) mask)
                    (incf duplicates)
-                   (setf (gethash key table) t))))
+                   (setf (aref bits byte) (logior (aref bits byte) mask)))))
            (< duplicates (max 16 (/ sample 100)))))))
 
 (defun quality-params (quality)

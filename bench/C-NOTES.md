@@ -340,3 +340,13 @@ at `min(n + 1024, 65536)` and let the writer grow. Level-matched geomeans
 jumped: q2 0.42->0.55, q5 0.54->0.66, q7 0.60->0.74, q9 1.47->1.74,
 q10 9.44->10.85, q11 8.29->9.25. Main-dataset speeds: q0 text 1270,
 source 254; q5 text 381 MiB/s.
+
+## incompressible-p fast path
+
+The 4-gram duplicate test used an EQL hash table and `dict-key4` with
+generic `aref`. On PERIODIC/RANDOM this took 0.6-1.1 ms per 1 MiB, up to
+half the encoder time. Replace the table with a 2^21-bit hashed set (equal
+keys collide exactly; ~64 false collisions for 16K keys, below the 163
+acceptance threshold) and type/inline `dict-key4`. The check drops to
+~0.13 ms. Level-matched geomeans rose q0 0.35->0.39, q1 0.24->0.31,
+q7 0.74->0.81, q9 1.74->1.85, q11 9.25->10.32.
