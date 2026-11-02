@@ -330,3 +330,13 @@ also measured. The microbenchmark showed large q2-q4 text gains (+44-49%),
 but the level-matched harness regressed q5-q11 (q9 geomean 1.47->1.40,
 q11 8.20->7.78) with unchanged sizes, so the list-based generic path was
 kept; only q0/q1 use the flat vector and fused histograms.
+
+## Encoder output buffer sizing
+
+`compress-entropy` preallocated `n + 1024` bytes of output. For highly
+compressible 1 MiB datasets the compressed result is only a few hundred
+bytes, so a 1 MiB allocation/zeroing per call dominated the encoder. Start
+at `min(n + 1024, 65536)` and let the writer grow. Level-matched geomeans
+jumped: q2 0.42->0.55, q5 0.54->0.66, q7 0.60->0.74, q9 1.47->1.74,
+q10 9.44->10.85, q11 8.29->9.25. Main-dataset speeds: q0 text 1270,
+source 254; q5 text 381 MiB/s.

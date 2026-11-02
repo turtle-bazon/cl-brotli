@@ -1321,7 +1321,7 @@ are split into <= 2^24-byte compressed meta-blocks followed by an empty last
 meta-block."
   (let* ((data (b:to-octets input))
          (n (length data))
-         (w (b:make-bwr (max 1024 (+ n 1024))))
+         (w (b:make-bwr (min (+ n 1024) 65536)))
          (wbits (min 24 (max 10 (integer-length (max 1 n)))))
          (window (- (ash 1 wbits) 16))
          (rb (make-array 5 :element-type 'fixnum
