@@ -142,24 +142,24 @@ all **eleven** datasets, including the tiny highly-compressible ones.
 
 | q | text | html | json | source | binary | geomean |
 |---:|---:|---:|---:|---:|---:|---:|
-| 0 | 1251.5 / 207.0 / 6.05x | 120.8 / 482.7 / 0.25x | 170.4 / 652.1 / 0.26x | 244.6 / 230.8 / 1.06x | 115.2 / 454.8 / 0.25x | 0.42x |
-| 1 | 1128.3 / 1867.1 / 0.60x | 121.2 / 341.8 / 0.35x | 167.7 / 386.8 / 0.43x | 237.3 / 294.4 / 0.81x | 110.0 / 323.4 / 0.34x | 0.34x |
-| 2 | 602.7 / 1074.7 / 0.56x | 74.0 / 188.4 / 0.39x | 88.3 / 267.1 / 0.33x | 140.0 / 352.9 / 0.40x | 56.5 / 182.6 / 0.31x | 0.63x |
-| 3 | 570.9 / 1005.6 / 0.57x | 72.0 / 155.3 / 0.46x | 81.2 / 205.5 / 0.40x | 138.1 / 295.3 / 0.47x | 52.0 / 143.8 / 0.36x | 0.68x |
-| 4 | 579.1 / 836.0 / 0.69x | 63.9 / 125.6 / 0.51x | 71.2 / 153.9 / 0.46x | 124.4 / 237.1 / 0.52x | 47.5 / 92.4 / 0.51x | 0.78x |
-| 5 | 376.1 / 659.4 / 0.57x | 29.3 / 65.7 / 0.45x | 27.4 / 64.4 / 0.43x | 53.2 / 121.5 / 0.44x | 26.8 / 51.9 / 0.52x | 0.77x |
-| 6 | 368.9 / 645.5 / 0.57x | 23.8 / 63.8 / 0.37x | 23.2 / 61.4 / 0.38x | 47.8 / 110.2 / 0.43x | 22.3 / 47.6 / 0.47x | 0.75x |
-| 7 | 366.1 / 368.7 / 0.99x | 21.1 / 47.4 / 0.45x | 20.4 / 41.8 / 0.49x | 44.0 / 88.3 / 0.50x | 21.3 / 38.2 / 0.56x | 0.84x |
-| 8 | 346.1 / 589.4 / 0.59x | 17.0 / 38.6 / 0.44x | 17.0 / 32.3 / 0.53x | 37.8 / 75.5 / 0.50x | 18.7 / 31.9 / 0.59x | 0.85x |
-| 9 | 334.8 / 169.7 / 1.97x | 14.3 / 22.8 / 0.63x | 14.5 / 22.4 / 0.65x | 34.2 / 48.5 / 0.70x | 16.8 / 22.4 / 0.75x | 2.03x |
+| 0 | 1279.0 / 207.5 / 6.16x | 123.1 / 488.9 / 0.25x | 175.2 / 643.1 / 0.27x | 250.8 / 230.1 / 1.09x | 119.1 / 458.3 / 0.26x | 0.45x |
+| 1 | 1153.5 / 1865.3 / 0.62x | 122.4 / 334.7 / 0.37x | 172.3 / 364.5 / 0.47x | 244.2 / 293.0 / 0.83x | 111.8 / 324.1 / 0.35x | 0.34x |
+| 2 | 577.5 / 1083.9 / 0.53x | 67.6 / 183.1 / 0.37x | 89.1 / 265.9 / 0.33x | 144.3 / 345.5 / 0.42x | 56.8 / 181.7 / 0.31x | 0.64x |
+| 3 | 590.7 / 1022.8 / 0.58x | 69.8 / 151.2 / 0.46x | 81.0 / 204.5 / 0.40x | 132.0 / 293.7 / 0.45x | 53.9 / 142.3 / 0.38x | 0.70x |
+| 4 | 586.8 / 834.0 / 0.70x | 63.1 / 124.1 / 0.51x | 71.4 / 149.9 / 0.48x | 127.1 / 236.9 / 0.54x | 47.7 / 97.9 / 0.49x | 0.78x |
+| 5 | 387.3 / 645.8 / 0.60x | 28.0 / 61.1 / 0.46x | 27.3 / 65.6 / 0.42x | 52.1 / 119.9 / 0.43x | 27.0 / 51.0 / 0.53x | 0.80x |
+| 6 | 387.0 / 640.5 / 0.60x | 23.9 / 52.8 / 0.45x | 23.2 / 55.5 / 0.42x | 48.1 / 109.4 / 0.44x | 22.4 / 46.8 / 0.48x | 0.78x |
+| 7 | 361.5 / 322.1 / 1.12x | 20.8 / 45.7 / 0.46x | 20.5 / 41.1 / 0.50x | 43.5 / 87.4 / 0.50x | 21.4 / 37.7 / 0.57x | 0.88x |
+| 8 | 355.3 / 587.9 / 0.60x | 16.7 / 37.5 / 0.44x | 17.1 / 36.5 / 0.47x | 37.6 / 75.5 / 0.50x | 19.0 / 32.2 / 0.59x | 0.86x |
+| 9 | 356.8 / 170.2 / 2.10x | 14.1 / 23.3 / 0.60x | 14.6 / 21.1 / 0.69x | 34.2 / 47.8 / 0.71x | 17.3 / 22.3 / 0.78x | 2.06x |
 
 The chain/fast-fragment work, the 64 KiB output buffer, the fast
-`incompressible-p` check, and the stored-block fast path changed all
-levels. q0 is 6.05x faster than C on text and **1.06x on source**
-(faster), but 0.25-0.26x on literal-heavy HTML/JSON/binary. q1 is 0.34x
-(0.60x text, 0.81x source), q2-q4 are 0.63-0.78x, q5-q8 are 0.75-0.85x,
-and **q9 is 2.03x** (text 1.97x, binary 0.75x); q10 is 19.13x and q11 is
-16.21x. q7/q9/q10/q11 beat C on text, and q9/q0-source beat it overall.
+`incompressible-p` check, the stored-block fast path, and the q0/q1 short-run
+literal inlining changed all levels. q0 is 6.16x faster than C on text and
+**1.09x on source** (faster), but 0.25-0.27x on literal-heavy
+HTML/JSON/binary. q1 is 0.34x (0.62x text, 0.83x source), q2-q4 are
+0.64-0.78x, q5-q8 are 0.78-0.88x, and **q9 is 2.06x** (text 2.10x, binary
+0.78x); q10 is 19.07x and q11 is 16.38x. q7/q9/q10/q11 beat C on text, and q9/q0-source beat it overall.
 `incompressible-p` samples every 4th 4-gram into a 2^19-bit hashed set and
 uses an inlined/typed `dict-key4`; the stored fallback preallocates and
 copies directly from the input. q0/q1 fuse the histogram pass into the
@@ -174,10 +174,10 @@ all **eleven** datasets.
 
 | q | text | html | json | source | binary | geomean |
 |---:|---:|---:|---:|---:|---:|---:|
-| 0 | 1211.4 / 2671.4 / 0.45x | 193.2 / 562.9 / 0.34x | 251.4 / 755.6 / 0.33x | 186.0 / 481.4 / 0.39x | 165.2 / 394.6 / 0.42x | 0.43x |
-| 1 | 699.5 / 1041.8 / 0.67x | 173.4 / 576.4 / 0.30x | 193.7 / 632.5 / 0.31x | 167.4 / 517.8 / 0.32x | 167.0 / 395.0 / 0.42x | 0.43x |
+| 0 | 1209.3 / 2665.8 / 0.45x | 195.0 / 562.1 / 0.35x | 250.2 / 753.4 / 0.33x | 185.7 / 481.7 / 0.39x | 165.1 / 394.4 / 0.42x | 0.43x |
+| 1 | 713.5 / 1694.0 / 0.42x | 170.3 / 562.5 / 0.30x | 193.4 / 630.2 / 0.31x | 167.4 / 516.9 / 0.32x | 167.1 / 394.4 / 0.42x | 0.42x |
 
-q0/q1 decode is now 0.43x/0.43x across all eleven datasets. A direct
+q0/q1 decode is now 0.43x/0.42x across all eleven datasets. A direct
 704-entry command LUT removes the per-command cell/sub-code arithmetic; the
 copy entry points are typed and inlined; READ-HUFF consumes bits directly
 instead of calling RBITS to discard them; and the primary-table mask is
@@ -185,7 +185,7 @@ precomputed in the HUFF object. The Huffman tables now use 16-bit entries
 (2 KiB per 10-bit primary table instead of 8 KiB), keep code lengths in an
 octet vector, and build the sorted symbol permutation only if the
 end-of-stream slow path runs; bit reversal uses a 256-byte lookup table.
-Stored meta-blocks copy straight into the output buffer. Text is 0.45x/0.67x;
+Stored meta-blocks copy straight into the output buffer. Text is 0.45x/0.42x;
 literal-heavy HTML/JSON/source/binary is 0.30-0.42x. The all-dataset geomeans
 for q2 and above are above parity because the synthetic easy datasets decode
 much faster than C, not because literal-heavy decode has caught up. A
@@ -196,8 +196,8 @@ in SBCL); the remaining gap is per-literal Huffman decode.
 
 | q | size (lisp/C) | compression (lisp/C) | decompression (lisp/C) |
 |---:|---:|---:|---:|
-| 10 | 1.075 | 19.13x | 1.76x |
-| 11 | 1.202 | 16.21x | 1.83x |
+| 10 | 1.075 | 19.07x | 1.62x |
+| 11 | 1.202 | 16.38x | 1.61x |
 
 q10/q11 are included for completeness. They are not representative of the
 low-level behavior: the encoder spends much more time parsing, which is where
@@ -207,18 +207,18 @@ C q11 is slow, while C q0-q9 are much faster than the lisp encoder.
 
 | C q | size (lisp/C) | compress (lisp/C core) | decompress (lisp/C core) |
 |---:|---:|---:|---:|
-| 0 | 0.532 | 0.42x | 0.43x |
-| 1 | 0.611 | 0.34x | 0.43x |
-| 2 | 0.956 | 0.63x | 1.72x |
-| 3 | 1.057 | 0.68x | 1.91x |
-| 4 | 1.077 | 0.78x | 1.86x |
-| 5 | 1.058 | 0.77x | 1.74x |
-| 6 | 1.061 | 0.75x | 1.65x |
-| 7 | 1.060 | 0.84x | 1.76x |
-| 8 | 1.060 | 0.85x | 1.77x |
-| 9 | 1.064 | 2.03x | 1.76x |
-| 10 | 1.075 | 19.13x | 1.76x |
-| 11 | 1.202 | 16.21x | 1.83x |
+| 0 | 0.532 | 0.45x | 0.43x |
+| 1 | 0.611 | 0.34x | 0.42x |
+| 2 | 0.956 | 0.64x | 1.76x |
+| 3 | 1.057 | 0.70x | 2.00x |
+| 4 | 1.077 | 0.78x | 1.65x |
+| 5 | 1.058 | 0.80x | 1.63x |
+| 6 | 1.061 | 0.78x | 1.71x |
+| 7 | 1.060 | 0.88x | 1.62x |
+| 8 | 1.060 | 0.86x | 1.62x |
+| 9 | 1.064 | 2.06x | 1.60x |
+| 10 | 1.075 | 19.07x | 1.62x |
+| 11 | 1.202 | 16.38x | 1.61x |
 ### Size boundary
 
 Multi-meta-block encoding keeps ratios stable across the 16 MiB boundary. The
@@ -270,8 +270,8 @@ maps, block switching, a 122 KiB static dictionary, and much larger alphabets.
 Running cl-newzlib's own harness on this same host (Roswell SBCL 2.6.9,
 zlib 1.2.13, 2 MiB inputs, levels 1/3/6/9) gives 1.70x compression and 1.19x
 decompression for its allocation-free `into` API (1.62x / 1.08x one-shot).
-cl-brotli's q11 geomeans against C Brotli on the same host are 16.21x
-compression and 1.83x decompression in this run. The decompression geomean is
+cl-brotli's q11 geomeans against C Brotli on the same host are 16.38x
+compression and 1.61x decompression in this run. The decompression geomean is
 inflated by the easy synthetic corpora: literal-heavy HTML/JSON/source/binary
 decode is 0.30-0.42x of C. q11 is not the useful comparison for the low-level
 work: C q11 is deliberately slow, while C q0-q9 are still 1.1-5x faster on
@@ -382,7 +382,11 @@ The benchmark was used to drive these changes:
   halves q10/q11 work on normal text: q11 TEXT 144->244 MiB/s, HTML 2.8->5.5,
   JSON 2.8->5.5, SOURCE 9.8->18.9, and q11 allocation HTML 27.1->13.6 MB,
   SOURCE 21.4->10.7 MB, TEXT 11.5->5.7 MB. Benchmark output sizes are
-  unchanged. q10/q11 compression geomeans are now 19.13x/16.21x;
+  unchanged. q10/q11 compression geomeans are now 19.07x/16.38x;
+* inline literal runs shorter than 8 in the q0/q1 fast writer instead of
+  calling `W-EMIT-RUN` for every insert; most q0 commands insert only 1-7
+  bytes. Median q0/q1 throughput rises ~2% across all five corpora, lifting
+  the q0 geomean 0.42->0.45;
 * fused the q0/q1 literal/command/distance histograms into the fragment
   matcher, so the fast writer makes a single pass over the command vector;
 * a bit writer that flushes the whole accumulator with one unaligned 64-bit
@@ -433,11 +437,11 @@ level against both decoders). Benchmarks are run only on SBCL 2.6.9.
 * Encoder ratio is at C q5 (1.06x) on text-like data; the q11 size gap (1.20x)
   needs context modeling, block splitting, and length-changing dictionary
   transforms.
-* Low-level encoder throughput: q0 is 0.42x, q1 0.34x, q2-q4 0.63-0.78x,
-  q5-q8 0.75-0.85x, and **q9 2.03x**. q9/q10/q11 beat C on text (q9 1.97x,
-  q10 19.13x, q11 16.21x), q7 is at parity on text (0.99x), **q0 source
-  beats C (1.06x)**, and q9 beats it overall. q0 is 6.05x faster than C q0
-  on text but 0.25-0.26x on literal-heavy HTML/JSON/binary. q0 output is
+* Low-level encoder throughput: q0 is 0.45x, q1 0.34x, q2-q4 0.64-0.78x,
+  q5-q8 0.78-0.88x, and **q9 2.06x**. q9/q10/q11 beat C on text (q9 2.10x,
+  q10 19.07x, q11 16.38x), q7 is 1.12x on text in this run (C q7 timing
+  is noisy), **q0 source beats C (1.09x)**, and q9 beats it overall. q0 is 6.16x faster than
+  C q0 on text but 0.25-0.27x on literal-heavy HTML/JSON/binary. q0 output is
   0.35-0.99x the size of C q0. The remaining literal-heavy gap is mainly
   SBCL codegen versus the hand-written C emitter plus C's block
   splitting/command-code adaptation.

@@ -1078,7 +1078,15 @@ histograms.  The MLEN header must already have been written."
                         (b:%wbits-raw w (aref dist-rc (- c 64))
                                       (aref dist-ln (- c 64)))
                         (when (plusp ,nbits)
-                          (b:%wbits-raw w ,extra ,nbits))))))
+                          (b:%wbits-raw w ,extra ,nbits)))))
+                 (lits (start count)
+                   `(if (>= ,count 8)
+                        (b:w-emit-run w data ,start (+ ,start ,count)
+                                      lit-rc lit-ln)
+                        (loop for i from ,start below (+ ,start ,count)
+                              do (let ((sym (aref data i)))
+                                   (b:%wbits-raw w (aref lit-rc sym)
+                                                 (aref lit-ln sym)))))))
         (dotimes (ci nc)
           (let* ((base (* 4 ci))
                  (ins (aref cv base))
@@ -1092,7 +1100,7 @@ histograms.  The MLEN header must already have been written."
                (multiple-value-bind (cc e nb) (q0-insert-len ins)
                  (emit-cmd cc e nb))
                (unless lit-single
-                 (b:w-emit-run w data lit-start (+ lit-start ins) lit-rc lit-ln))
+                 (lits lit-start ins))
                (if (= dist last-dist)
                    (emit-dist 64 0 0)
                    (progn
@@ -1115,7 +1123,7 @@ histograms.  The MLEN header must already have been written."
                (multiple-value-bind (cc e nb) (q0-insert-len ins)
                  (emit-cmd cc e nb))
                (unless lit-single
-                 (b:w-emit-run w data lit-start (+ lit-start ins) lit-rc lit-ln)))))))))
+                 (lits lit-start ins)))))))))
 
 
 ;;; Flat command records: 10 fixnums per command.  A struct per command was

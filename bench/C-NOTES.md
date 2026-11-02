@@ -474,3 +474,17 @@ touching the accumulator. It reduced loop iterations but measured 3-8%
 slower on q0/q1 text, HTML, JSON, and binary (e.g. q0 text 1250->1160 MiB/s,
 HTML 120->114), so the one-symbol loop was restored. The extra register
 pressure and odd-length tail branch outweighed the saved loads.
+
+## q0/q1 short literal runs
+
+The fast writer called `W-EMIT-RUN` for every insert, even though most q0
+commands insert only a few bytes (HTML: 29,211 of 29,320 non-empty inserts
+are 1-7 bytes; JSON: 33,317 of 33,318). Each call pins the output buffer and
+sets up its own accumulator locals.
+
+Inline runs shorter than 8 with `%WBITS-RAW` and keep `W-EMIT-RUN` for longer
+runs. Median microbenchmarks over three runs rise ~2% on all five corpora:
+TEXT 1197->1218 MiB/s, HTML 116->118, JSON 173->176, SOURCE 248->253,
+BINARY 116->119. The level-matched q0 geomean rises 0.42->0.45.
+
+Thresholds 4, 16, and 32 were also measured; 8 was the best compromise.
