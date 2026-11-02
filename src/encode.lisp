@@ -816,6 +816,7 @@ or NIL on other implementations."
             (- d offset) nb)))
 
 
+(declaim (inline note-fast-command))
 (defun note-fast-command (data litf cmdf distf last-dist ins ls cpy dist)
   "Update the fast command/distance histograms for one command and return
 the new last-distance.  Mirrors WRITE-FAST-BLOCK-BODY's emission decisions."

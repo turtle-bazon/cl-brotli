@@ -485,6 +485,19 @@ sets up its own accumulator locals.
 Inline runs shorter than 8 with `%WBITS-RAW` and keep `W-EMIT-RUN` for longer
 runs. Median microbenchmarks over three runs rise ~2% on all five corpora:
 TEXT 1197->1218 MiB/s, HTML 116->118, JSON 173->176, SOURCE 248->253,
-BINARY 116->119. The level-matched q0 geomean rises 0.42->0.45.
+BINARY 116->119. The level-matched q0 geomean moved 0.42->0.45 in the run
+that measured it; across repeated runs the aggregate is noise-limited in the
+0.42-0.45 range.
 
 Thresholds 4, 16, and 32 were also measured; 8 was the best compromise.
+
+## Inlined q0/q1 histogram update
+
+`NOTE-FAST-COMMAND` is called once per emitted command by the fragment
+matcher to update the literal/command/distance histograms. Declaring it
+inline removes a call from that path. Microbenchmark medians rise on the
+literal-heavy corpora: q0 HTML 123->127 MiB/s, JSON 175->184, SOURCE
+251->261; q1 HTML 122->125, JSON 172->180, SOURCE 244->252. TEXT and BINARY
+are unchanged. The level-matched q0 q1 geomeans stay within run-to-run noise
+(the aggregate includes the easy synthetic corpora), but the per-cell
+HTML/JSON/SOURCE gaps narrow.
