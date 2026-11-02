@@ -231,8 +231,8 @@ edge. The periodic ramp no longer takes the stored-block fallback.
 |---|---:|---:|---:|---:|
 | text | 16 MiB | 9715 | 11694 | 1.204 |
 | text | 17 MiB | 9728 | 11706 | 1.203 |
-| source | 16 MiB | 79646 | 89834 | 1.128 |
-| source | 17 MiB | 79658 | 89846 | 1.128 |
+| source | 16 MiB | 79646 | 89839 | 1.128 |
+| source | 17 MiB | 79658 | 89851 | 1.128 |
 | periodic | 1 KiB | 216 | 289 | 1.338 |
 | periodic | 1 MiB | 218 | 291 | 1.335 |
 | periodic | 16 MiB | 232 | 291 | 1.254 |
@@ -251,8 +251,8 @@ encoder's behavior on every corpus.
 |---|---:|---:|---:|---:|---:|
 | text | 278610 | 9790 | 9702 | 9702 | 11694 |
 | html | 155197 | 141576 | 132230 | 132230 | 157561 |
-| source | 208782 | 195792 | 79632 | 79632 | 89834 |
-| binary | 268554 | 261544 | 251377 | 251377 | 296116 |
+| source | 208782 | 195792 | 79632 | 79632 | 89839 |
+| binary | 268554 | 261544 | 251377 | 251377 | 296122 |
 
 C `mode` 0/1/2 changed output by at most 26 bytes on text/HTML and 385 bytes
 (0.3%) on JSON, so mode selection is not a lever here.
