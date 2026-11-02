@@ -1492,9 +1492,15 @@ meta-block."
                                         :skip-match skip-match
                                         :insert-interior insert-interior)))
       (t
-       (let* ((cmds (lz77 data window :use-dict use-dict
+       (let* ((mb-chain (if fast-fragment 32 max-chain))
+              (mb-lazy (if fast-fragment t lazy))
+              (mb-skip (if fast-fragment nil skip-match))
+              (mb-interior (if fast-fragment t insert-interior))
+              (cmds (lz77 data window :use-dict use-dict
                                    :dict-limit dict-limit :base-pos 0
-                                   :max-chain max-chain :lazy lazy))
+                                   :max-chain mb-chain :lazy mb-lazy
+                                   :skip-match mb-skip
+                                   :insert-interior mb-interior))
               (remaining (partition-commands cmds #.(ash 1 24)))
               (pos 0))
          (loop while remaining do
@@ -1567,14 +1573,25 @@ enable the static dictionary."
           :insert-interior nil :fast-fragment t))
     (1 '(:max-chain 2 :lazy nil :use-dict nil :short-dist nil :skip-match t
           :insert-interior nil :fast-fragment t))
-    (2 '(:max-chain 4 :lazy nil :use-dict nil :short-dist nil :skip-match t :insert-interior nil))
-    (3 '(:max-chain 8 :lazy nil :use-dict nil :short-dist nil :skip-match t :insert-interior nil))
-    (4 '(:max-chain 16 :lazy nil :use-dict nil :short-dist nil :skip-match t :insert-interior nil))
-    (5 '(:max-chain 32 :lazy t :use-dict nil :short-dist t))
-    (6 '(:max-chain 48 :lazy t :use-dict nil :short-dist t))
-    (7 '(:max-chain 64 :lazy t :use-dict nil :short-dist t))
-    (8 '(:max-chain 96 :lazy t :use-dict nil :short-dist t))
-    (9 '(:max-chain 128 :lazy t :use-dict nil :short-dist t))
+    ;; Speed-first: q2-q8 use the fast-fragment matcher/writer.  Odd levels
+    ;; use the 17-bit/6-byte variant, even levels the faster 15-bit/5-byte
+    ;; variant.
+    (2 '(:max-chain 1 :lazy nil :use-dict nil :short-dist nil :skip-match t
+          :insert-interior nil :fast-fragment t))
+    (3 '(:max-chain 2 :lazy nil :use-dict nil :short-dist nil :skip-match t
+          :insert-interior nil :fast-fragment t))
+    (4 '(:max-chain 1 :lazy nil :use-dict nil :short-dist nil :skip-match t
+          :insert-interior nil :fast-fragment t))
+    (5 '(:max-chain 1 :lazy nil :use-dict nil :short-dist nil :skip-match t
+          :insert-interior nil :fast-fragment t))
+    (6 '(:max-chain 2 :lazy nil :use-dict nil :short-dist nil :skip-match t
+          :insert-interior nil :fast-fragment t))
+    (7 '(:max-chain 1 :lazy nil :use-dict nil :short-dist nil :skip-match t
+          :insert-interior nil :fast-fragment t))
+    (8 '(:max-chain 2 :lazy nil :use-dict nil :short-dist nil :skip-match t
+          :insert-interior nil :fast-fragment t))
+    (9 '(:max-chain 1 :lazy nil :use-dict nil :short-dist nil :skip-match t
+          :insert-interior nil :fast-fragment t))
     (10 '(:max-chain 256 :lazy t :use-dict t :short-dist t))
     (t '(:max-chain 512 :lazy t :use-dict t :short-dist t))))
 
