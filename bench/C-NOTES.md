@@ -265,3 +265,19 @@ position in locals, refilling from the input SAP, like C's
 `BrotliCopyPreloadedSymbolsToU8`) was implemented and measured. After
 guarding the primary-table width it was correct, but 5-7% slower than the
 inlined per-symbol reader in SBCL, so it was reverted.
+
+## Chain matcher (q2-q11)
+
+Profiling q5 showed `INS` at 39% on text and `FIND-MATCH` at 64% on HTML
+(with `MLEN` already inlined). Changes:
+
+* inline `hash`, `ins`, and `mlen` inside `%LZ77`;
+* add C's 4-byte `best_len` probe before `FindMatchLengthWithLimit`: a
+  candidate that cannot beat the current best length is rejected with one
+  32-bit compare. The chosen match is unchanged, so the ratio is unchanged;
+* tried C's last-distance checks (4 entries): <1.5% ratio gain for 3-5%
+  speed loss, so they were not kept.
+
+Effect: q5 HTML 18.4->25.5, q6 14.7->21.2, q7 12.9->18.3, q8 10.2->14.4,
+q9 8.7->12.0 MiB/s; q10/q11 also improve (q11 compression 3.24x). q9's
+geomean rose from 0.44x to 0.54x.
