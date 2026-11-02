@@ -296,3 +296,13 @@ match instead of all interior positions (avoids chain poisoning on RLE-like
 data). This lifted text q5-q9 from ~110 to 330-370 MiB/s with unchanged
 output size. q9 now beats C overall (1.46x geomean, text 1.99x), and
 q7/q9/q10/q11 beat it on text; q10/q11 compression are 9.44x/8.07x.
+
+## Flat fast-fragment command vector
+
+q0/q1 stored commands as five-element lists and then walked them twice
+(histogram pass, emission pass). They now use a growable
+`(unsigned-byte 32)` vector of `(insert, lit-start, copy, distance)`
+records shared by both passes. Output sizes are identical. q0 HTML
+100->121, JSON 162->181, source 202->239, binary 104->121 MiB/s; q0
+source now beats C (1.03x). Initial capacity is `n/32` commands: a larger
+preallocation (`n/8`) made text slower by zeroing more memory.

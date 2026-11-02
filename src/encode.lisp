@@ -660,10 +660,13 @@ or NIL on other implementations."
          (table (make-array (ash 1 table-bits)
                             :element-type '(unsigned-byte 32)
                             :initial-element #xFFFFFFFF))
-         (cmds '()) (lit-start 0) (p 1) (limit (- n k))
+         (cv (make-array (* 4 (max 4096 (ash n -5)))
+                         :element-type '(unsigned-byte 32)))
+         (nc 0)
+         (lit-start 0) (p 1) (limit (- n k))
          (last-dist -1) (back (if (= k 5) 3 5)))
-    (declare (type fixnum k min-match p lit-start limit last-dist back)
-             (type (simple-array (unsigned-byte 32) (*)) table))
+    (declare (type fixnum k min-match p lit-start limit last-dist back nc)
+             (type (simple-array (unsigned-byte 32) (*)) table cv))
     (labels ((hash (i) (%hashf-sap sap i hmask))
              (prefix-match (a b)
                (and (= (sb-sys:sap-ref-32 sap a)
@@ -673,8 +676,20 @@ or NIL on other implementations."
                            (sb-sys:sap-ref-8 sap (+ b 4)))
                         (= (sb-sys:sap-ref-16 sap (+ a 4))
                            (sb-sys:sap-ref-16 sap (+ b 4))))))
-             (mlen (a b) (%match-len-sap-call sap a b n)))
-        (declare (inline hash prefix-match))
+             (mlen (a b) (%match-len-sap-call sap a b n))
+             (push-cmd (ins ls cpy dist)
+               (when (>= (* 4 nc) (length cv))
+                 (let ((new (make-array (* 2 (length cv))
+                                        :element-type '(unsigned-byte 32))))
+                   (replace new cv)
+                   (setf cv new)))
+               (let ((b (* 4 nc)))
+                 (setf (aref cv b) ins
+                       (aref cv (+ b 1)) ls
+                       (aref cv (+ b 2)) cpy
+                       (aref cv (+ b 3)) dist))
+               (incf nc)))
+        (declare (inline hash prefix-match push-cmd))
       (when (> n k)
         (let ((next-hash (hash p)))
           (declare (type fixnum next-hash))
@@ -715,7 +730,7 @@ or NIL on other implementations."
                        (distance (- base cand))
                        (insert (- base lit-start)))
                   (declare (type fixnum matched distance insert))
-                  (push (list insert lit-start matched distance nil) cmds)
+                  (push-cmd insert lit-start matched distance)
                   (incf p matched)
                   (setf lit-start p
                         last-dist distance))
@@ -739,7 +754,7 @@ or NIL on other implementations."
                                            (mlen (+ cand2 k) (+ p k))))
                                (distance (- base cand2)))
                           (declare (type fixnum matched distance))
-                          (push (list 0 p matched distance nil) cmds)
+                          (push-cmd 0 p matched distance)
                           (setf last-dist distance)
                           (incf p matched)
                           (setf lit-start p))
@@ -754,8 +769,8 @@ or NIL on other implementations."
               (when (> p limit) (return-from scan nil))
               (setf next-hash (hash p))))))
       (when (< lit-start n)
-        (push (list (- n lit-start) lit-start 0 0 nil) cmds))
-      (nreverse cmds))))
+        (push-cmd (- n lit-start) lit-start 0 0))
+      (values cv nc))))
 
 (defun lz77 (data window &key (use-dict (text-like-data-p data)) dict-limit
                               (base-pos 0) (max-chain 128) (lazy t)
@@ -888,11 +903,13 @@ compression ratio for encoder throughput."
     (values (+ (* 2 (1- nb)) prefix 80)
             (- d offset) nb)))
 
-(defun q0-histograms (data cmds)
-  "Return (values LITFREQ CMDFREQ DISTFREQ) for the fast command list CMDS.
+(defun q0-histograms (data cv nc)
+  "Return (values LITFREQ CMDFREQ DISTFREQ) for the flat command vector CV.
 CMDFREQ is over the 64 fast command codes; DISTFREQ is over distance
 symbols 0..63.  The command/distance histograms start from C's seed."
-  (declare (type (simple-array (unsigned-byte 8) (*)) data))
+  (declare (type (simple-array (unsigned-byte 8) (*)) data)
+           (type (simple-array (unsigned-byte 32) (*)) cv)
+           (type fixnum nc))
   (let ((litf (make-array 256 :element-type 'fixnum :initial-element 0))
         (cmdf (make-array 64 :element-type 'fixnum :initial-element 0))
         (distf (make-array 64 :element-type 'fixnum :initial-element 0))
@@ -902,11 +919,12 @@ symbols 0..63.  The command/distance histograms start from C's seed."
              (type fixnum last-dist))
     (replace cmdf +q0-seed-cmd+)
     (replace distf +q0-seed-dist+)
-    (dolist (c cmds)
-      (let ((ins (car c))
-            (lit-start (cadr c))
-            (cpy (caddr c))
-            (dist (cadddr c)))
+    (dotimes (ci nc)
+      (let* ((base (* 4 ci))
+             (ins (aref cv base))
+             (lit-start (aref cv (+ base 1)))
+             (cpy (aref cv (+ base 2)))
+             (dist (aref cv (+ base 3))))
         (declare (type fixnum ins lit-start cpy dist))
         (loop for i from lit-start below (+ lit-start ins)
               do (incf (aref litf (aref data i))))
@@ -941,14 +959,16 @@ symbols 0..63.  The command/distance histograms start from C's seed."
              (incf (aref cmdf cc)))))))
     (values litf cmdf distf)))
 
-(defun write-fast-block-body (w data cmds)
-  "Emit a q0/q1 meta-block body from the fast-fragment command list, using
-the fast command/distance alphabet with trees built from the actual histograms.
-The MLEN header must already have been written."
+(defun write-fast-block-body (w data cv nc)
+  "Emit a q0/q1 meta-block body from the flat fast-fragment command vector,
+using the fast command/distance alphabet with trees built from the actual
+histograms.  The MLEN header must already have been written."
   (declare (type b:bwr w)
            (type (simple-array (unsigned-byte 8) (*)) data)
+           (type (simple-array (unsigned-byte 32) (*)) cv)
+           (type fixnum nc)
            (optimize (speed 3) (safety 0)))
-  (multiple-value-bind (litf cmdf distf) (q0-histograms data cmds)
+  (multiple-value-bind (litf cmdf distf) (q0-histograms data cv nc)
     (let* ((lit (build-etree litf 256 15))
            (cmd-et (fast-cmd-etree (build-etree cmdf 64 15)))
            (dist-et (build-etree distf 64 14))
@@ -992,11 +1012,12 @@ The MLEN header must already have been written."
                                       (aref dist-ln (- c 64)))
                         (when (plusp ,nbits)
                           (b:%wbits-raw w ,extra ,nbits))))))
-        (dolist (c cmds)
-          (let ((ins (car c))
-                (lit-start (cadr c))
-                (cpy (caddr c))
-                (dist (cadddr c)))
+        (dotimes (ci nc)
+          (let* ((base (* 4 ci))
+                 (ins (aref cv base))
+                 (lit-start (aref cv (+ base 1)))
+                 (cpy (aref cv (+ base 2)))
+                 (dist (aref cv (+ base 3))))
             (declare (type fixnum ins lit-start cpy dist))
             (cond
               ((and (plusp ins) (plusp cpy))
@@ -1310,11 +1331,11 @@ meta-block."
       ((<= n #.(ash 1 24))
        (write-mlen-header w n t)
        (if fast-fragment
-           (write-fast-block-body
-            w data
-            (lz77 data window
-                   :max-chain max-chain :lazy nil :skip-match t
-                   :use-dict nil :insert-interior nil))
+           (multiple-value-bind (cv nc)
+               (lz77 data window
+                      :max-chain max-chain :lazy nil :skip-match t
+                      :use-dict nil :insert-interior nil)
+             (write-fast-block-body w data cv nc))
            (write-compressed-block-body w data 0 window use-dict dict-limit rb
                                         :max-chain max-chain :lazy lazy
                                         :short-dist short-dist
