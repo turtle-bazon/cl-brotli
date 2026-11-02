@@ -142,27 +142,25 @@ all **eleven** datasets, including the tiny highly-compressible ones.
 
 | q | text | html | json | source | binary | geomean |
 |---:|---:|---:|---:|---:|---:|---:|
-| 0 | 1134.9 / 205.4 / 5.52x | 107.0 / 495.0 / 0.22x | 163.8 / 644.9 / 0.25x | 206.6 / 233.1 / 0.89x | 107.5 / 455.0 / 0.24x | 0.33x |
-| 1 | 1087.8 / 1862.3 / 0.58x | 113.0 / 338.0 / 0.33x | 141.4 / 389.8 / 0.36x | 216.9 / 297.9 / 0.73x | 105.0 / 322.4 / 0.33x | 0.25x |
-| 2 | 382.1 / 1065.2 / 0.36x | 58.5 / 170.7 / 0.34x | 67.9 / 251.8 / 0.27x | 113.1 / 350.7 / 0.32x | 48.9 / 181.1 / 0.27x | 0.31x |
-| 3 | 379.8 / 1001.3 / 0.38x | 58.2 / 154.6 / 0.38x | 62.6 / 208.4 / 0.30x | 111.3 / 296.8 / 0.37x | 47.9 / 142.8 / 0.34x | 0.33x |
-| 4 | 370.1 / 819.9 / 0.45x | 55.7 / 132.9 / 0.42x | 56.1 / 140.9 / 0.40x | 101.8 / 239.9 / 0.42x | 42.8 / 97.7 / 0.44x | 0.37x |
-| 5 | 115.4 / 636.0 / 0.18x | 26.3 / 58.6 / 0.45x | 23.9 / 65.1 / 0.37x | 45.3 / 104.5 / 0.43x | 22.9 / 50.3 / 0.45x | 0.22x |
-| 6 | 110.7 / 637.7 / 0.17x | 20.3 / 64.0 / 0.32x | 20.1 / 55.1 / 0.37x | 40.8 / 98.8 / 0.41x | 20.3 / 47.0 / 0.43x | 0.21x |
-| 7 | 115.2 / 312.1 / 0.37x | 18.2 / 49.0 / 0.37x | 17.8 / 39.2 / 0.45x | 38.1 / 78.0 / 0.49x | 18.6 / 38.0 / 0.49x | 0.24x |
-| 8 | 111.2 / 586.6 / 0.19x | 14.2 / 35.6 / 0.40x | 14.6 / 31.9 / 0.46x | 32.4 / 68.3 / 0.47x | 16.0 / 31.2 / 0.51x | 0.23x |
-| 9 | 111.1 / 172.1 / 0.65x | 12.0 / 23.4 / 0.51x | 12.6 / 22.1 / 0.57x | 28.8 / 48.6 / 0.59x | 14.4 / 22.6 / 0.64x | 0.54x |
+| 0 | 1140.4 / 205.2 / 5.56x | 99.6 / 493.9 / 0.20x | 161.7 / 658.0 / 0.25x | 202.2 / 232.6 / 0.87x | 103.7 / 463.2 / 0.22x | 0.32x |
+| 1 | 1031.8 / 1874.5 / 0.55x | 110.2 / 338.6 / 0.33x | 142.8 / 391.4 / 0.36x | 215.1 / 296.2 / 0.73x | 103.2 / 326.6 / 0.32x | 0.27x |
+| 2 | 561.4 / 1088.6 / 0.52x | 75.0 / 186.4 / 0.40x | 80.5 / 278.1 / 0.29x | 136.2 / 348.2 / 0.39x | 56.1 / 182.8 / 0.31x | 0.44x |
+| 3 | 531.3 / 1016.0 / 0.52x | 70.2 / 154.0 / 0.46x | 81.6 / 215.2 / 0.38x | 137.7 / 283.4 / 0.49x | 53.4 / 142.4 / 0.37x | 0.48x |
+| 4 | 522.0 / 830.8 / 0.63x | 64.6 / 128.8 / 0.50x | 68.4 / 157.4 / 0.43x | 126.4 / 239.0 / 0.53x | 50.2 / 97.6 / 0.51x | 0.54x |
+| 5 | 344.3 / 645.3 / 0.53x | 28.9 / 60.6 / 0.48x | 28.1 / 62.4 / 0.45x | 55.4 / 122.3 / 0.45x | 26.9 / 52.0 / 0.52x | 0.55x |
+| 6 | 333.6 / 636.3 / 0.52x | 24.0 / 63.5 / 0.38x | 23.4 / 54.7 / 0.43x | 48.5 / 111.5 / 0.44x | 23.5 / 48.1 / 0.49x | 0.54x |
+| 7 | 332.2 / 313.0 / 1.06x | 20.7 / 45.2 / 0.46x | 20.7 / 40.5 / 0.51x | 44.4 / 89.8 / 0.49x | 21.4 / 38.7 / 0.55x | 0.62x |
+| 8 | 336.5 / 588.9 / 0.57x | 16.7 / 39.7 / 0.42x | 17.2 / 33.1 / 0.52x | 38.8 / 76.3 / 0.51x | 18.8 / 31.8 / 0.59x | 0.61x |
+| 9 | 341.1 / 171.1 / 1.99x | 14.2 / 23.3 / 0.61x | 14.7 / 21.9 / 0.67x | 34.6 / 49.2 / 0.70x | 17.0 / 22.5 / 0.76x | 1.46x |
 
-The C fast-fragment port and chain-matcher work changed the low levels.
-q0 is now 5.52x faster than C on text and 0.89x on source, but 0.22-0.25x
-on literal-heavy HTML/JSON/binary. q1 is 0.25x, q2-q4 are 0.31-0.37x,
-q5-q8 are 0.21-0.24x, and q9 is 0.54x. q0 output is smaller than C q0 on
-every dataset (0.35-0.99x size): the fast writer builds its
-command/distance trees from actual histograms (seeded with C's
-kCmdHistoSeed) and its literal tree from the exact emitted literals. The
-q2-q11 chain matcher now uses C's 4-byte best-len probe before extending a
-candidate, and inlines hash/insert/match-length, which lifted q5-q9 by
-~25-45%.
+The chain-matcher work changed q2-q11 materially. q0 is 5.56x faster than
+C on text and 0.87x on source, but 0.20-0.25x on literal-heavy
+HTML/JSON/binary. q1 is 0.27x, q2-q4 are 0.44-0.54x, q5-q8 are 0.54-0.62x,
+and **q9 is 1.46x** (text 1.99x, binary 0.76x); q10 is 9.44x and q11 is
+8.07x. q7 text is 1.06x, so q7/q9/q10/q11 now beat C on text. The chain
+matcher uses 32-bit head/prev tables, skips the prev fill, applies C's
+short-distance StoreRange tail, and probes 4 bytes at best-len before
+extending a candidate.
 
 ### q0/q1 decompression
 
@@ -171,14 +169,14 @@ all **eleven** datasets.
 
 | q | text | html | json | source | binary | geomean |
 |---:|---:|---:|---:|---:|---:|---:|
-| 0 | 1018.2 / 2676.8 / 0.38x | 177.1 / 574.5 / 0.31x | 228.1 / 753.9 / 0.30x | 169.3 / 488.8 / 0.35x | 144.6 / 393.9 / 0.37x | 0.34x |
-| 1 | 711.4 / 1706.1 / 0.42x | 163.2 / 577.8 / 0.28x | 185.2 / 631.9 / 0.29x | 157.2 / 524.2 / 0.30x | 149.7 / 395.5 / 0.38x | 0.44x |
+| 0 | 1029.0 / 2660.3 / 0.39x | 176.8 / 570.6 / 0.31x | 231.1 / 767.6 / 0.30x | 171.6 / 489.4 / 0.35x | 145.7 / 401.0 / 0.36x | 0.42x |
+| 1 | 708.2 / 1725.7 / 0.41x | 162.2 / 573.5 / 0.28x | 188.0 / 640.7 / 0.29x | 157.5 / 524.3 / 0.30x | 153.1 / 401.9 / 0.38x | 0.55x |
 
-q0/q1 decode is now 0.34x/0.44x across all datasets (up from 0.28x/0.35x
-three rounds ago; ratios fluctuate with C's measured decode time). A direct
+q0/q1 decode is now 0.42x/0.55x across all datasets (up from 0.28x/0.35x
+three rounds ago; C's measured decode time varies between runs). A direct
 704-entry command LUT removes the per-command cell/sub-code arithmetic; the
 copy entry points are typed and inlined; and the NPOSTFIX=0 distance path
-uses constant shifts. Text is 0.38x/0.42x, literal-heavy
+uses constant shifts. Text is 0.39x/0.41x, literal-heavy
 HTML/JSON/source/binary is 0.28-0.38x. A register-resident
 bulk literal decoder was measured and reverted (5-7% slower in SBCL); the
 gap is per-literal Huffman decode, while q2 and above are at/above parity.
@@ -187,8 +185,8 @@ gap is per-literal Huffman decode, while q2 and above are at/above parity.
 
 | q | size (lisp/C) | compression (lisp/C) | decompression (lisp/C) |
 |---:|---:|---:|---:|
-| 10 | 1.075 | 3.79x | 1.05x |
-| 11 | 1.202 | 3.24x | 1.09x |
+| 10 | 1.075 | 9.44x | 1.45x |
+| 11 | 1.202 | 8.07x | 1.47x |
 
 q10/q11 are included for completeness. They are not representative of the
 low-level behavior: the encoder spends much more time parsing, which is where
@@ -198,18 +196,18 @@ C q11 is slow, while C q0-q9 are much faster than the lisp encoder.
 
 | C q | size (lisp/C) | compress (lisp/C core) | decompress (lisp/C core) |
 |---:|---:|---:|---:|
-| 0 | 0.532 | 0.33x | 0.34x |
-| 1 | 0.611 | 0.25x | 0.44x |
-| 2 | 0.956 | 0.31x | 0.97x |
-| 3 | 1.057 | 0.33x | 1.23x |
-| 4 | 1.077 | 0.37x | 1.03x |
-| 5 | 1.058 | 0.22x | 0.97x |
-| 6 | 1.061 | 0.21x | 0.96x |
-| 7 | 1.060 | 0.24x | 1.05x |
-| 8 | 1.060 | 0.23x | 1.04x |
-| 9 | 1.064 | 0.54x | 1.04x |
-| 10 | 1.075 | 3.79x | 1.05x |
-| 11 | 1.202 | 3.24x | 1.09x |
+| 0 | 0.532 | 0.32x | 0.42x |
+| 1 | 0.611 | 0.27x | 0.55x |
+| 2 | 0.956 | 0.44x | 1.21x |
+| 3 | 1.057 | 0.48x | 1.52x |
+| 4 | 1.077 | 0.54x | 1.37x |
+| 5 | 1.058 | 0.55x | 1.33x |
+| 6 | 1.061 | 0.54x | 1.38x |
+| 7 | 1.060 | 0.62x | 1.41x |
+| 8 | 1.060 | 0.61x | 1.36x |
+| 9 | 1.064 | 1.46x | 1.35x |
+| 10 | 1.075 | 9.44x | 1.45x |
+| 11 | 1.202 | 8.07x | 1.47x |
 ### Size boundary
 
 Multi-meta-block encoding keeps ratios stable across the 16 MiB boundary. The
@@ -261,8 +259,8 @@ maps, block switching, a 122 KiB static dictionary, and much larger alphabets.
 Running cl-newzlib's own harness on this same host (Roswell SBCL 2.6.9,
 zlib 1.2.13, 2 MiB inputs, levels 1/3/6/9) gives 1.70x compression and 1.19x
 decompression for its allocation-free `into` API (1.62x / 1.08x one-shot).
-cl-brotli's q11 geomeans against C Brotli on the same host are 3.24x
-compression and 1.09x decompression in this run, with decompression 4-6x on
+cl-brotli's q11 geomeans against C Brotli on the same host are 8.07x
+compression and 1.47x decompression in this run, with decompression 4-6x on
 HTML/JSON/source/binary. q11 is not the useful comparison for
 the low-level work: C q11 is deliberately slow, while C q0-q9 are still
 1.1-5x faster on the literal-heavy cells (cl-brotli is 5.6x faster on q0
@@ -326,6 +324,9 @@ The benchmark was used to drive these changes:
   best-len probe before extending a candidate, so most chain candidates are
   rejected with one 32-bit compare; q5-q9 gained another 25-45% (HTML q5
   18.4 -> 25.5 MiB/s, q9 8.7 -> 12.0) with unchanged ratio;
+* 32-bit `head`/`prev` chain tables with no `prev` fill (only inserted
+  positions are read), plus C's `StoreRange` short-distance tail rule; this
+  lifted text q5-q9 from ~110 to 330-370 MiB/s and made q9 1.46x C overall;
 * a bit writer that flushes the whole accumulator with one unaligned 64-bit
   store (instead of a per-byte loop), plus a batched literal-run writer that
   keeps the accumulator, bit count, and output position in locals and pins the
@@ -371,15 +372,15 @@ level against both decoders). Benchmarks are run only on SBCL 2.6.9.
 * Encoder ratio is at C q5 (1.06x) on text-like data; the q11 size gap (1.20x)
   needs context modeling, block splitting, and length-changing dictionary
   transforms.
-* Low-level encoder throughput: q0 is 0.33x, q1 0.25x, q2-q4 0.31-0.37x,
-  q5-q8 0.21-0.24x, and q9 0.54x of C's matching levels. q0 is 5.52x faster
-  than C q0 on text and 0.89x on source, but 0.22-0.25x on literal-heavy
+* Low-level encoder throughput: q0 is 0.32x, q1 0.27x, q2-q4 0.44-0.54x,
+  q5-q8 0.54-0.62x, and **q9 1.46x**. q7/q9/q10/q11 beat C on text (q7
+  1.06x, q9 1.99x, q10 9.44x, q11 8.07x). q0 is 5.56x faster than C q0 on
+  text and 0.87x on source, but 0.20-0.25x on literal-heavy
   HTML/JSON/binary. q0 output is 0.35-0.99x the size of C q0. The remaining
-  gap is mainly SBCL codegen versus the hand-written C emitter plus C's
-  block splitting/command-code adaptation; the fast command alphabet,
-  matcher, and best-len probe are now ported.
-* q0/q1 decode is 0.34x/0.44x across all eleven datasets (C timing varies
-  between runs). Text is 0.38x/0.42x; literal-heavy HTML/JSON/source/binary
+  literal-heavy gap is mainly SBCL codegen versus the hand-written C
+  emitter plus C's block splitting/command-code adaptation.
+* q0/q1 decode is 0.42x/0.55x across all eleven datasets (C timing varies
+  between runs). Text is 0.39x/0.41x; literal-heavy HTML/JSON/source/binary
   is 0.28-0.38x. A 704-entry command LUT, typed/inlined copy path,
   NPOSTFIX=0 distance path, and typed decode-loop scalars gave ~70-80% over
   the older decoder. Fast per-literal Huffman decode is the remaining gap.

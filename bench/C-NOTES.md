@@ -281,3 +281,18 @@ Profiling q5 showed `INS` at 39% on text and `FIND-MATCH` at 64% on HTML
 Effect: q5 HTML 18.4->25.5, q6 14.7->21.2, q7 12.9->18.3, q8 10.2->14.4,
 q9 8.7->12.0 MiB/s; q10/q11 also improve (q11 compression 3.24x). q9's
 geomean rose from 0.44x to 0.54x.
+
+## Chain table representation and StoreRange
+
+The generic q2-q11 matcher allocated an 8-byte fixnum `prev` table (8 MiB
+for a 1 MiB input), filled it with -1 on every call, and a 1 MiB fixnum
+`head`. Both are now `(unsigned-byte 32)`, and `prev` needs no initial fill
+because only positions that were inserted are ever followed. This alone
+lifted text q4 from 259 to 656 MiB/s and q5-q9 by 10-20%.
+
+C's `StoreRange` short-distance rule was then ported: for a match with
+`distance < length/4`, insert only the last `distance*4` positions of the
+match instead of all interior positions (avoids chain poisoning on RLE-like
+data). This lifted text q5-q9 from ~110 to 330-370 MiB/s with unchanged
+output size. q9 now beats C overall (1.46x geomean, text 1.99x), and
+q7/q9/q10/q11 beat it on text; q10/q11 compression are 9.44x/8.07x.

@@ -520,14 +520,16 @@ or NIL on other implementations."
         (let* ((hbits 17) (hmask (1- (ash 1 hbits)))
                (chained (> max-chain 1))
                (head (make-array (ash 1 hbits)
-                                 :element-type 'fixnum :initial-element -1))
+                                 :element-type '(unsigned-byte 32)
+                                 :initial-element #xFFFFFFFF))
+               ;; Every entry read from PREV was written when that position
+               ;; was inserted, so no initial fill is needed.
                (prev (and chained
-                          (make-array n :element-type 'fixnum
-                                        :initial-element -1)))
+                          (make-array n :element-type '(unsigned-byte 32))))
                (cmds '()) (lit-start 0) (p 0) (last (- n min-match))
                (skip 32) (dict-used 0))
-          (declare (type (simple-array fixnum (*)) head)
-                   (type (or null (simple-array fixnum (*))) prev)
+          (declare (type (simple-array (unsigned-byte 32) (*)) head)
+                   (type (or null (simple-array (unsigned-byte 32) (*))) prev)
                    (type fixnum p lit-start last skip dict-used))
           (labels (#+sbcl
                    (hash (i)
@@ -557,14 +559,14 @@ or NIL on other implementations."
                      (let ((cand (aref head h)) (best-len 0) (best-dist 0))
                        (if chained
                            (let ((chain max-chain))
-                             (loop while (and (>= cand 0) (> chain 0)) do
+                             (loop while (and (/= cand #xFFFFFFFF) (> chain 0)) do
                                (when (> (- pos cand) window) (return))
                                (when (probe-ok cand pos best-len)
                                  (let ((ml (mlen cand pos)))
                                    (when (> ml best-len)
                                      (setf best-len ml best-dist (- pos cand)))))
                                (setf cand (aref prev cand)) (decf chain)))
-                           (when (and (>= cand 0) (<= (- pos cand) window))
+                           (when (and (/= cand #xFFFFFFFF) (<= (- pos cand) window))
                              (when (probe-ok cand pos best-len)
                                (let ((ml (mlen cand pos)))
                                  (when (> ml best-len)
@@ -578,9 +580,18 @@ or NIL on other implementations."
                                        best-dist nil)
                                  cmds)
                            (when (and chained insert-interior)
-                             (loop for q from (1+ p)
-                                   below (min (+ p best-len) (1+ last))
-                                   do (ins q (hash q))))
+                             ;; C's StoreRange: for a short distance relative
+                             ;; to the match, only store the tail positions to
+                             ;; avoid poisoning the chain on RLE-like data.
+                             (let* ((range-end (min (+ p best-len) (1+ last)))
+                                    (range-start (1+ p)))
+                               (declare (type fixnum range-end range-start))
+                               (when (< best-dist (ash (- range-end p) -2))
+                                 (setf range-start
+                                       (max range-start
+                                            (- range-end (ash best-dist 2)))))
+                               (loop for q from range-start below range-end
+                                     do (ins q (hash q)))))
                            (setf skip 32)
                            (incf p best-len)
                            (setf lit-start p))
