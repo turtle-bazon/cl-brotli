@@ -315,3 +315,12 @@ and decrement, no refill, no unused mask), and store the primary-table mask
 in the `HUFF` object instead of recomputing `(ash 1 table-bits)` on every
 peek. q0/q1 decode: text 1121/743 MiB/s, HTML 188/172, JSON 246/199,
 source 184/166, binary 156/162; geomeans 0.36x/0.56x of C.
+
+## Fused q0/q1 histograms
+
+The fast-fragment matcher now accumulates the literal/command/distance
+histograms as it emits each command, so `WRITE-FAST-BLOCK-BODY` no longer
+makes a separate pass over the command vector. Output is bit-identical.
+q0 text/HTML/source/binary reach 1160/121/248/122 MiB/s; q0 source is
+1.06x C. The full-harness geomean change is within run-to-run noise, but
+the pipeline is now one pass shorter.

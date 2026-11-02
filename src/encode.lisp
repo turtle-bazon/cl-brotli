@@ -641,159 +641,6 @@ or NIL on other implementations."
               (push (list (- n lit-start) lit-start 0 0 nil) cmds))
             (nreverse cmds))))))
 
-;;; C Brotli's fast-fragment matcher, used for q0/q1.  It keeps a single
-;;; entry per hash (no chain), uses a 5-byte minimum match for q0 and 6-byte
-;;; for q1, checks the last distance before the table, and re-inserts hashes
-;;; for the bytes inside a just-emitted copy so the next copy can start
-;;; immediately.  See c/enc/compress_fragment.c and
-;;; compress_fragment_two_pass.c.
-#+(and sbcl x86-64 64-bit little-endian)
-(defun %lz77-fragment (data sap window table-bits)
-  (declare (type (simple-array (unsigned-byte 8) (*)) data)
-           (type sb-sys:system-area-pointer sap)
-           (type fixnum window table-bits)
-           (optimize (speed 3) (safety 0)))
-  (let* ((n (length data))
-         (k (if (<= table-bits 16) 5 6))
-         (min-match k)
-         (hmask (1- (ash 1 table-bits)))
-         (table (make-array (ash 1 table-bits)
-                            :element-type '(unsigned-byte 32)
-                            :initial-element #xFFFFFFFF))
-         (cv (make-array (* 4 (max 4096 (ash n -5)))
-                         :element-type '(unsigned-byte 32)))
-         (nc 0)
-         (lit-start 0) (p 1) (limit (- n k))
-         (last-dist -1) (back (if (= k 5) 3 5)))
-    (declare (type fixnum k min-match p lit-start limit last-dist back nc)
-             (type (simple-array (unsigned-byte 32) (*)) table cv))
-    (labels ((hash (i) (%hashf-sap sap i hmask))
-             (prefix-match (a b)
-               (and (= (sb-sys:sap-ref-32 sap a)
-                       (sb-sys:sap-ref-32 sap b))
-                    (if (= k 5)
-                        (= (sb-sys:sap-ref-8 sap (+ a 4))
-                           (sb-sys:sap-ref-8 sap (+ b 4)))
-                        (= (sb-sys:sap-ref-16 sap (+ a 4))
-                           (sb-sys:sap-ref-16 sap (+ b 4))))))
-             (mlen (a b) (%match-len-sap-call sap a b n))
-             (push-cmd (ins ls cpy dist)
-               (when (>= (* 4 nc) (length cv))
-                 (let ((new (make-array (* 2 (length cv))
-                                        :element-type '(unsigned-byte 32))))
-                   (replace new cv)
-                   (setf cv new)))
-               (let ((b (* 4 nc)))
-                 (setf (aref cv b) ins
-                       (aref cv (+ b 1)) ls
-                       (aref cv (+ b 2)) cpy
-                       (aref cv (+ b 3)) dist))
-               (incf nc)))
-        (declare (inline hash prefix-match push-cmd))
-      (when (> n k)
-        (let ((next-hash (hash p)))
-          (declare (type fixnum next-hash))
-          (block scan
-            (loop
-              ;; Step 1: trawl for a k-byte match, with C's skip heuristic.
-              (let ((skip 32) (cand #xFFFFFFFF) (next-ip p))
-                (declare (type fixnum skip next-ip)
-                         (type (unsigned-byte 32) cand))
-                (block trawl
-                  (loop
-                    (let* ((h next-hash)
-                           (step (ash skip -5)))
-                      (declare (type fixnum h step))
-                      (incf skip)
-                      (setf p next-ip)
-                      (setf next-ip (+ p step))
-                      (when (> next-ip limit) (return-from scan nil))
-                      (setf next-hash (hash next-ip))
-                      ;; C checks the previous distance before the table.
-                      (when (> last-dist 0)
-                        (let ((ld (- p last-dist)))
-                          (when (and (>= ld 0) (prefix-match p ld))
-                            (setf (aref table h) p
-                                  cand ld)
-                            (return-from trawl nil))))
-                      (let ((c2 (aref table h)))
-                        (setf (aref table h) p)
-                        (when (and (/= c2 #xFFFFFFFF)
-                                   (< c2 p)
-                                   (<= (- p c2) window)
-                                   (prefix-match p c2))
-                          (setf cand c2)
-                          (return-from trawl nil))))))
-                ;; Step 2: emit the found match plus the pending literals.
-                (let* ((base p)
-                       (matched (+ min-match (mlen (+ cand k) (+ p k))))
-                       (distance (- base cand))
-                       (insert (- base lit-start)))
-                  (declare (type fixnum matched distance insert))
-                  (push-cmd insert lit-start matched distance)
-                  (incf p matched)
-                  (setf lit-start p
-                        last-dist distance))
-                (when (>= p limit) (return-from scan nil))
-                ;; Insert hashes for positions inside the copy.
-                (loop for q from (max 0 (- p back)) below p
-                      do (setf (aref table (hash q)) q))
-                (let* ((cur-hash (hash p))
-                       (cand2 (aref table cur-hash)))
-                  (declare (type fixnum cur-hash)
-                           (type (unsigned-byte 32) cand2))
-                  (setf (aref table cur-hash) p)
-                  ;; Consecutive copies with no literal bytes in between.
-                  (loop while (and (/= cand2 #xFFFFFFFF)
-                                   (< cand2 p)
-                                   (<= (- p cand2) window)
-                                   (prefix-match p cand2))
-                        do
-                        (let* ((base p)
-                               (matched (+ min-match
-                                           (mlen (+ cand2 k) (+ p k))))
-                               (distance (- base cand2)))
-                          (declare (type fixnum matched distance))
-                          (push-cmd 0 p matched distance)
-                          (setf last-dist distance)
-                          (incf p matched)
-                          (setf lit-start p))
-                        (when (>= p limit) (return-from scan nil))
-                        (loop for q from (max 0 (- p back)) below p
-                              do (setf (aref table (hash q)) q))
-                        (setf cur-hash (hash p)
-                              cand2 (aref table cur-hash))
-                        (setf (aref table cur-hash) p))))
-              ;; No match at P: advance one byte and continue trawling.
-              (incf p)
-              (when (> p limit) (return-from scan nil))
-              (setf next-hash (hash p))))))
-      (when (< lit-start n)
-        (push-cmd (- n lit-start) lit-start 0 0))
-      (values cv nc))))
-
-(defun lz77 (data window &key (use-dict (text-like-data-p data)) dict-limit
-                              (base-pos 0) (max-chain 128) (lazy t)
-                              (skip-match nil) (insert-interior t))
-  "Return commands (insert-len lit-start copy-len distance dict-p); copy-len 0
-marks a trailing insert-only command.  BASE-POS is the number of bytes already
-produced before DATA; it is needed to encode dictionary distances correctly
-when DATA is one chunk of a multi-meta-block stream.  MAX-CHAIN and LAZY trade
-compression ratio for encoder throughput."
-  #+sbcl
-  (sb-sys:with-pinned-objects (data)
-    #+(and sbcl x86-64 64-bit little-endian)
-    (if (and skip-match (not lazy) (not use-dict) (<= max-chain 2))
-        (%lz77-fragment data (sb-sys:vector-sap data) window
-                        (if (<= max-chain 1) 15 17))
-        (%lz77 data (sb-sys:vector-sap data) window use-dict dict-limit
-               base-pos max-chain lazy skip-match insert-interior)))
-  #-sbcl
-  (%lz77 data nil window use-dict dict-limit base-pos max-chain lazy
-          skip-match insert-interior))
-
-;;; ---- compressed meta-block --------------------------------------------
-
 ;;; ---- C Brotli's q0/q1 fast-fragment entropy coding --------------------
 
 (defun q0-cmd-symbol (c)
@@ -903,63 +750,217 @@ compression ratio for encoder throughput."
     (values (+ (* 2 (1- nb)) prefix 80)
             (- d offset) nb)))
 
-(defun q0-histograms (data cv nc)
-  "Return (values LITFREQ CMDFREQ DISTFREQ) for the flat command vector CV.
-CMDFREQ is over the 64 fast command codes; DISTFREQ is over distance
-symbols 0..63.  The command/distance histograms start from C's seed."
+
+(defun note-fast-command (data litf cmdf distf last-dist ins ls cpy dist)
+  "Update the fast command/distance histograms for one command and return
+the new last-distance.  Mirrors WRITE-FAST-BLOCK-BODY's emission decisions."
   (declare (type (simple-array (unsigned-byte 8) (*)) data)
-           (type (simple-array (unsigned-byte 32) (*)) cv)
-           (type fixnum nc))
-  (let ((litf (make-array 256 :element-type 'fixnum :initial-element 0))
-        (cmdf (make-array 64 :element-type 'fixnum :initial-element 0))
-        (distf (make-array 64 :element-type 'fixnum :initial-element 0))
-        (last-dist -1))
-    (declare (type (simple-array fixnum (256)) litf)
-             (type (simple-array fixnum (64)) cmdf distf)
-             (type fixnum last-dist))
-    (replace cmdf +q0-seed-cmd+)
-    (replace distf +q0-seed-dist+)
-    (dotimes (ci nc)
-      (let* ((base (* 4 ci))
-             (ins (aref cv base))
-             (lit-start (aref cv (+ base 1)))
-             (cpy (aref cv (+ base 2)))
-             (dist (aref cv (+ base 3))))
-        (declare (type fixnum ins lit-start cpy dist))
-        (loop for i from lit-start below (+ lit-start ins)
-              do (incf (aref litf (aref data i))))
-        (cond
-          ((and (plusp ins) (plusp cpy))
-           (multiple-value-bind (cc e nb) (q0-insert-len ins)
-             (declare (ignore e nb))
-             (incf (aref cmdf cc)))
-           (if (= dist last-dist)
-               (incf (aref distf 0))
-               (progn
-                 (multiple-value-bind (cc e nb) (q0-distance dist)
-                   (declare (ignore e nb))
-                   (incf (aref distf (- cc 64))))
-                 (setf last-dist dist)))
-           (multiple-value-bind (cc e nb) (q0-copy-last-len cpy)
-             (declare (ignore e nb))
-             (incf (aref cmdf cc))
-             (when (>= (aref +q0-cmd-map+ cc) 128)
-               (incf (aref distf 0)))))
-          ((plusp cpy)
-           (multiple-value-bind (cc e nb) (q0-copy-len cpy)
-             (declare (ignore e nb))
-             (incf (aref cmdf cc)))
+           (type (simple-array fixnum (256)) litf)
+           (type (simple-array fixnum (64)) cmdf distf)
+           (type fixnum last-dist ins ls cpy dist)
+           (optimize (speed 3) (safety 0)))
+  (loop for i from ls below (+ ls ins)
+        do (incf (aref litf (aref data i))))
+  (cond
+    ((and (plusp ins) (plusp cpy))
+     (multiple-value-bind (cc e nb) (q0-insert-len ins)
+       (declare (ignore e nb))
+       (incf (aref cmdf cc)))
+     (if (= dist last-dist)
+         (incf (aref distf 0))
+         (progn
            (multiple-value-bind (cc e nb) (q0-distance dist)
              (declare (ignore e nb))
              (incf (aref distf (- cc 64))))
-           (setf last-dist dist))
-          (t
-           (multiple-value-bind (cc e nb) (q0-insert-len ins)
-             (declare (ignore e nb))
-             (incf (aref cmdf cc)))))))
-    (values litf cmdf distf)))
+           (setf last-dist dist)))
+     (multiple-value-bind (cc e nb) (q0-copy-last-len cpy)
+       (declare (ignore e nb))
+       (incf (aref cmdf cc))
+       (when (>= (aref +q0-cmd-map+ cc) 128)
+         (incf (aref distf 0)))))
+    ((plusp cpy)
+     (multiple-value-bind (cc e nb) (q0-copy-len cpy)
+       (declare (ignore e nb))
+       (incf (aref cmdf cc)))
+     (multiple-value-bind (cc e nb) (q0-distance dist)
+       (declare (ignore e nb))
+       (incf (aref distf (- cc 64))))
+     (setf last-dist dist))
+    (t
+     (multiple-value-bind (cc e nb) (q0-insert-len ins)
+       (declare (ignore e nb))
+       (incf (aref cmdf cc)))))
+  last-dist)
 
-(defun write-fast-block-body (w data cv nc)
+;;; C Brotli's fast-fragment matcher, used for q0/q1.  It keeps a single
+;;; entry per hash (no chain), uses a 5-byte minimum match for q0 and 6-byte
+;;; for q1, checks the last distance before the table, and re-inserts hashes
+;;; for the bytes inside a just-emitted copy so the next copy can start
+;;; immediately.  See c/enc/compress_fragment.c and
+;;; compress_fragment_two_pass.c.
+#+(and sbcl x86-64 64-bit little-endian)
+(defun %lz77-fragment (data sap window table-bits)
+  (declare (type (simple-array (unsigned-byte 8) (*)) data)
+           (type sb-sys:system-area-pointer sap)
+           (type fixnum window table-bits)
+           (optimize (speed 3) (safety 0)))
+  (let* ((n (length data))
+         (k (if (<= table-bits 16) 5 6))
+         (min-match k)
+         (hmask (1- (ash 1 table-bits)))
+         (table (make-array (ash 1 table-bits)
+                            :element-type '(unsigned-byte 32)
+                            :initial-element #xFFFFFFFF))
+         (cv (make-array (* 4 (max 4096 (ash n -5)))
+                         :element-type '(unsigned-byte 32)))
+         (nc 0)
+         (litf (make-array 256 :element-type 'fixnum :initial-element 0))
+         (cmdf (make-array 64 :element-type 'fixnum :initial-element 0))
+         (distf (make-array 64 :element-type 'fixnum :initial-element 0))
+         (lit-start 0) (p 1) (limit (- n k))
+         (last-dist -1) (back (if (= k 5) 3 5)))
+    (declare (type fixnum k min-match p lit-start limit last-dist back nc)
+             (type (simple-array (unsigned-byte 32) (*)) table cv)
+             (type (simple-array fixnum (256)) litf)
+             (type (simple-array fixnum (64)) cmdf distf))
+    (replace cmdf +q0-seed-cmd+)
+    (replace distf +q0-seed-dist+)
+    (labels ((hash (i) (%hashf-sap sap i hmask))
+             (prefix-match (a b)
+               (and (= (sb-sys:sap-ref-32 sap a)
+                       (sb-sys:sap-ref-32 sap b))
+                    (if (= k 5)
+                        (= (sb-sys:sap-ref-8 sap (+ a 4))
+                           (sb-sys:sap-ref-8 sap (+ b 4)))
+                        (= (sb-sys:sap-ref-16 sap (+ a 4))
+                           (sb-sys:sap-ref-16 sap (+ b 4))))))
+             (mlen (a b) (%match-len-sap-call sap a b n))
+             (push-cmd (ins ls cpy dist)
+               (when (>= (* 4 nc) (length cv))
+                 (let ((new (make-array (* 2 (length cv))
+                                        :element-type '(unsigned-byte 32))))
+                   (replace new cv)
+                   (setf cv new)))
+               (let ((b (* 4 nc)))
+                 (setf (aref cv b) ins
+                       (aref cv (+ b 1)) ls
+                       (aref cv (+ b 2)) cpy
+                       (aref cv (+ b 3)) dist))
+               (incf nc)))
+        (declare (inline hash prefix-match push-cmd))
+      (when (> n k)
+        (let ((next-hash (hash p)))
+          (declare (type fixnum next-hash))
+          (block scan
+            (loop
+              ;; Step 1: trawl for a k-byte match, with C's skip heuristic.
+              (let ((skip 32) (cand #xFFFFFFFF) (next-ip p))
+                (declare (type fixnum skip next-ip)
+                         (type (unsigned-byte 32) cand))
+                (block trawl
+                  (loop
+                    (let* ((h next-hash)
+                           (step (ash skip -5)))
+                      (declare (type fixnum h step))
+                      (incf skip)
+                      (setf p next-ip)
+                      (setf next-ip (+ p step))
+                      (when (> next-ip limit) (return-from scan nil))
+                      (setf next-hash (hash next-ip))
+                      ;; C checks the previous distance before the table.
+                      (when (> last-dist 0)
+                        (let ((ld (- p last-dist)))
+                          (when (and (>= ld 0) (prefix-match p ld))
+                            (setf (aref table h) p
+                                  cand ld)
+                            (return-from trawl nil))))
+                      (let ((c2 (aref table h)))
+                        (setf (aref table h) p)
+                        (when (and (/= c2 #xFFFFFFFF)
+                                   (< c2 p)
+                                   (<= (- p c2) window)
+                                   (prefix-match p c2))
+                          (setf cand c2)
+                          (return-from trawl nil))))))
+                ;; Step 2: emit the found match plus the pending literals.
+                (let* ((base p)
+                       (matched (+ min-match (mlen (+ cand k) (+ p k))))
+                       (distance (- base cand))
+                       (insert (- base lit-start)))
+                  (declare (type fixnum matched distance insert))
+                  (push-cmd insert lit-start matched distance)
+                  (setf last-dist
+                        (note-fast-command data litf cmdf distf last-dist
+                                           insert lit-start matched distance))
+                  (incf p matched)
+                  (setf lit-start p))
+                (when (>= p limit) (return-from scan nil))
+                ;; Insert hashes for positions inside the copy.
+                (loop for q from (max 0 (- p back)) below p
+                      do (setf (aref table (hash q)) q))
+                (let* ((cur-hash (hash p))
+                       (cand2 (aref table cur-hash)))
+                  (declare (type fixnum cur-hash)
+                           (type (unsigned-byte 32) cand2))
+                  (setf (aref table cur-hash) p)
+                  ;; Consecutive copies with no literal bytes in between.
+                  (loop while (and (/= cand2 #xFFFFFFFF)
+                                   (< cand2 p)
+                                   (<= (- p cand2) window)
+                                   (prefix-match p cand2))
+                        do
+                        (let* ((base p)
+                               (matched (+ min-match
+                                           (mlen (+ cand2 k) (+ p k))))
+                               (distance (- base cand2)))
+                          (declare (type fixnum matched distance))
+                          (push-cmd 0 p matched distance)
+                          (setf last-dist
+                                (note-fast-command data litf cmdf distf
+                                                   last-dist 0 p matched distance))
+                          (incf p matched)
+                          (setf lit-start p))
+                        (when (>= p limit) (return-from scan nil))
+                        (loop for q from (max 0 (- p back)) below p
+                              do (setf (aref table (hash q)) q))
+                        (setf cur-hash (hash p)
+                              cand2 (aref table cur-hash))
+                        (setf (aref table cur-hash) p))))
+              ;; No match at P: advance one byte and continue trawling.
+              (incf p)
+              (when (> p limit) (return-from scan nil))
+              (setf next-hash (hash p))))))
+      (when (< lit-start n)
+        (let ((insert (- n lit-start)))
+          (push-cmd insert lit-start 0 0)
+          (setf last-dist
+                (note-fast-command data litf cmdf distf last-dist
+                                   insert lit-start 0 0))))
+      (values cv nc litf cmdf distf))))
+
+(defun lz77 (data window &key (use-dict (text-like-data-p data)) dict-limit
+                              (base-pos 0) (max-chain 128) (lazy t)
+                              (skip-match nil) (insert-interior t))
+  "Return commands (insert-len lit-start copy-len distance dict-p); copy-len 0
+marks a trailing insert-only command.  BASE-POS is the number of bytes already
+produced before DATA; it is needed to encode dictionary distances correctly
+when DATA is one chunk of a multi-meta-block stream.  MAX-CHAIN and LAZY trade
+compression ratio for encoder throughput."
+  #+sbcl
+  (sb-sys:with-pinned-objects (data)
+    #+(and sbcl x86-64 64-bit little-endian)
+    (if (and skip-match (not lazy) (not use-dict) (<= max-chain 2))
+        (%lz77-fragment data (sb-sys:vector-sap data) window
+                        (if (<= max-chain 1) 15 17))
+        (%lz77 data (sb-sys:vector-sap data) window use-dict dict-limit
+               base-pos max-chain lazy skip-match insert-interior)))
+  #-sbcl
+  (%lz77 data nil window use-dict dict-limit base-pos max-chain lazy
+          skip-match insert-interior))
+
+;;; ---- compressed meta-block --------------------------------------------
+
+(defun write-fast-block-body (w data cv nc litf cmdf distf)
   "Emit a q0/q1 meta-block body from the flat fast-fragment command vector,
 using the fast command/distance alphabet with trees built from the actual
 histograms.  The MLEN header must already have been written."
@@ -967,9 +968,10 @@ histograms.  The MLEN header must already have been written."
            (type (simple-array (unsigned-byte 8) (*)) data)
            (type (simple-array (unsigned-byte 32) (*)) cv)
            (type fixnum nc)
+           (type (simple-array fixnum (256)) litf)
+           (type (simple-array fixnum (64)) cmdf distf)
            (optimize (speed 3) (safety 0)))
-  (multiple-value-bind (litf cmdf distf) (q0-histograms data cv nc)
-    (let* ((lit (build-etree litf 256 15))
+  (let* ((lit (build-etree litf 256 15))
            (cmd-et (fast-cmd-etree (build-etree cmdf 64 15)))
            (dist-et (build-etree distf 64 14))
            (lit-single (etree-single lit))
@@ -1048,7 +1050,7 @@ histograms.  The MLEN header must already have been written."
                (multiple-value-bind (cc e nb) (q0-insert-len ins)
                  (emit-cmd cc e nb))
                (unless lit-single
-                 (b:w-emit-run w data lit-start (+ lit-start ins) lit-rc lit-ln))))))))))
+                 (b:w-emit-run w data lit-start (+ lit-start ins) lit-rc lit-ln)))))))))
 
 
 ;;; Flat command records: 10 fixnums per command.  A struct per command was
@@ -1331,11 +1333,11 @@ meta-block."
       ((<= n #.(ash 1 24))
        (write-mlen-header w n t)
        (if fast-fragment
-           (multiple-value-bind (cv nc)
+           (multiple-value-bind (cv nc litf cmdf distf)
                (lz77 data window
                       :max-chain max-chain :lazy nil :skip-match t
                       :use-dict nil :insert-interior nil)
-             (write-fast-block-body w data cv nc))
+             (write-fast-block-body w data cv nc litf cmdf distf))
            (write-compressed-block-body w data 0 window use-dict dict-limit rb
                                         :max-chain max-chain :lazy lazy
                                         :short-dist short-dist
