@@ -501,3 +501,16 @@ literal-heavy corpora: q0 HTML 123->127 MiB/s, JSON 175->184, SOURCE
 are unchanged. The level-matched q0 q1 geomeans stay within run-to-run noise
 (the aggregate includes the easy synthetic corpora), but the per-cell
 HTML/JSON/SOURCE gaps narrow.
+
+## Hoisting the literal block switch
+
+The decoder tested `SINGLE-LBLOCK` inside the per-literal loop. C q0/q1
+streams have one literal block (and one literal tree), and the common q5-q11
+context streams also have one literal block type with multiple context trees.
+The branch was pure overhead for a million literals.
+
+Split the single-tree and context loops into `single-lblock` and
+block-switching variants. C-stream decode improves: q11 HTML 263->284 MiB/s,
+JSON 234->248, TEXT 1265->1333. Decoder microbenchmarks (lisp streams) gain
+8-15% on q2/q11: HTML q11 269->302, JSON 240->267, SOURCE 317->346,
+BINARY 125->145; BINARY q2 155->169.
