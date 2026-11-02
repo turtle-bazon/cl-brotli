@@ -395,5 +395,34 @@ The decoder now:
 
 BINARY q11 decompression consing drops from 3.35 MB to 1.56 MB per MiB of
 output (RANDOM 2.10->1.05 MB). Level-matched decompression geomeans rise
-q2 1.43->1.81, q3 1.79->2.00, q5 1.48->1.65, q7 1.54->1.75, q11 1.64->1.78;
-q0/q1 decode geomeans rise 0.35->0.45 and 0.41->0.47.
+q2 1.43->1.75, q3 1.79->1.94, q5 1.48->1.62, q7 1.54->1.67, q11 1.64->1.81;
+q0/q1 decode geomeans rise 0.35->0.45 and 0.41->0.45. These aggregates are
+noisy; see the volatility note below for the stable per-dataset ratios.
+
+## Allocation-free dictionary candidate matching
+
+`DICT-MATCH-AT` ran for every input position on the q10/q11 paths. For each
+candidate word and each length-preserving transform it did `SUBSEQ` on the
+dictionary, `COPY-SEQ` inside `APPLY-TRANSFORM`, and usually another
+`CONCATENATE`. On HTML this made the dictionary LZ77 pass allocate 30.7 MB,
+versus 9.1 MB for the same pass without the dictionary.
+
+The encoder now compares the candidate word byte-by-byte against the input
+and applies the identity/upper-first/upper-all transforms on the fly. There
+are no temporary vectors. Results are bit-identical (verified against the old
+implementation on ~27k positions and on every q10/q11 corpus stream).
+
+HTML q11 encoder allocation drops 48.7->27.1 MB per call, SOURCE
+40.7->21.4 MB, TEXT 16.1->11.5 MB. q11 compression rises from ~54 to ~144
+MiB/s on TEXT and ~6.7 to ~9.8 MiB/s on SOURCE with unchanged sizes.
+Level-matched geomeans: q10 13.08->14.92x, q11 11.41->12.46x.
+
+### Decompression geomean volatility
+
+The all-eleven decompression geomean includes ZEROS/RANDOM/PERIODIC/PATTERN/
+DICT/UTF8, which decode from tiny stored or highly repetitive streams. C's
+one-shot decode of those is a near-memcpy and its measured time moves by more
+than 2x between runs, so the aggregate geomean is much noisier than the
+per-dataset ratios. On the five representative corpora the decode ratios are
+stable; for the recorded run HTML q0/q11 is 0.34/0.30, JSON 0.33/0.33,
+SOURCE 0.38/0.42, and BINARY 0.41/0.33.

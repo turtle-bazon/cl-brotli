@@ -375,6 +375,72 @@ RB is the 4-slot ring plus a write index in slot 4."
           collect tid)
   "Dictionary transforms that preserve word length (identity and uppercase).")
 
+(defparameter +dict-transform-kinds+
+  (loop for tid in +dict-transforms+
+        for tr = (aref +transforms+ tid)
+        collect (cons tid (case (second tr)
+                            (:identity 0)
+                            (:upper-first 1)
+                            (t 2))))
+  "Transform id plus a small kind tag, so the encoder can compare bytes
+without materialising the transformed word.")
+
+(declaim (inline %dict-word-match-p))
+(defun %dict-word-match-p (data p dict off len kind)
+  "Compare DATA[P..P+LEN) with the dictionary word DICT[OFF..OFF+LEN) after
+KIND (0 identity, 1 upper-first, 2 upper-all).  No temporary vectors."
+  (declare (type (simple-array (unsigned-byte 8) (*)) data dict)
+           (type fixnum p off len kind)
+           (optimize (speed 3) (safety 0)))
+  (case kind
+    (0
+     (loop for i below len
+           always (= (aref data (+ p i)) (aref dict (+ off i)))))
+    (1
+     ;; %FERMENT-FIRST changes only the first UTF-8 character.
+     (let ((c (aref dict off)))
+       (cond
+         ((< c 192)
+          (and (= (aref data p) (if (<= 97 c 122) (logxor c 32) c))
+               (loop for i from 1 below len
+                     always (= (aref data (+ p i)) (aref dict (+ off i))))))
+         ((< c 224)
+          (and (= (aref data p) c)
+               (= (aref data (1+ p)) (logxor (aref dict (1+ off)) 32))
+               (loop for i from 2 below len
+                     always (= (aref data (+ p i)) (aref dict (+ off i))))))
+         (t
+          (and (= (aref data p) c)
+               (= (aref data (1+ p)) (aref dict (1+ off)))
+               (= (aref data (+ p 2)) (logxor (aref dict (+ off 2)) 5))
+               (loop for i from 3 below len
+                     always (= (aref data (+ p i)) (aref dict (+ off i)))))))))
+    (t
+     ;; %FERMENT-ALL walks the UTF-8 characters, uppercasing each one.
+     (loop with i = 0
+           while (< i len)
+           always (let ((c (aref dict (+ off i))))
+                    (cond
+                      ((< c 192)
+                       (prog1 (= (aref data (+ p i))
+                                 (if (<= 97 c 122) (logxor c 32) c))
+                         (incf i)))
+                      ((< c 224)
+                       (prog1 (and (= (aref data (+ p i)) c)
+                                   (or (>= (1+ i) len)
+                                       (= (aref data (+ p (1+ i)))
+                                          (logxor (aref dict (+ off (1+ i))) 32))))
+                         (incf i 2)))
+                      (t
+                       (prog1 (and (= (aref data (+ p i)) c)
+                                   (or (>= (1+ i) len)
+                                       (= (aref data (+ p (1+ i)))
+                                          (aref dict (+ off (1+ i)))))
+                                   (or (>= (+ i 2) len)
+                                       (= (aref data (+ p i 2))
+                                          (logxor (aref dict (+ off i 2)) 5))))
+                         (incf i 3)))))))))
+
 (defun dict-match-at (data p n)
   "Longest dictionary word starting at DATA[P], as
 \(values length index transform-id).  Only length-preserving transforms are
@@ -387,15 +453,10 @@ considered so command copy lengths remain the base-word lengths."
              (idx (cdr cand)))
         (when (and (<= len (- n p)) (> len best-len))
           (let ((off (+ (aref +doffset+ len) (* idx len))))
-            (dolist (tid +dict-transforms+)
-              (let* ((base (subseq dict off (+ off len)))
-                     (word (if (zerop tid)
-                               base
-                               (apply-transform base (aref +transforms+ tid)))))
-                (when (loop for i below len
-                            always (= (aref data (+ p i)) (aref word i)))
-                  (setf best-len len best-idx idx best-tid tid)
-                  (return))))))))
+            (dolist (tk +dict-transform-kinds+)
+              (when (%dict-word-match-p data p dict off len (cdr tk))
+                (setf best-len len best-idx idx best-tid (car tk))
+                (return)))))))
     (values best-len best-idx best-tid)))
 
 ;;; ---- LZ77 (greedy hash-chain match finder) ----------------------------
