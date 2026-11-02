@@ -1513,23 +1513,35 @@ already smaller than the input."
                (insert-interior (getf params :insert-interior t))
                (fast-fragment (getf params :fast-fragment nil))
                (dict-ok (and (getf params :use-dict) (text-like-data-p data)))
-               (plain (compress-entropy data :use-dict nil
-                                               :max-chain max-chain
-                                               :lazy lazy
-                                               :short-dist short-dist
-                                               :skip-match skip-match
-                                               :insert-interior insert-interior
-                                               :fast-fragment fast-fragment))
-               (best plain))
-          (when dict-ok
-            (let ((alt (compress-entropy data :use-dict t
+               ;; Run the dictionary parse first.  For normal text it is
+               ;; equal to or better than the plain parse, and re-running the
+               ;; whole matcher just to compare doubled q10/q11 time and
+               ;; allocation.  Tiny outputs can still lose (e.g. a tiled
+               ;; dictionary test vector), so keep the plain parse there.
+               (best (if dict-ok
+                         (compress-entropy data :use-dict t
+                                                :max-chain max-chain
+                                                :lazy lazy
+                                                :short-dist short-dist
+                                                :skip-match skip-match
+                                                :insert-interior insert-interior
+                                                :fast-fragment fast-fragment)
+                         (compress-entropy data :use-dict nil
+                                                :max-chain max-chain
+                                                :lazy lazy
+                                                :short-dist short-dist
+                                                :skip-match skip-match
+                                                :insert-interior insert-interior
+                                                :fast-fragment fast-fragment))))
+          (when (and dict-ok (< (length best) 4096))
+            (let ((plain (compress-entropy data :use-dict nil
                                                 :max-chain max-chain
                                                 :lazy lazy
                                                 :short-dist short-dist
                                                 :skip-match skip-match
                                                 :insert-interior insert-interior
                                                 :fast-fragment fast-fragment)))
-              (when (< (length alt) (length best)) (setf best alt))))
+              (when (< (length plain) (length best)) (setf best plain))))
           (when (>= (length best) (+ n 32))
             (let ((stored (compress-stored data)))
               (when (< (length stored) (length best)) (setf best stored))))

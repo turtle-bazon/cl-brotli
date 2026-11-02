@@ -395,8 +395,8 @@ The decoder now:
 
 BINARY q11 decompression consing drops from 3.35 MB to 1.56 MB per MiB of
 output (RANDOM 2.10->1.05 MB). Level-matched decompression geomeans rise
-q2 1.43->1.75, q3 1.79->1.94, q5 1.48->1.62, q7 1.54->1.67, q11 1.64->1.81;
-q0/q1 decode geomeans rise 0.35->0.45 and 0.41->0.45. These aggregates are
+q2 1.43->1.72, q3 1.79->1.91, q5 1.48->1.74, q7 1.54->1.76, q11 1.64->1.83;
+q0/q1 decode geomeans rise 0.35->0.43 and 0.41->0.43. These aggregates are
 noisy; see the volatility note below for the stable per-dataset ratios.
 
 ## Allocation-free dictionary candidate matching
@@ -415,7 +415,8 @@ implementation on ~27k positions and on every q10/q11 corpus stream).
 HTML q11 encoder allocation drops 48.7->27.1 MB per call, SOURCE
 40.7->21.4 MB, TEXT 16.1->11.5 MB. q11 compression rises from ~54 to ~144
 MiB/s on TEXT and ~6.7 to ~9.8 MiB/s on SOURCE with unchanged sizes.
-Level-matched geomeans: q10 13.08->14.92x, q11 11.41->12.46x.
+Level-matched geomeans: q10 13.08->14.92x, q11 11.41->12.46x before the
+single-pass change below.
 
 ### Decompression geomean volatility
 
@@ -446,3 +447,22 @@ incompressible random data; 1 MiB streams are unchanged. Our 17 MiB streams
 still cross-decode with the C reference, and the 94 tests (including the
 multi-block case) pass. This targets allocation and large-stream latency,
 not the 1 MiB quality-sweep ratios.
+
+## One dictionary pass at q10/q11
+
+`COMPRESS` used to run the whole entropy encoder twice for text-like data at
+q10/q11: once with the dictionary and once without, then keep the smaller
+stream. With allocation-free dictionary matching the dictionary pass is now
+equal to or better than the plain pass on normal text, so the second pass was
+mostly redundant work.
+
+Run the dictionary pass first and compare with the plain pass only when the
+dictionary result is under 4 KiB. That keeps extreme cases (a tiled dictionary
+test vector is 57 bytes with the plain parse and 70 with the dictionary
+parse) while halving normal q10/q11 work. All benchmark output sizes are
+unchanged.
+
+q11 speed: TEXT 144->244 MiB/s, HTML 2.8->5.5, JSON 2.8->5.5, SOURCE
+9.8->18.9. q11 allocation: HTML 27.1->13.6 MB, SOURCE 21.4->10.7 MB, TEXT
+11.5->5.7 MB, JSON 29.2->14.5 MB per call. Level-matched geomeans: q10
+14.92->19.13x, q11 12.46->16.21x.
