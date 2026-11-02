@@ -252,3 +252,16 @@ match path. q0/q1 decode now reaches 995/707 MiB/s on text, 165/152 on HTML,
 0.34x/0.48x of C. A 64-bit short-copy experiment and a reader mask table
 were both measured and reverted (slightly slower than the unrolled byte copy
 and inline `ash 1 n`, respectively).
+
+A third decoder change precomputes a direct 704-entry command LUT
+(`+cmd-ilen-base+/bits`, `+cmd-clen-base+/bits`), replacing the RFC
+cell/sub-code arithmetic in the hot loop, and inlines `%copy-match-bytes`
+into the typed copy entry point. q0/q1 decode reaches text 1063/724 MiB/s,
+HTML 176/163, JSON 229/189, source 169/156, binary 145/151; geomeans rise
+to 0.35x/0.55x of C.
+
+A register-resident bulk literal decoder (accumulator, bit count, and input
+position in locals, refilling from the input SAP, like C's
+`BrotliCopyPreloadedSymbolsToU8`) was implemented and measured. After
+guarding the primary-table width it was correct, but 5-7% slower than the
+inlined per-symbol reader in SBCL, so it was reverted.

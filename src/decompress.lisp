@@ -120,6 +120,24 @@ visible, and MODE is loop-invariant between block switches."
     (setf (aref (outbuf-data out) pos) byte)
     (setf (outbuf-pos out) (1+ pos))))
 
+;;; Direct 704-symbol command LUT: the RFC's cell + sub-code arithmetic done
+;;; once at load time, so the hot loop needs four loads instead of shifts,
+;;; masks, adds, and six table reads.
+(defparameter +cmd-ilen-base+ (make-array 704 :element-type 'fixnum :initial-element 0))
+(defparameter +cmd-ilen-bits+ (make-array 704 :element-type 'fixnum :initial-element 0))
+(defparameter +cmd-clen-base+ (make-array 704 :element-type 'fixnum :initial-element 0))
+(defparameter +cmd-clen-bits+ (make-array 704 :element-type 'fixnum :initial-element 0))
+(declaim (type (simple-array fixnum (704))
+               +cmd-ilen-base+ +cmd-ilen-bits+ +cmd-clen-base+ +cmd-clen-bits+))
+(dotimes (cmd 704)
+  (let* ((cell (ash cmd -6))
+         (icode (+ (aref +cmd-ins+ cell) (logand (ash cmd -3) 7)))
+         (ccode (+ (aref +cmd-cpy+ cell) (logand cmd 7))))
+    (setf (aref +cmd-ilen-base+ cmd) (aref +ins-base+ icode)
+          (aref +cmd-ilen-bits+ cmd) (aref +ins-bits+ icode)
+          (aref +cmd-clen-base+ cmd) (aref +cpy-base+ ccode)
+          (aref +cmd-clen-bits+ cmd) (aref +cpy-bits+ ccode))))
+
 (declaim (inline %copy-tiny-match))
 (defun %copy-tiny-match (data pos src length)
   "Copy a short non-overlapping match.  Returns the new position."
@@ -148,6 +166,7 @@ visible, and MODE is loop-invariant between block switches."
        (setf (aref data (+ pos i)) (aref data (+ src i))))))
   (+ pos length))
 
+(declaim (inline %copy-match-bytes))
 (defun %copy-match-bytes (data fp src distance len)
   (declare (optimize (speed 3) (safety 0))
            (type (simple-array (unsigned-byte 8) (*)) data)
@@ -267,15 +286,12 @@ distance ring buffer (persists across the stream)."
          (unless single-iblock
            (blk-maybe-switch r blkI))
          (let* ((cmd (read-huff r (svref htreei (blk-type blkI))))
-                (cell (ash cmd -6))
-                (icode (+ (aref +cmd-ins+ cell) (logand (ash cmd -3) 7)))
-                (ccode (+ (aref +cmd-cpy+ cell) (logand cmd 7)))
                 (dist0 (< cmd 128))
-                (ilen (+ (aref +ins-base+ icode)
-                         (b:rbits r (aref +ins-bits+ icode))))
-                (clen (+ (aref +cpy-base+ ccode)
-                         (b:rbits r (aref +cpy-bits+ ccode)))))
-           (declare (type fixnum cmd cell icode ccode ilen clen))
+                (ilen (+ (aref +cmd-ilen-base+ cmd)
+                         (b:rbits r (aref +cmd-ilen-bits+ cmd))))
+                (clen (+ (aref +cmd-clen-base+ cmd)
+                         (b:rbits r (aref +cmd-clen-bits+ cmd)))))
+           (declare (type fixnum cmd ilen clen))
            ;; Insert literals through a local array and position.  The
            ;; meta-block output capacity is reserved up front, so no per-run
            ;; growth check is needed on a valid stream.
