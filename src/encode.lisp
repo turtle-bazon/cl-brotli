@@ -548,6 +548,54 @@ FindMatchLengthWithLimit)."
     len))
 
 #+(and sbcl x86-64 64-bit little-endian)
+(declaim (inline %match-len-sap-frag))
+#+(and sbcl x86-64 64-bit little-endian)
+(defun %match-len-sap-frag (sap a b n)
+  "Single-expansion copy of %MATCH-LEN-SAP for the fragment matcher."
+  (declare (type sb-sys:system-area-pointer sap)
+           (type fixnum a b n)
+           (optimize (speed 3) (safety 0)))
+  (let ((len 0) (maxl (- n b)))
+    (declare (type fixnum len maxl))
+    (loop while (<= (+ len 8) maxl)
+          do (let ((x (logxor (sb-sys:sap-ref-64 sap (+ a len))
+                              (sb-sys:sap-ref-64 sap (+ b len)))))
+               (declare (type (unsigned-byte 64) x))
+               (unless (zerop x)
+                 (return-from %match-len-sap-frag
+                   (+ len (ash (%trailing-zeros x) -3))))
+               (incf len 8)))
+    (loop while (and (< len maxl)
+                     (= (sb-sys:sap-ref-8 sap (+ a len))
+                        (sb-sys:sap-ref-8 sap (+ b len))))
+          do (incf len))
+    len))
+
+#+(and sbcl x86-64 64-bit little-endian)
+(declaim (inline %match-len-sap-frag2))
+#+(and sbcl x86-64 64-bit little-endian)
+(defun %match-len-sap-frag2 (sap a b n)
+  "Second single-expansion copy of %MATCH-LEN-SAP."
+  (declare (type sb-sys:system-area-pointer sap)
+           (type fixnum a b n)
+           (optimize (speed 3) (safety 0)))
+  (let ((len 0) (maxl (- n b)))
+    (declare (type fixnum len maxl))
+    (loop while (<= (+ len 8) maxl)
+          do (let ((x (logxor (sb-sys:sap-ref-64 sap (+ a len))
+                              (sb-sys:sap-ref-64 sap (+ b len)))))
+               (declare (type (unsigned-byte 64) x))
+               (unless (zerop x)
+                 (return-from %match-len-sap-frag2
+                   (+ len (ash (%trailing-zeros x) -3))))
+               (incf len 8)))
+    (loop while (and (< len maxl)
+                     (= (sb-sys:sap-ref-8 sap (+ a len))
+                        (sb-sys:sap-ref-8 sap (+ b len))))
+          do (incf len))
+    len))
+
+#+(and sbcl x86-64 64-bit little-endian)
 (defun %match-len-sap-call (sap a b n)
   "%MATCH-LEN-SAP behind a non-inlined call boundary.  The fragment matcher
 uses this so the inlined RETURN-FROM block exists only once per expansion."
@@ -950,7 +998,7 @@ the new last-distance.  Mirrors WRITE-FAST-BLOCK-BODY's emission decisions."
                           (return-from trawl nil))))))
                 ;; Step 2: emit the found match plus the pending literals.
                 (let* ((base p)
-                       (matched (+ min-match (mlen (+ cand k) (+ p k))))
+                       (matched (+ min-match (%match-len-sap-frag sap (+ cand k) (+ p k) n)))
                        (distance (- base cand))
                        (insert (- base lit-start)))
                   (declare (type fixnum matched distance insert))
@@ -977,7 +1025,8 @@ the new last-distance.  Mirrors WRITE-FAST-BLOCK-BODY's emission decisions."
                         do
                         (let* ((base p)
                                (matched (+ min-match
-                                           (mlen (+ cand2 k) (+ p k))))
+                                           (%match-len-sap-frag2
+                                            sap (+ cand2 k) (+ p k) n)))
                                (distance (- base cand2)))
                           (declare (type fixnum matched distance))
                           (push-cmd 0 p matched distance)

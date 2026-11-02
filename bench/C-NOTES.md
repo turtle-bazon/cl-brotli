@@ -529,3 +529,17 @@ The likely causes are the extra `BUCKETP` branch in the matcher helpers
 that C performs before walking the bucket. A future version should be a
 separate top-level matcher, not a mode inside `%LZ77`, and should add the
 4/10/16-entry distance cache. The chain matcher remains.
+
+## Inlining the fragment matcher's match extension
+
+`%LZ77-FRAGMENT` called `%MATCH-LEN-SAP-CALL` at both match-extension sites.
+Inlining the same `%MATCH-LEN-SAP` into both sites previously miscompiled
+(the local `cv` became unbound), so a non-inlined wrapper had been used.
+
+Define two single-expansion clones, `%MATCH-LEN-SAP-FRAG` and
+`%MATCH-LEN-SAP-FRAG2`, and use each at exactly one call site. Output is
+unchanged and the SBCL bug is avoided.
+
+Microbenchmark medians: q0 TEXT 1218->1298 MiB/s, HTML 118->135, JSON
+176->204, SOURCE 253->274, BINARY 119->125; q1 similar. Level-matched q0
+geomean rises 0.43->0.48, q0 text is 6.65x C, and q0 source is 1.20x C.
