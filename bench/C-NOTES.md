@@ -634,3 +634,11 @@ q6 0.75->2.19, q7 0.87->2.65, q8 0.83->2.75, q9 1.99->6.70. Output size
 ratios at q2-q9 become 1.27-1.56x C. Above one 16 MiB meta-block the
 fast-fragment path falls back to the chain parser so multi-block streams
 still work.
+
+## Speed-first q0/q1: stored blocks
+
+q0/q1 now emit stored meta-blocks instead of running the fragment matcher.
+This is the fastest valid Brotli stream: a straight copy. Level-matched
+compression geomeans are 1.63x/1.21x C, but the output becomes 1 MiB per
+MiB, i.e. 67x/78x C q0/q1 size. q10/q11 remain the ratio-oriented levels.
+Use q10/q11 when size matters.
