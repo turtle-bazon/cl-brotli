@@ -514,3 +514,18 @@ block-switching variants. C-stream decode improves: q11 HTML 263->284 MiB/s,
 JSON 234->248, TEXT 1265->1333. Decoder microbenchmarks (lisp streams) gain
 8-15% on q2/q11: HTML q11 269->302, JSON 240->267, SOURCE 317->346,
 BINARY 125->145; BINARY q2 155->169.
+
+## Measured and reverted: bucket hasher for q5-q9
+
+Replacing the linked `HEAD`/`PREV` chain with C's H5/H6 bucket ring
+(`NUM[bucket]` + `BLOCK_SIZE` recent positions per bucket) was implemented and
+measured. It was a clear win on literal-heavy data: q5 HTML 28.1->33.1 MiB/s
+(+17%), JSON 27.7->35.2 (+27%); q6 HTML 23.4->29.5, JSON 23.5->30.8. But it
+lost on other corpora (text q5 388->308, q7 360->222; source q9 33.9->27.2;
+binary q9 17.1->12.7) and changed ratios (HTML q5 size +7.2%, q9 -2.3%).
+
+The likely causes are the extra `BUCKETP` branch in the matcher helpers
+(likely inhibiting inlining) and the missing last-distance candidate checks
+that C performs before walking the bucket. A future version should be a
+separate top-level matcher, not a mode inside `%LZ77`, and should add the
+4/10/16-entry distance cache. The chain matcher remains.
