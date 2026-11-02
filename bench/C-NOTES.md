@@ -582,3 +582,11 @@ per-command `W-ENSURE` batching is kept; the fully local writer is not.
 `HBITS` 18 (1 MiB head table) and 16 (256 KiB) were both slower than the
 current 17 (512 KiB): the larger table pays more fill cost, the smaller one
 sees more chain collisions. 17 is kept for q2-q11.
+
+## Measured and reverted: combined command + extra-bit writes
+
+Combining a command code and its insert/copy extra bits into one 39-bit
+`%WBITS-RAW-WIDE` call (and the distance code with its extra bits) was
+slower: q0 HTML 146->131 MiB/s, JSON 210->202, SOURCE 282->279, TEXT
+1264->1223. The extra 64-bit mask path and the per-command branch cost more
+than the second `WBITS-RAW` call it replaced.
