@@ -656,3 +656,12 @@ The command loop now caches the single command tree and distance tree when
 NBLTYPES is 1, avoiding `(svref htreei (blk-type blkI))` and the repeated
 `(or single-dist-tree ...)` lookup per command. q0/q1 decode improves a few
 percent; q0 HTML 190->200 MiB/s, source 185->193, binary 162->167.
+
+## Measured and reverted: local literal-run decoder
+
+A specialized `%DECODE-LITERAL-RUN` kept `acc`/`nbits`/`pos` in locals and
+inlined the Huffman refill/lookup for the single-literal-tree case. It helped
+BINARY q0/q1 by 5-7% (q1 156->169 MiB/s) but lost a little on HTML and
+SOURCE (q0 HTML 200->190, SOURCE 193->186). The huffman table lookup, not the
+BRD struct access, dominates; the larger inlined loop hurts instruction
+cache. The command loop uses the hoisted tree pointers instead.
