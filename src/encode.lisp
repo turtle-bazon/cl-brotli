@@ -421,6 +421,22 @@ considered so command copy lengths remain the base-word lengths."
 #+sbcl
 (declaim (inline %hash4-sap))
 #+sbcl
+(declaim (inline %hashf-sap))
+#+sbcl
+(defun %hashf-sap (sap i hmask)
+  "C Brotli's fast-fragment hash: multiply the low 32-bit word by kHashMul32
+and take the high bits, masked to the table size.  The constant -15 shift
+keeps ASH inline."
+  (declare (type sb-sys:system-area-pointer sap) (type fixnum i hmask)
+           (optimize (speed 3) (safety 0)))
+  (let ((v (sb-sys:sap-ref-32 sap i)))
+    (logand (ash (logand (the (unsigned-byte 64)
+                              (* (the (unsigned-byte 32) v) #x1E35A7BD))
+                         #xFFFFFFFF)
+                 -15)
+            hmask)))
+
+#+sbcl
 (defun %hash4-sap (sap i hmask)
   (declare (type sb-sys:system-area-pointer sap) (type fixnum i hmask)
            (optimize (speed 3) (safety 0)))
@@ -465,6 +481,14 @@ FindMatchLengthWithLimit)."
                         (sb-sys:sap-ref-8 sap (+ b len))))
           do (incf len))
     len))
+
+#+(and sbcl x86-64 64-bit little-endian)
+(defun %match-len-sap-call (sap a b n)
+  "%MATCH-LEN-SAP behind a non-inlined call boundary.  The fragment matcher
+uses this so the inlined RETURN-FROM block exists only once per expansion."
+  (declare (type sb-sys:system-area-pointer sap) (type fixnum a b n)
+           (optimize (speed 3) (safety 0)))
+  (%match-len-sap sap a b n))
 
 (defun text-like-data-p (data)
   "T when DATA is mostly printable ASCII/whitespace, where the static
@@ -592,6 +616,122 @@ or NIL on other implementations."
               (push (list (- n lit-start) lit-start 0 0 nil) cmds))
             (nreverse cmds))))))
 
+;;; C Brotli's fast-fragment matcher, used for q0/q1.  It keeps a single
+;;; entry per hash (no chain), uses a 5-byte minimum match for q0 and 6-byte
+;;; for q1, checks the last distance before the table, and re-inserts hashes
+;;; for the bytes inside a just-emitted copy so the next copy can start
+;;; immediately.  See c/enc/compress_fragment.c and
+;;; compress_fragment_two_pass.c.
+#+(and sbcl x86-64 64-bit little-endian)
+(defun %lz77-fragment (data sap window table-bits)
+  (declare (type (simple-array (unsigned-byte 8) (*)) data)
+           (type sb-sys:system-area-pointer sap)
+           (type fixnum window table-bits)
+           (optimize (speed 3) (safety 0)))
+  (let* ((n (length data))
+         (k (if (<= table-bits 16) 5 6))
+         (min-match k)
+         (hmask (1- (ash 1 table-bits)))
+         (table (make-array (ash 1 table-bits)
+                            :element-type '(unsigned-byte 32)
+                            :initial-element #xFFFFFFFF))
+         (cmds '()) (lit-start 0) (p 1) (limit (- n k))
+         (last-dist -1) (back (if (= k 5) 3 5)))
+    (declare (type fixnum k min-match p lit-start limit last-dist back)
+             (type (simple-array (unsigned-byte 32) (*)) table))
+    (labels ((hash (i) (%hashf-sap sap i hmask))
+             (prefix-match (a b)
+               (and (= (sb-sys:sap-ref-32 sap a)
+                       (sb-sys:sap-ref-32 sap b))
+                    (if (= k 5)
+                        (= (sb-sys:sap-ref-8 sap (+ a 4))
+                           (sb-sys:sap-ref-8 sap (+ b 4)))
+                        (= (sb-sys:sap-ref-16 sap (+ a 4))
+                           (sb-sys:sap-ref-16 sap (+ b 4))))))
+             (mlen (a b) (%match-len-sap-call sap a b n)))
+        (declare (inline hash prefix-match))
+      (when (> n k)
+        (let ((next-hash (hash p)))
+          (declare (type fixnum next-hash))
+          (block scan
+            (loop
+              ;; Step 1: trawl for a k-byte match, with C's skip heuristic.
+              (let ((skip 32) (cand #xFFFFFFFF) (next-ip p))
+                (declare (type fixnum skip next-ip)
+                         (type (unsigned-byte 32) cand))
+                (block trawl
+                  (loop
+                    (let* ((h next-hash)
+                           (step (ash skip -5)))
+                      (declare (type fixnum h step))
+                      (incf skip)
+                      (setf p next-ip)
+                      (setf next-ip (+ p step))
+                      (when (> next-ip limit) (return-from scan nil))
+                      (setf next-hash (hash next-ip))
+                      ;; C checks the previous distance before the table.
+                      (when (> last-dist 0)
+                        (let ((ld (- p last-dist)))
+                          (when (and (>= ld 0) (prefix-match p ld))
+                            (setf (aref table h) p
+                                  cand ld)
+                            (return-from trawl nil))))
+                      (let ((c2 (aref table h)))
+                        (setf (aref table h) p)
+                        (when (and (/= c2 #xFFFFFFFF)
+                                   (< c2 p)
+                                   (<= (- p c2) window)
+                                   (prefix-match p c2))
+                          (setf cand c2)
+                          (return-from trawl nil))))))
+                ;; Step 2: emit the found match plus the pending literals.
+                (let* ((base p)
+                       (matched (+ min-match (mlen (+ cand k) (+ p k))))
+                       (distance (- base cand))
+                       (insert (- base lit-start)))
+                  (declare (type fixnum matched distance insert))
+                  (push (list insert lit-start matched distance nil) cmds)
+                  (incf p matched)
+                  (setf lit-start p
+                        last-dist distance))
+                (when (>= p limit) (return-from scan nil))
+                ;; Insert hashes for positions inside the copy.
+                (loop for q from (max 0 (- p back)) below p
+                      do (setf (aref table (hash q)) q))
+                (let* ((cur-hash (hash p))
+                       (cand2 (aref table cur-hash)))
+                  (declare (type fixnum cur-hash)
+                           (type (unsigned-byte 32) cand2))
+                  (setf (aref table cur-hash) p)
+                  ;; Consecutive copies with no literal bytes in between.
+                  (loop while (and (/= cand2 #xFFFFFFFF)
+                                   (< cand2 p)
+                                   (<= (- p cand2) window)
+                                   (prefix-match p cand2))
+                        do
+                        (let* ((base p)
+                               (matched (+ min-match
+                                           (mlen (+ cand2 k) (+ p k))))
+                               (distance (- base cand2)))
+                          (declare (type fixnum matched distance))
+                          (push (list 0 p matched distance nil) cmds)
+                          (setf last-dist distance)
+                          (incf p matched)
+                          (setf lit-start p))
+                        (when (>= p limit) (return-from scan nil))
+                        (loop for q from (max 0 (- p back)) below p
+                              do (setf (aref table (hash q)) q))
+                        (setf cur-hash (hash p)
+                              cand2 (aref table cur-hash))
+                        (setf (aref table cur-hash) p))))
+              ;; No match at P: advance one byte and continue trawling.
+              (incf p)
+              (when (> p limit) (return-from scan nil))
+              (setf next-hash (hash p))))))
+      (when (< lit-start n)
+        (push (list (- n lit-start) lit-start 0 0 nil) cmds))
+      (nreverse cmds))))
+
 (defun lz77 (data window &key (use-dict (text-like-data-p data)) dict-limit
                               (base-pos 0) (max-chain 128) (lazy t)
                               (skip-match nil) (insert-interior t))
@@ -602,13 +742,37 @@ when DATA is one chunk of a multi-meta-block stream.  MAX-CHAIN and LAZY trade
 compression ratio for encoder throughput."
   #+sbcl
   (sb-sys:with-pinned-objects (data)
-    (%lz77 data (sb-sys:vector-sap data) window use-dict dict-limit
-           base-pos max-chain lazy skip-match insert-interior))
+    #+(and sbcl x86-64 64-bit little-endian)
+    (if (and skip-match (not lazy) (not use-dict) (<= max-chain 2))
+        (%lz77-fragment data (sb-sys:vector-sap data) window
+                        (if (<= max-chain 1) 15 17))
+        (%lz77 data (sb-sys:vector-sap data) window use-dict dict-limit
+               base-pos max-chain lazy skip-match insert-interior)))
   #-sbcl
   (%lz77 data nil window use-dict dict-limit base-pos max-chain lazy
           skip-match insert-interior))
 
 ;;; ---- compressed meta-block --------------------------------------------
+
+(defun fast-literal-histogram (data)
+  "C Brotli's q0 literal histogram: exact for short inputs, every 29th byte
+for longer ones, with +1 for every symbol (so sampled symbols stay encodable)
+and the first 11 observations weighted by 3 to compensate for LZ77."
+  (declare (type (simple-array (unsigned-byte 8) (*)) data)
+           (optimize (speed 3) (safety 0)))
+  (let* ((n (length data))
+         (sampled (>= n 32768))
+         (h (make-array 256 :element-type 'fixnum :initial-element 0)))
+    (declare (type fixnum n)
+             (type (simple-array fixnum (256)) h))
+    (if sampled
+        (loop for i from 0 below n by 29
+              do (incf (aref h (aref data i))))
+        (dotimes (i n) (incf (aref h (aref data i)))))
+    (dotimes (b 256)
+      (let ((c (aref h b)))
+        (incf (aref h b) (+ (if sampled 1 0) (* 2 (min c 11))))))
+    h))
 
 ;;; Flat command records: 10 fixnums per command.  A struct per command was
 ;;; ~15% of low-quality compression time; CPY is not needed by the emitter,
@@ -620,7 +784,7 @@ compression ratio for encoder throughput."
 (defun plan-commands (data cmds
                       &optional (rb (make-array 5 :element-type 'fixnum
                                                   :initial-contents '(16 15 11 4 4)))
-                      &key (short-dist t))
+                      &key (short-dist t) (precomputed-litfreq nil))
   "Turn raw LZ77 commands into flat fixnum records and tally literal/command/
 distance frequencies.  Returns (values RECS NCOMMANDS LITFREQ CMDFREQ DISTFREQ).
 RB is the distance ring shared by all meta-blocks of the stream; it must
@@ -631,7 +795,8 @@ per command."
          (recs (make-array (* +cmd-stride+ ncmd)
                            :element-type 'fixnum :initial-element 0))
          (ri 0)
-         (litfreq (make-array 256 :element-type 'fixnum :initial-element 0))
+         (litfreq (or precomputed-litfreq
+                      (make-array 256 :element-type 'fixnum :initial-element 0)))
          (cmdfreq (make-array 704 :element-type 'fixnum :initial-element 0))
          (distfreq (make-array 64 :element-type 'fixnum :initial-element 0)))
     (declare (type fixnum ri)
@@ -665,8 +830,9 @@ per command."
                      (dcode -1) (dxv 0) (dxb 0))
                 (declare (type fixnum csym dcode dxv dxb))
                 (incf (aref cmdfreq csym))
-                (loop for i from lit-start below (+ lit-start ins)
-                      do (incf (aref litfreq (aref data i))))
+                (unless precomputed-litfreq
+                  (loop for i from lit-start below (+ lit-start ins)
+                        do (incf (aref litfreq (aref data i)))))
                 (when copyp
                   (unless dist0
                     (if repeat
@@ -708,7 +874,8 @@ per command."
 
 (defun write-compressed-block-body (w data base-pos window use-dict dict-limit rb
                                     &key (max-chain 128) (lazy t) (short-dist t)
-                                      (skip-match nil) (insert-interior t) cmds)
+                                      (skip-match nil) (insert-interior t) cmds
+                                      (sample-literals nil))
   "Write the NBLTYPES/trees/commands part of a compressed meta-block.  The
 MLEN header must already have been written.  RB is the stream-wide distance
 ring shared with the decoder.  CMDS, when supplied, is a precomputed command
@@ -719,7 +886,7 @@ list covering exactly this block."
            (type (or null fixnum) dict-limit)
            (type (simple-array fixnum (*)) rb)
            (type fixnum max-chain))
-  (progn
+  (let ((sampled (and sample-literals (null cmds))))
     (multiple-value-bind (recs ncmd litf cmdf distf)
         (plan-commands
          data
@@ -728,10 +895,11 @@ list covering exactly this block."
                             :base-pos base-pos :max-chain max-chain :lazy lazy
                             :skip-match skip-match
                             :insert-interior insert-interior))
-         rb :short-dist short-dist)
+         rb :short-dist short-dist
+         :precomputed-litfreq (and sampled (fast-literal-histogram data)))
       (declare (type (simple-array fixnum (*)) recs litf cmdf distf)
                (type fixnum ncmd))
-      (let ((lit (build-etree litf 256 15))
+      (let ((lit (build-etree litf 256 (if sampled 8 15)))
             (cmd (build-etree cmdf 704 15))
             (dist (build-etree distf 64 15)))
         (b:wbits w 0 1) (b:wbits w 0 1) (b:wbits w 0 1)   ; NBLTYPES L/I/D = 1
@@ -872,7 +1040,8 @@ whole and moved to the next block when necessary."
 
 (defun compress-entropy (input &key (use-dict nil) (dict-limit nil)
                                     (max-chain 128) (lazy t) (short-dist t)
-                                    (skip-match nil) (insert-interior t))
+                                    (skip-match nil) (insert-interior t)
+                                    (sample-literals nil))
   "Entropy-coded brotli stream for INPUT.  Inputs larger than one meta-block
 are split into <= 2^24-byte compressed meta-blocks followed by an empty last
 meta-block."
@@ -909,7 +1078,8 @@ meta-block."
                                              :lazy lazy :short-dist short-dist
                                              :skip-match skip-match
                                              :insert-interior insert-interior
-                                             :cmds block)
+                                             :cmds block
+                                             :sample-literals sample-literals)
              (incf pos outlen)))
          (unless (= pos n)
            (error "multi-block encoder produced ~D bytes, expected ~D" pos n))
@@ -955,7 +1125,8 @@ enable the static dictionary."
     ;; Quality 0 is the fast path, not raw stored blocks: stored would be
     ;; ~30x larger than C q0 on text-like data.  The stored fallback is still
     ;; used whenever entropy coding cannot beat the input size.
-    (0 '(:max-chain 1 :lazy nil :use-dict nil :short-dist nil :skip-match t :insert-interior nil))
+    (0 '(:max-chain 1 :lazy nil :use-dict nil :short-dist nil :skip-match t
+          :insert-interior nil :sample-literals t))
     (1 '(:max-chain 2 :lazy nil :use-dict nil :short-dist nil :skip-match t :insert-interior nil))
     (2 '(:max-chain 4 :lazy nil :use-dict nil :short-dist nil :skip-match t :insert-interior nil))
     (3 '(:max-chain 8 :lazy nil :use-dict nil :short-dist nil :skip-match t :insert-interior nil))
@@ -984,13 +1155,15 @@ already smaller than the input."
                (short-dist (getf params :short-dist t))
                (skip-match (getf params :skip-match nil))
                (insert-interior (getf params :insert-interior t))
+               (sample-literals (getf params :sample-literals nil))
                (dict-ok (and (getf params :use-dict) (text-like-data-p data)))
                (plain (compress-entropy data :use-dict nil
                                                :max-chain max-chain
                                                :lazy lazy
                                                :short-dist short-dist
                                                :skip-match skip-match
-                                               :insert-interior insert-interior))
+                                               :insert-interior insert-interior
+                                               :sample-literals sample-literals))
                (best plain))
           (when dict-ok
             (let ((alt (compress-entropy data :use-dict t
@@ -998,7 +1171,8 @@ already smaller than the input."
                                                 :lazy lazy
                                                 :short-dist short-dist
                                                 :skip-match skip-match
-                                                :insert-interior insert-interior)))
+                                                :insert-interior insert-interior
+                                                :sample-literals sample-literals)))
               (when (< (length alt) (length best)) (setf best alt))))
           (when (>= (length best) (+ n 32))
             (let ((stored (compress-stored data)))

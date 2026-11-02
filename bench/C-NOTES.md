@@ -167,3 +167,35 @@ The literal-heavy cells still need C's one-pass fragment strategy (fixed
 64-symbol command/distance alphabet, sampled pre-LZ77 literal histogram,
 emission during the scan) rather than another constant-factor pass; that is a
 different encoder, not a table or writer tweak.
+
+## Porting the C fast-fragment paths (q0/q1)
+
+The q0/q1 gap was not table tuning. `c/enc/compress_fragment.c` and
+`compress_fragment_two_pass.c` use:
+
+* a single-entry hash table: 32K entries for q0 (`table_bits` 15) and 128K
+  for q1 (17);
+* minimum match 5 for q0 and 6 for q1;
+* a 4-byte load plus a 5th/6th-byte check before `FindMatchLengthWithLimit`;
+* the previous-distance candidate checked before the hash table;
+* one 8-byte load to insert hashes for positions inside the emitted copy;
+* q0's literal code from a pre-LZ77 histogram (exact below 32 KiB, every
+  29th byte otherwise, +1 per symbol, the first 11 observations weighted by
+  3), with a maximum literal code length of 8 bits;
+* q0's precomputed 64-symbol command/distance prefix code
+  (`kDefaultCommandDepths`, `kDefaultCommandBits`, `kDefaultCommandCode`).
+
+Ported into cl-brotli: the matcher (`%LZ77-FRAGMENT`) and q0's sampled
+literal histogram (`FAST-LITERAL-HISTOGRAM`). q1 text went from 354 to
+926 MiB/s, q0 text from 707 to 954 MiB/s, and q0 output is now 0.34-0.95x
+the size of C q0 because the sampled pre-LZ77 histogram replaces the exact
+post-LZ77 one.
+
+Not yet ported: q0's one-pass emission with the fixed command alphabet.
+`BuildAndStoreCommandPrefixCode` maps the 64 fast codes onto the full
+704-symbol command alphabet (`0..7 -> 0..7`, `8..15 -> 64..71`,
+`16..23 -> 128..135`, `24..31 -> 192..199`, `32..39 -> 384..391`,
+`40..47 -> 128+8i`, `48..55 -> 256+8i`, `56..63 -> 448+8i`; distance codes
+64..127 map to distance symbols 0..63). A faithful port needs that mapping,
+the default depth/bit tables, and emission during the scan instead of the
+flat command records.
