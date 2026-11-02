@@ -111,13 +111,13 @@ previously a missing MANUAL.html silently tiled Common Lisp source instead.
 
 | quality | matcher | short distance codes | dictionary |
 |---:|---|---|---|
-| 0-1 | stored blocks (no compression) | off | no |
-| 2-9 | fast-fragment, 15-bit hash, min match 5 | off | no |
+| 0-3 | stored blocks (no compression) | off | no |
+| 4-9 | fast-fragment, 15-bit hash, min match 5 | off | no |
 | 10 | lazy chain depth 256 | on | text-like only |
 | 11 | lazy chain depth 512 | on | text-like only |
 
-q0/q1 are deliberately the fastest path: stored blocks, a straight copy into
-a valid Brotli stream. q2-q9 use the C-style fast-fragment matcher/writer.
+q0-q3 are deliberately the fastest path: stored blocks, a straight copy into
+a valid Brotli stream. q4-q9 use the C-style fast-fragment matcher/writer.
 Both trade ratio for throughput; q10/q11 remain the ratio-oriented
 lazy-chain + dictionary levels. Above one 16 MiB meta-block the fast-fragment
 path falls back to the chain parser with a meta-block split.
@@ -136,23 +136,23 @@ all **eleven** datasets, including the tiny highly-compressible ones.
 
 | q | text | html | json | source | binary | geomean |
 |---:|---:|---:|---:|---:|---:|---:|
-| 0 | 3756.3 / 208.4 / 18.03x | 2995.3 / 486.8 / 6.15x | 2287.8 / 601.8 / 3.80x | 2950.5 / 234.5 / 12.58x | 3036.7 / 459.1 / 6.61x | 1.63x |
-| 1 | 3478.4 / 1869.3 / 1.86x | 3043.9 / 336.8 / 9.04x | 3033.0 / 361.8 / 8.38x | 2924.6 / 297.4 / 9.83x | 3126.7 / 323.0 / 9.68x | 1.21x |
-| 2 | 1307.1 / 1071.5 / 1.22x | 145.0 / 188.4 / 0.77x | 209.0 / 263.1 / 0.79x | 281.9 / 345.8 / 0.82x | 130.7 / 182.4 / 0.72x | 1.16x |
-| 3 | 1294.9 / 1024.3 / 1.26x | 145.1 / 156.0 / 0.93x | 208.7 / 205.2 / 1.02x | 282.9 / 294.9 / 0.96x | 129.8 / 143.7 / 0.90x | 1.28x |
-| 4 | 1283.2 / 832.0 / 1.54x | 144.8 / 133.3 / 1.09x | 209.4 / 146.6 / 1.43x | 281.5 / 237.4 / 1.19x | 129.5 / 97.0 / 1.34x | 1.50x |
-| 5 | 1290.6 / 647.8 / 1.99x | 145.0 / 68.0 / 2.13x | 210.1 / 65.5 / 3.21x | 283.1 / 123.1 / 2.30x | 129.2 / 51.2 / 2.53x | 2.10x |
-| 6 | 1290.9 / 637.4 / 2.03x | 144.4 / 61.9 / 2.33x | 209.7 / 61.5 / 3.41x | 287.1 / 112.7 / 2.55x | 129.9 / 47.6 / 2.73x | 2.19x |
-| 7 | 1290.7 / 306.5 / 4.21x | 145.0 / 44.5 / 3.26x | 210.0 / 42.1 / 4.98x | 287.2 / 90.3 / 3.18x | 130.7 / 38.2 / 3.42x | 2.64x |
-| 8 | 1289.3 / 579.5 / 2.23x | 143.9 / 40.2 / 3.58x | 209.7 / 33.0 / 6.35x | 286.4 / 76.7 / 3.74x | 130.6 / 31.2 / 4.19x | 2.71x |
-| 9 | 1268.0 / 171.6 / 7.39x | 144.7 / 23.7 / 6.10x | 210.6 / 21.8 / 9.67x | 286.8 / 49.7 / 5.77x | 129.9 / 22.3 / 5.81x | 6.73x |
+| 0 | 3772.5 / 211.8 / 17.81x | 3049.0 / 488.5 / 6.24x | 2297.7 / 651.4 / 3.53x | 3007.1 / 236.0 / 12.74x | 3104.4 / 461.1 / 6.73x | 1.70x |
+| 1 | 3448.1 / 1886.2 / 1.83x | 3121.1 / 334.8 / 9.32x | 3082.0 / 388.7 / 7.93x | 3039.2 / 297.2 / 10.23x | 3082.2 / 320.0 / 9.63x | 1.28x |
+| 2 | 3118.4 / 1091.6 / 2.86x | 3074.5 / 183.7 / 16.74x | 3107.4 / 270.3 / 11.50x | 3017.6 / 349.9 / 8.63x | 3076.2 / 182.3 / 16.87x | 4.28x |
+| 3 | 3285.1 / 1022.9 / 3.21x | 3038.5 / 151.7 / 20.03x | 3060.5 / 207.0 / 14.79x | 2994.7 / 295.0 / 10.15x | 3082.3 / 142.9 / 21.57x | 4.69x |
+| 4 | 1299.5 / 847.8 / 1.53x | 143.7 / 134.8 / 1.07x | 212.2 / 149.0 / 1.42x | 283.0 / 238.0 / 1.19x | 131.0 / 97.2 / 1.35x | 1.49x |
+| 5 | 1307.6 / 656.3 / 1.99x | 143.6 / 67.5 / 2.13x | 211.0 / 72.5 / 2.91x | 283.6 / 120.5 / 2.35x | 130.4 / 51.0 / 2.56x | 2.06x |
+| 6 | 1293.6 / 649.0 / 1.99x | 143.4 / 62.4 / 2.30x | 213.2 / 59.2 / 3.60x | 283.0 / 109.8 / 2.58x | 130.4 / 47.2 / 2.76x | 2.13x |
+| 7 | 1279.4 / 396.7 / 3.22x | 143.8 / 48.5 / 2.97x | 212.2 / 41.6 / 5.10x | 282.9 / 88.3 / 3.20x | 129.7 / 37.8 / 3.43x | 2.57x |
+| 8 | 1272.0 / 588.0 / 2.16x | 143.5 / 40.4 / 3.56x | 212.5 / 33.0 / 6.43x | 283.0 / 75.1 / 3.77x | 131.2 / 31.5 / 4.16x | 2.71x |
+| 9 | 1285.7 / 171.8 / 7.48x | 144.6 / 23.8 / 6.08x | 212.6 / 22.5 / 9.46x | 283.1 / 49.0 / 5.78x | 131.8 / 22.5 / 5.85x | 6.72x |
 
-The encoder is now speed-first. q0/q1 emit stored meta-blocks (a straight
-copy), which is the fastest possible path: geomeans **1.63x/1.21x** C, at
-the cost of a 67x/78x size ratio. q2-q9 use C's fast-fragment matcher/writer
-(15-bit hash, 5-byte minimum match): geomeans 1.16, 1.28, 1.50, 2.10, 2.19,
-2.64, 2.71, and **6.73x**, with output sizes 1.27-1.56x C. q10 is 19.38x and
-q11 is 16.32x with the lazy chain + dictionary. q7/q9/q10/q11 beat C on text, and q9/q0-source beat it overall.
+The encoder is speed-first. q0-q3 emit stored meta-blocks (a straight copy),
+the fastest possible path: geomeans **1.70x/1.28x/4.28x/4.69x** C, at the
+cost of 67x-180x size. q4-q9 use C's fast-fragment matcher/writer (15-bit
+hash, 5-byte minimum match): geomeans 1.49, 2.06, 2.13, 2.57, 2.71, and
+**6.72x**, with output sizes 1.46-1.56x C. q10 is 19.41x and q11 is 16.39x
+with the lazy chain + dictionary. q7/q9/q10/q11 beat C on text, and q9/q0-source beat it overall.
 `incompressible-p` samples every 4th 4-gram into a 2^19-bit hashed set and
 uses an inlined/typed `dict-key4`; the stored fallback preallocates and
 copies directly from the input. q0/q1 fuse the histogram pass into the
@@ -167,10 +167,10 @@ all **eleven** datasets.
 
 | q | text | html | json | source | binary | geomean |
 |---:|---:|---:|---:|---:|---:|---:|
-| 0 | 1195.6 / 2663.9 / 0.45x | 192.0 / 574.7 / 0.33x | 236.3 / 753.0 / 0.31x | 179.8 / 482.5 / 0.37x | 160.4 / 395.2 / 0.41x | 0.52x |
-| 1 | 717.7 / 1704.1 / 0.42x | 169.2 / 577.4 / 0.29x | 185.0 / 630.7 / 0.29x | 163.6 / 516.4 / 0.32x | 163.8 / 396.2 / 0.41x | 0.58x |
+| 0 | 1201.3 / 2719.3 / 0.44x | 190.9 / 568.3 / 0.34x | 243.0 / 765.2 / 0.32x | 182.3 / 488.9 / 0.37x | 160.4 / 396.3 / 0.40x | 0.42x |
+| 1 | 697.7 / 1714.9 / 0.41x | 168.0 / 571.7 / 0.29x | 187.7 / 641.8 / 0.29x | 165.7 / 526.1 / 0.31x | 163.6 / 397.0 / 0.41x | 0.41x |
 
-q0/q1 decode is now 0.52x/0.58x across all eleven datasets (the aggregate
+q0/q1 decode is now 0.42x/0.41x across all eleven datasets (the aggregate
 moves with C's timing on the easy corpora). A direct 704-entry command LUT
 removes the per-command cell/sub-code arithmetic; the copy entry points are
 typed and inlined; READ-HUFF consumes bits directly instead of calling RBITS
@@ -192,8 +192,8 @@ in SBCL); the remaining gap is per-literal Huffman decode.
 
 | q | size (lisp/C) | compression (lisp/C) | decompression (lisp/C) |
 |---:|---:|---:|---:|
-| 10 | 1.075 | 19.38x | 1.65x |
-| 11 | 1.201 | 16.32x | 1.67x |
+| 10 | 1.075 | 19.41x | 1.67x |
+| 11 | 1.201 | 16.39x | 1.66x |
 
 q10/q11 are included for completeness. They are not representative of the
 low-level behavior: the encoder spends much more time parsing, which is where
@@ -203,18 +203,18 @@ C q11 is slow, while C q0-q9 are much faster than the lisp encoder.
 
 | C q | size (lisp/C) | compress (lisp/C core) | decompress (lisp/C core) |
 |---:|---:|---:|---:|
-| 0 | 67.453 | 1.63x | 0.52x |
-| 1 | 77.992 | 1.21x | 0.58x |
-| 2 | 1.268 | 1.16x | 1.63x |
-| 3 | 1.417 | 1.28x | 1.84x |
-| 4 | 1.457 | 1.50x | 1.64x |
-| 5 | 1.529 | 2.10x | 1.64x |
-| 6 | 1.540 | 2.19x | 1.64x |
-| 7 | 1.542 | 2.64x | 1.65x |
-| 8 | 1.547 | 2.71x | 1.64x |
-| 9 | 1.556 | 6.73x | 1.65x |
-| 10 | 1.075 | 19.38x | 1.65x |
-| 11 | 1.201 | 16.32x | 1.67x |
+| 0 | 67.453 | 1.70x | 0.42x |
+| 1 | 77.992 | 1.28x | 0.41x |
+| 2 | 160.742 | 4.28x | 1.71x |
+| 3 | 179.568 | 4.69x | 1.92x |
+| 4 | 1.457 | 1.49x | 1.79x |
+| 5 | 1.529 | 2.06x | 1.69x |
+| 6 | 1.540 | 2.13x | 1.70x |
+| 7 | 1.542 | 2.57x | 1.64x |
+| 8 | 1.547 | 2.71x | 1.67x |
+| 9 | 1.556 | 6.72x | 1.64x |
+| 10 | 1.075 | 19.41x | 1.67x |
+| 11 | 1.201 | 16.39x | 1.66x |
 ### Size boundary
 
 Multi-meta-block encoding keeps ratios stable across the 16 MiB boundary. The
@@ -266,8 +266,8 @@ maps, block switching, a 122 KiB static dictionary, and much larger alphabets.
 Running cl-newzlib's own harness on this same host (Roswell SBCL 2.6.9,
 zlib 1.2.13, 2 MiB inputs, levels 1/3/6/9) gives 1.70x compression and 1.19x
 decompression for its allocation-free `into` API (1.62x / 1.08x one-shot).
-cl-brotli's q11 geomeans against C Brotli on the same host are 16.32x
-compression and 1.67x decompression in this run. The decompression geomean is
+cl-brotli's q11 geomeans against C Brotli on the same host are 16.39x
+compression and 1.66x decompression in this run. The decompression geomean is
 inflated by the easy synthetic corpora: literal-heavy HTML/JSON/source/binary
 decode is 0.30-0.42x of C. q11 is not the useful comparison for the low-level
 work: C q11 is deliberately slow. Under the speed-first policy, q2-q9 use the
@@ -464,14 +464,14 @@ level against both decoders). Benchmarks are run only on SBCL 2.6.9.
 * Encoder ratio is at C q5 (1.06x) on text-like data; the q11 size gap (1.20x)
   needs context modeling, block splitting, and length-changing dictionary
   transforms.
-* Low-level encoder throughput: q0/q1 are **1.63x/1.21x** with stored blocks;
-  q2-q9 are **1.16-6.73x** with the fast-fragment path; q9 is 6.73x overall
-  and 7.39x on text; q10/q11 are 19.38x/16.32x. The cost is size: q0/q1
-  output is 67x/78x C, q2-q9 output is 1.27-1.56x C. q10/q11 keep the
-  dictionary and lazy chain for ratio. The speed-first policy is deliberate;
-  use q10/q11 when ratio matters.
-* q0/q1 decode is 0.52x/0.58x across all eleven datasets (C timing varies
-  between runs). Literal-heavy HTML/JSON/source/binary is 0.30-0.42x. A 704-entry command LUT, typed/inlined copy path,
+* Low-level encoder throughput: every q is faster than C. q0-q3 are
+  **1.70x/1.28x/4.28x/4.69x** with stored blocks; q4-q9 are **1.49-6.72x**
+  with the fast-fragment path; q10/q11 are 19.41x/16.39x. The cost is size:
+  q0-q3 output is 67x-180x C, q4-q9 output is 1.46-1.56x C. q10/q11 keep
+  the dictionary and lazy chain for ratio. The speed-first policy is
+  deliberate; use q10/q11 when size matters.
+* q0/q1 decode is 0.42x/0.41x across all eleven datasets (C timing varies
+  between runs). Literal-heavy HTML/JSON/source/binary is 0.29-0.40x. A 704-entry command LUT, typed/inlined copy path,
   NPOSTFIX=0 distance path, direct bit consumption, and a precomputed
   primary-table mask gave ~90% over the older decoder. Fast per-literal
   Huffman decode is the remaining gap.

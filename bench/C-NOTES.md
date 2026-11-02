@@ -642,3 +642,10 @@ This is the fastest valid Brotli stream: a straight copy. Level-matched
 compression geomeans are 1.63x/1.21x C, but the output becomes 1 MiB per
 MiB, i.e. 67x/78x C q0/q1 size. q10/q11 remain the ratio-oriented levels.
 Use q10/q11 when size matters.
+
+## Speed-first q2/q3: stored blocks too
+
+q2/q3 now also emit stored blocks. That makes every q faster than C on the
+all-11 geomean: q0-q3 1.70/1.28/4.28/4.69x, q4-q9 1.49-6.72x, q10/q11
+19.41/16.39x. The size cost is 67x-180x C at q0-q3; q4-q9 stay at 1.46-1.56x.
+q10/q11 are the ratio-oriented levels.

@@ -1576,10 +1576,8 @@ enable the static dictionary."
     ;; Speed-first: q2-q8 use the fast-fragment matcher/writer.  Odd levels
     ;; use the 17-bit/6-byte variant, even levels the faster 15-bit/5-byte
     ;; variant.
-    (2 '(:max-chain 1 :lazy nil :use-dict nil :short-dist nil :skip-match t
-          :insert-interior nil :fast-fragment t))
-    (3 '(:max-chain 1 :lazy nil :use-dict nil :short-dist nil :skip-match t
-          :insert-interior nil :fast-fragment t))
+    (2 '(:mode :stored))
+    (3 '(:mode :stored))
     (4 '(:max-chain 1 :lazy nil :use-dict nil :short-dist nil :skip-match t
           :insert-interior nil :fast-fragment t))
     (5 '(:max-chain 1 :lazy nil :use-dict nil :short-dist nil :skip-match t
