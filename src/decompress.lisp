@@ -266,6 +266,7 @@ distance ring buffer (persists across the stream)."
            (lit-trees (make-array (* 64 nbl-l)))
            (dist-alpha (+ 16 ndirect (ash 48 npostfix)))
            (single-lit-tree nil) (single-dist-tree nil)
+           (cmd-tree nil) (dist-tree nil)
            ;; NBLTYPES is fixed for a meta-block; hoist the one-tree checks out
            ;; of the per-command/per-literal paths.
            (single-lblock (= 1 (blk-ntypes blkL)))
@@ -288,6 +289,9 @@ distance ring buffer (persists across the stream)."
          (setf (svref htreed i) (read-prefix-code r dist-alpha)))
        (when (= ntreesl 1) (setf single-lit-tree (svref htreel 0)))
        (when (= ntreesd 1) (setf single-dist-tree (svref htreed 0)))
+       ;; Hoist the only-tree pointers for the common single-block case.
+       (setf cmd-tree (and single-iblock (svref htreei 0))
+             dist-tree (and single-dblock single-dist-tree (svref htreed 0)))
        ;; Resolve the (block-type, context) -> literal-tree map once per
        ;; meta-block instead of following CMAPL and HTREEL per literal.
        (unless single-lit-tree
@@ -299,7 +303,8 @@ distance ring buffer (persists across the stream)."
        (loop while (< (outbuf-pos out) target) do
          (unless single-iblock
            (blk-maybe-switch r blkI))
-         (let* ((cmd (read-huff r (svref htreei (blk-type blkI))))
+         (let* ((cmd (read-huff r (or cmd-tree
+                                      (svref htreei (blk-type blkI)))))
                 (dist0 (< cmd 128))
                 (ilen (+ (aref +cmd-ilen-base+ cmd)
                          (b:rbits r (aref +cmd-ilen-bits+ cmd))))
@@ -360,7 +365,7 @@ distance ring buffer (persists across the stream)."
                    (unless single-dblock
                      (blk-maybe-switch r blkD))
                    (let ((dtree
-                           (or single-dist-tree
+                           (or dist-tree
                                (let* ((cidd (cond ((= clen 2) 0)
                                                   ((= clen 3) 1)
                                                   ((= clen 4) 2)
