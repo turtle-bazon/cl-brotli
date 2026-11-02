@@ -270,15 +270,15 @@ maps, block switching, a 122 KiB static dictionary, and much larger alphabets.
 Running cl-newzlib's own harness on this same host (Roswell SBCL 2.6.9,
 zlib 1.2.13, 2 MiB inputs, levels 1/3/6/9) gives 1.70x compression and 1.19x
 decompression for its allocation-free `into` API (1.62x / 1.08x one-shot).
-cl-brotli's q11 geomeans against C Brotli on the same host are 11.39x
-compression and 1.51x decompression in this run, with decompression 4-6x on
-HTML/JSON/source/binary. q11 is not the useful comparison for
-the low-level work: C q11 is deliberately slow, while C q0-q9 are still
-1.1-5x faster on the literal-heavy cells (cl-brotli is 5.6x faster on q0
-text). The cl-newzlib comparison is still
-useful evidence that portable Lisp can reach C parity, but it applies to the
-low-level constant factors (per-symbol decode, bit emission, match extension),
-not to the q11 headline.
+cl-brotli's q11 geomeans against C Brotli on the same host are 16.21x
+compression and 1.83x decompression in this run. The decompression geomean is
+inflated by the easy synthetic corpora: literal-heavy HTML/JSON/source/binary
+decode is 0.30-0.42x of C. q11 is not the useful comparison for the low-level
+work: C q11 is deliberately slow, while C q0-q9 are still 1.1-5x faster on
+the literal-heavy cells (cl-brotli is 6.05x faster on q0 text). The
+cl-newzlib comparison is still useful evidence that portable Lisp can reach C
+parity, but it applies to the low-level constant factors (per-symbol decode,
+bit emission, match extension), not to the q11 headline.
 
 The transferable part of the cl-newzlib playbook is per-symbol overhead:
 keep the output array, output position, bit accumulator, and decode-table

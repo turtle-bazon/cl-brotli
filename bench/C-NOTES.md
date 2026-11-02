@@ -466,3 +466,11 @@ q11 speed: TEXT 144->244 MiB/s, HTML 2.8->5.5, JSON 2.8->5.5, SOURCE
 9.8->18.9. q11 allocation: HTML 27.1->13.6 MB, SOURCE 21.4->10.7 MB, TEXT
 11.5->5.7 MB, JSON 29.2->14.5 MB per call. Level-matched geomeans: q10
 14.92->19.13x, q11 12.46->16.21x.
+
+## Measured and reverted: two-literal writer batching
+
+`W-EMIT-RUN` was changed to combine two literal codes (up to 30 bits) before
+touching the accumulator. It reduced loop iterations but measured 3-8%
+slower on q0/q1 text, HTML, JSON, and binary (e.g. q0 text 1250->1160 MiB/s,
+HTML 120->114), so the one-symbol loop was restored. The extra register
+pressure and odd-length tail branch outweighed the saved loads.
