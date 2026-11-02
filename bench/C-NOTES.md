@@ -567,3 +567,18 @@ Sizes shrink slightly with neutral speed: BINARY q2 345482->341166, q5
 298766->295846; SOURCE q2 115830->115640; HTML/JSON q5 and q9 also lose a few
 dozen bytes. q11 compression geomean reaches 16.59x. A four-entry distance
 cache (C uses 4/10/16 entries) is the natural next step.
+
+## Measured and reverted: local SAP writer for q2-q11
+
+Moving the generic writer's bit reservoir into locals and pinning the output
+once per command (with a local `PUT` macro) was correct but slower: q2 TEXT
+731->658 MiB/s, HTML 66->56, JSON 65->57, SOURCE 119->103, BINARY 46->41;
+q5/q9 lost 5-11%. The existing `W-EMIT-RUN` keeps the reservoir local across a
+whole literal run, which matters more than avoiding a pin per command. The
+per-command `W-ENSURE` batching is kept; the fully local writer is not.
+
+## Hash table width
+
+`HBITS` 18 (1 MiB head table) and 16 (256 KiB) were both slower than the
+current 17 (512 KiB): the larger table pays more fill cost, the smaller one
+sees more chain collisions. 17 is kept for q2-q11.
