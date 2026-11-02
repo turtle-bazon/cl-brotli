@@ -359,3 +359,13 @@ and add `w-bytes-range` to `replace` directly from the input. RANDOM
 q0/q5/q9/q11 go 503->950 MiB/s. Level geomeans rise q0 0.39->0.42,
 q2 0.57->0.63, q5 0.70->0.76, q7 0.81->0.87, q9 1.85->1.98,
 q11 10.32->11.01.
+
+## Smaller incompressible-p set; no record-array fill
+
+The 4-gram duplicate test now samples every 4th position (4096 keys) into a
+2^19-bit hashed set (64 KiB instead of 256 KiB). PERIODIC/RANDOM checks
+drop to 0.076/0.081 ms. The plan-commands record array no longer uses
+`:initial-element 0`; every slot is written for every command. Level
+geomeans: q2 0.63->0.64, q4 0.76->0.78, q5 0.76->0.78, q6 0.74->0.79,
+q7 0.87->0.89, q8 0.85->0.88, q9 1.98->2.04, q10 12.63->13.06,
+q11 11.01->11.39.

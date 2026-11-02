@@ -1076,7 +1076,7 @@ short distance-ring codes; low qualities disable them to avoid 15 comparisons
 per command."
   (let* ((ncmd (length cmds))
          (recs (make-array (* +cmd-stride+ ncmd)
-                           :element-type 'fixnum :initial-element 0))
+                           :element-type 'fixnum))
          (ri 0)
          (litfreq (make-array 256 :element-type 'fixnum :initial-element 0))
          (cmdfreq (make-array 704 :element-type 'fixnum :initial-element 0))
@@ -1393,14 +1393,14 @@ compresses extremely well."
          ;; A 2^21-bit hashed set: equal 4-byte keys collide exactly, and
          ;; the false-collision rate for 16K keys is ~64, below the
          ;; acceptance threshold.  Far cheaper than an EQL hash table.
-         (let ((bits (make-array (ash 1 18) :element-type '(unsigned-byte 8)
+         (let ((bits (make-array (ash 1 16) :element-type '(unsigned-byte 8)
                                  :initial-element 0))
                (duplicates 0))
-           (declare (type (simple-array (unsigned-byte 8) (262144)) bits)
+           (declare (type (simple-array (unsigned-byte 8) (65536)) bits)
                     (type fixnum duplicates))
-           (loop for i from 0 below (- sample 3) do
+           (loop for i from 0 below (- sample 3) by 4 do
              (let* ((key (dict-key4 data i))
-                    (h (logand (* key #x9E3779B1) #x1FFFFF))
+                    (h (logand (* key #x9E3779B1) #x7FFFF))
                     (byte (ash h -3))
                     (mask (ash 1 (logand h 7))))
                (declare (type fixnum key h byte mask))
