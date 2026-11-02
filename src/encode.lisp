@@ -1569,27 +1569,18 @@ enable the static dictionary."
     ;; Quality 0 is the fast path, not raw stored blocks: stored would be
     ;; ~30x larger than C q0 on text-like data.  The stored fallback is still
     ;; used whenever entropy coding cannot beat the input size.
-    ;; Quality 0/1: speed-first stored blocks.  This is a valid Brotli
-    ;; stream and the fastest path (a straight copy into the output).
-    (0 '(:mode :stored))
-    (1 '(:mode :stored))
-    ;; Speed-first: q2-q8 use the fast-fragment matcher/writer.  Odd levels
-    ;; use the 17-bit/6-byte variant, even levels the faster 15-bit/5-byte
-    ;; variant.
-    (2 '(:mode :stored))
-    (3 '(:mode :stored))
-    (4 '(:max-chain 1 :lazy nil :use-dict nil :short-dist nil :skip-match t
+    (0 '(:max-chain 1 :lazy nil :use-dict nil :short-dist nil :skip-match t
           :insert-interior nil :fast-fragment t))
-    (5 '(:max-chain 1 :lazy nil :use-dict nil :short-dist nil :skip-match t
+    (1 '(:max-chain 1 :lazy nil :use-dict nil :short-dist nil :skip-match t
           :insert-interior nil :fast-fragment t))
-    (6 '(:max-chain 1 :lazy nil :use-dict nil :short-dist nil :skip-match t
-          :insert-interior nil :fast-fragment t))
-    (7 '(:max-chain 1 :lazy nil :use-dict nil :short-dist nil :skip-match t
-          :insert-interior nil :fast-fragment t))
-    (8 '(:max-chain 1 :lazy nil :use-dict nil :short-dist nil :skip-match t
-          :insert-interior nil :fast-fragment t))
-    (9 '(:max-chain 1 :lazy nil :use-dict nil :short-dist nil :skip-match t
-          :insert-interior nil :fast-fragment t))
+    (2 '(:max-chain 4 :lazy nil :use-dict nil :short-dist nil :skip-match t :insert-interior nil))
+    (3 '(:max-chain 8 :lazy nil :use-dict nil :short-dist nil :skip-match t :insert-interior nil))
+    (4 '(:max-chain 16 :lazy nil :use-dict nil :short-dist nil :skip-match t :insert-interior nil))
+    (5 '(:max-chain 32 :lazy t :use-dict nil :short-dist t))
+    (6 '(:max-chain 48 :lazy t :use-dict nil :short-dist t))
+    (7 '(:max-chain 64 :lazy t :use-dict nil :short-dist t))
+    (8 '(:max-chain 96 :lazy t :use-dict nil :short-dist t))
+    (9 '(:max-chain 128 :lazy t :use-dict nil :short-dist t))
     (10 '(:max-chain 256 :lazy t :use-dict t :short-dist t))
     (t '(:max-chain 512 :lazy t :use-dict t :short-dist t))))
 

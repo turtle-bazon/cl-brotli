@@ -665,3 +665,14 @@ BINARY q0/q1 by 5-7% (q1 156->169 MiB/s) but lost a little on HTML and
 SOURCE (q0 HTML 200->190, SOURCE 193->186). The huffman table lookup, not the
 BRD struct access, dominates; the larger inlined loop hurts instruction
 cache. The command loop uses the hoisted tree pointers instead.
+
+## Reverted speed-first paths under the 10% ratio cap
+
+The speed-first experiment (stored q0-q4, fast-fragment q2-q9) made every q
+faster than C, but output sizes reached 1.27-180x C. Under the new rule that
+ratio may lose at most 10%, those paths are not usable. The encoder is back
+to q0/q1 fast-fragment + q2-q9 chain/lazy + q10/q11 chain+dictionary.
+Ratio-compliant speed: q0 0.44x, q1 0.34x, q2 0.62x, q3 0.67x, q4 0.77x,
+q5 0.76x, q6 0.75x, q7 0.86x, q8 0.86x, q9 2.00x, q10 19.23x, q11 16.83x.
+Sizes: 0.53-1.08x C for q0-q10, 1.20x for q11. Closing the q0-q8 gap now
+requires faster codegen, not a different ratio/speed tradeoff.
