@@ -225,3 +225,21 @@ Measured q0: text 1169 MiB/s, source 205, JSON 164, HTML 103, binary 103;
 q0 output is 0.35-0.99x C size. q1: text 1062, source 213, JSON 144,
 HTML 108. The remaining gap is SBCL codegen versus the hand-written C
 emitter and C's per-block code adaptation.
+
+## Decoder: typing the hot command loop
+
+Profiling C q0 streams showed 10% in generic `TWO-ARG-<=` plus generic
+`ASH`/`+`/`-`, all from undeclared scalars in the command loop. Declaring
+the command/cell/insert/copy codes, lengths, distance values, literal
+context, and max distance as fixnums removed those calls. The NPOSTFIX=0
+distance case now uses constant shifts instead of variable `ASH` by
+`npostfix`.
+
+Measured improvement (1 MiB, C q0/q1 streams): text 903/667 MiB/s,
+HTML 146/136, JSON 186/154, source 145/135, binary 127/135. Geomeans rose
+from 0.28x/0.35x to 0.32x/0.44x of C.
+
+C q0/q1 per-block code adaptation was also measured: 128 KiB meta-blocks
+with fresh literal/command/distance trees cost 20-35% speed and did not
+improve ratio on the 1 MiB corpus (the single-block trees already adapt
+well), so the fast writer keeps one meta-block.

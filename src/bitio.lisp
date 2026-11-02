@@ -47,6 +47,7 @@
            (optimize (speed 3) (safety 0)))
   (loop while (< (brd-nbits r) n) do
     (let ((pos (brd-pos r)) (end (brd-end r)) (nbits (brd-nbits r)))
+      (declare (type fixnum pos end) (type (integer 0 63) nbits))
       (cond
         ((>= pos end) (error "brotli: end of input"))
         #+(and sbcl little-endian)

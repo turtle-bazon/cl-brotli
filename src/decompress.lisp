@@ -242,7 +242,7 @@ distance ring buffer (persists across the stream)."
                 (type outbuf out)
                 (type b:brd r)
                 (type fixnum nbl-l nbl-i nbl-d ntreesl ntreesd mlen window
-                      start target))
+                      start target npostfix ndirect postfix-mask dist-alpha))
        (%grow out target)
        (dotimes (i ntreesl)
          (setf (svref htreel i) (read-prefix-code r 256)))
@@ -272,11 +272,14 @@ distance ring buffer (persists across the stream)."
                          (b:rbits r (aref +ins-bits+ icode))))
                 (clen (+ (aref +cpy-base+ ccode)
                          (b:rbits r (aref +cpy-bits+ ccode)))))
+           (declare (type fixnum cmd cell icode ccode ilen clen))
            ;; Insert literals through a local array and position.  The
            ;; meta-block output capacity is reserved up front, so no per-run
            ;; growth check is needed on a valid stream.
            (let ((data (outbuf-data out))
                  (pos (outbuf-pos out)))
+             (declare (type (simple-array (unsigned-byte 8) (*)) data)
+                      (type fixnum pos))
              (if single-lit-tree
                  (dotimes (k ilen)
                    (unless single-lblock
@@ -294,6 +297,8 @@ distance ring buffer (persists across the stream)."
                             (p2 (if (> pos 1) (aref data (- pos 2)) 0))
                             (cid (%lit-context cmodev p1 p2))
                             (tree (svref lit-trees (+ (* 64 bt) cid))))
+                       (declare (type fixnum p1 p2 cid)
+                                (type huff tree))
                        (setf (aref data pos) (read-huff r tree))
                        (incf pos)))))
              (setf (outbuf-pos out) pos))
@@ -301,6 +306,7 @@ distance ring buffer (persists across the stream)."
            ;; distance — DCODE 0 (explicit or implicit dist0) reuses the last
            ;; distance without pushing; all other codes compute + push.
            (let ((distance 0) (idx (aref rb 4)) (dcode 0))
+             (declare (type fixnum distance idx dcode))
              (if dist0
                  (setf distance (aref rb (logand (+ idx 3) 3))) ; last, no push
                  (progn
@@ -326,18 +332,34 @@ distance ring buffer (persists across the stream)."
                                  (aref +dsc-value+ dcode))))
                        ((< dcode (+ 16 ndirect))
                         (setf distance (- dcode 15)))
-                       (t (let* ((d (- dcode ndirect 16))
-                                 (ndistbits
-                                   (+ 1 (ash d (- (1+ npostfix)))))
-                                 (dextra (b:rbits r ndistbits))
-                                 (hcode (ash d (- npostfix)))
-                                 (lcode (logand d postfix-mask))
-                                 (offset
-                                   (- (ash (+ 2 (logand hcode 1)) ndistbits)
-                                      4)))
-                            (setf distance
-                                  (+ (ash (+ offset dextra) npostfix)
-                                     lcode ndirect 1)))))
+                       (t (if (zerop npostfix)
+                              ;; Common case: NPOSTFIX=0, so HCODE=D and
+                              ;; the variable right shifts disappear.
+                              (let* ((d (- dcode ndirect 16))
+                                     (ndistbits (+ 1 (ash d -1)))
+                                     (dextra (b:rbits r ndistbits))
+                                     (offset
+                                       (- (ash (+ 2 (logand d 1)) ndistbits)
+                                          4)))
+                                (declare (type fixnum d ndistbits dextra offset))
+                                (setf distance
+                                      (the fixnum
+                                           (+ offset dextra ndirect 1))))
+                              (let* ((d (- dcode ndirect 16))
+                                     (ndistbits
+                                       (+ 1 (ash d (- (1+ npostfix)))))
+                                     (dextra (b:rbits r ndistbits))
+                                     (hcode (ash d (- npostfix)))
+                                     (lcode (logand d postfix-mask))
+                                     (offset
+                                       (- (ash (+ 2 (logand hcode 1)) ndistbits)
+                                          4)))
+                                (declare (type fixnum d ndistbits dextra hcode
+                                               lcode offset))
+                                (setf distance
+                                      (the fixnum
+                                           (+ (ash (+ offset dextra) npostfix)
+                                              lcode ndirect 1)))))))
                      ;; push real backward references only — dictionary
                      ;; references do NOT update the ring.
                      (when (and (/= dcode 0)
@@ -346,6 +368,7 @@ distance ring buffer (persists across the stream)."
                        (setf (aref rb (logand idx 3)) distance
                              (aref rb 4) (1+ idx))))))
              (let ((max-dist (min window (outbuf-pos out))))
+               (declare (type fixnum max-dist))
                (when (<= distance 0)
                  (berr "invalid distance ~d" distance))
                (if (<= distance max-dist)
