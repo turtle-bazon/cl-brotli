@@ -110,6 +110,16 @@ Recorded the harness pitfalls for future sessions: the recurring
 because `lines[a:b] = disp` with a *string* `disp` iterates characters;
 splice with `disp.split('\n')`.
 
+## Chain matcher: full-spread 64-bit hash (rev 83)
+
+The chain 17-bit table's top half had never even been reachable
+(hash bits 15..30 of a 32-bit product → every hash < 2^16; the extra
+half of the table wasted, collisions doubled). Ported the same u64
+algebra as the fragment (r79) plus a 5-byte input spread instead of 4:
+level-matched q2 sizes drop 1.09-1.20 → 1.03-1.09 on all five corpora,
+q5 → 1.03-1.13, q9 → 1.02-1.07 with q9 speeds up 5-15%; q11 sizes drop
+~0.5-4%. Now all q2+ levels sit tighter in the cap.
+
 ## Attempted 4 Nov 2026: packed per-symbol emit table — measured, reverted
 
 Built a parallel `lit-pc` table (`len<<16 | reversed code`, one u32 aref
