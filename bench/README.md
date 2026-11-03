@@ -123,11 +123,21 @@ previously a missing MANUAL.html silently tiled Common Lisp source instead.
 | 10 | lazy chain depth 256 | on | text-like only |
 | 11 | lazy chain depth 512 | on | text-like only |
 
+q2-q4 use a dedicated trivial entropy writer instead of `PLAN-COMMANDS` +
+the generic emitter. It builds the same three trees but writes compact code
+values during the match pass instead of allocating a 10-fixnum record per
+command. The ratio is unchanged; on 1 MiB literal-heavy corpora, consing per
+`compress` drops by about 30% (HTML q2 23.1 -> 15.4 MB, JSON 20.3 -> 13.8 MB,
+BINARY 21.8 -> 15.3 MB). Speed on 1 MiB inputs is within run-to-run noise;
+q2-q4 are matcher-bound, so the win is allocation and GC pressure rather than
+1 MiB throughput.
+
 The encoder is ratio-compliant: all levels stay within about 10% of C's
 output except q11, which is 20% larger. q0/q1 use the C-style fast-fragment
-path; q2-q9 use the chain/lazy parser. Speed-first variants that used stored
-blocks or the fragment writer for q2-q9 reached 1.27-180x C size and were
-reverted to respect the ratio limit.
+path; q2-q4 use the chain matcher with the trivial entropy writer; q5-q9 use
+the generic chain/lazy parser and `PLAN-COMMANDS`. Speed-first variants that
+used stored blocks or the fragment writer for q2-q9 reached 1.27-180x C size
+and were reverted to respect the ratio limit.
 
 ## Current results
 

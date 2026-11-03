@@ -947,7 +947,148 @@ compression ratio for encoder throughput."
                base-pos max-chain lazy skip-match insert-interior)))
   #-sbcl
   (%lz77 data nil window use-dict dict-limit base-pos max-chain lazy
-          skip-match insert-interior))
+         skip-match insert-interior))
+
+;;; A "trivial" entropy path for q2-q4: one literal/command/distance tree,
+;;; no context maps, no block splits.  Unlike PLAN-COMMANDS it does not
+;;; allocate or write a 10-fixnum record per command; the code values are
+;;; recomputed in the emission pass.
+(defun write-trivial-block-body (w data cmds rb
+                                 &key (short-dist nil)
+                                   (max-lit-bits 15))
+  (declare (type b:bwr w)
+           (type (simple-array (unsigned-byte 8) (*)) data)
+           (type (simple-array fixnum (*)) rb)
+           (optimize (speed 3) (safety 0)))
+  (let* ((litf (make-array 256 :element-type 'fixnum :initial-element 0))
+         (cmdf (make-array 704 :element-type 'fixnum :initial-element 0))
+         (distf (make-array 64 :element-type 'fixnum :initial-element 0))
+         (probe-rb (copy-seq rb)))
+    (declare (type (simple-array fixnum (256)) litf)
+             (type (simple-array fixnum (*)) cmdf distf probe-rb))
+    ;; Pass 1: histograms only.
+    (dolist (c cmds)
+      (let* ((ins (car c)) (lit-start (cadr c)) (cpy (caddr c))
+             (dist (cadddr c)) (dictp (car (cddddr c))))
+        (declare (type fixnum ins lit-start cpy dist))
+        (loop for i from lit-start below (+ lit-start ins)
+              do (incf (aref litf (aref data i))))
+        (multiple-value-bind (icode ixv ixb)
+            (length-code ins +ins-lc+ +ins-base+ +ins-bits+)
+          (declare (ignore ixv ixb))
+          (multiple-value-bind (ccode cxv cxb)
+              (if (plusp cpy)
+                  (length-code cpy +cpy-lc+ +cpy-base+ +cpy-bits+)
+                  (values 0 0 0))
+            (declare (ignore cxv cxb))
+            (let* ((ring-pos (aref probe-rb 4))
+                   (repeat (and (plusp cpy) (not dictp)
+                                (= dist (aref probe-rb
+                                              (logand (+ ring-pos 3) 3)))))
+                   (dist0 (and repeat (<= icode 7) (< ccode 16)))
+                   (csym (if dist0
+                             (cmd-symbol-dist0 icode ccode)
+                             (cmd-symbol icode ccode))))
+              (declare (type fixnum ring-pos csym))
+              (incf (aref cmdf csym))
+              (when (and (plusp cpy) (not dist0))
+                (let ((dcode nil))
+                  (if repeat
+                      (setf dcode 0)
+                      (multiple-value-bind (scode sxv sxb)
+                          (if short-dist
+                              (special-distance-code probe-rb dist)
+                              (values nil 0 0))
+                        (declare (ignore sxv sxb))
+                        (if scode
+                            (setf dcode scode)
+                            (multiple-value-bind (code xv xb)
+                                (encode-distance dist)
+                              (declare (ignore xv xb))
+                              (setf dcode code)))))
+                  (incf (aref distf dcode))
+                  (unless (or dictp (= dcode 0))
+                    (setf (aref probe-rb (logand ring-pos 3)) dist)
+                    (setf (aref probe-rb 4) (1+ ring-pos))))))))))
+    (let* ((lit (build-etree litf 256 max-lit-bits))
+           (cmd (build-etree cmdf 704 15))
+           (dist (build-etree distf 64 15))
+           (lit-single (etree-single lit))
+           (cmd-single (etree-single cmd))
+           (dist-single (etree-single dist))
+           (lit-rc (or (etree-rcodes lit) +empty-fixnums+))
+           (lit-ln (or (etree-lengths lit) +empty-fixnums+))
+           (cmd-rc (or (etree-rcodes cmd) +empty-fixnums+))
+           (cmd-ln (or (etree-lengths cmd) +empty-fixnums+))
+           (dist-rc (or (etree-rcodes dist) +empty-fixnums+))
+           (dist-ln (or (etree-lengths dist) +empty-fixnums+))
+           (slack 0))
+      (declare (type (simple-array fixnum (*))
+                     lit-rc lit-ln cmd-rc cmd-ln dist-rc dist-ln)
+               (type fixnum slack))
+      (b:wbits w 0 1) (b:wbits w 0 1) (b:wbits w 0 1)
+      (b:wbits w 0 2) (b:wbits w 0 4) (b:wbits w 0 2)
+      (b:wbits w 0 1) (b:wbits w 0 1)
+      (write-etree w lit 256)
+      (write-etree w cmd 704)
+      (write-etree w dist 64)
+      ;; Pass 2: recompute the compact codes and emit.
+      (dolist (c cmds)
+        (let* ((ins (car c)) (lit-start (cadr c)) (cpy (caddr c))
+               (dist (cadddr c)) (dictp (car (cddddr c))))
+          (declare (type fixnum ins lit-start cpy dist))
+          (let ((cost (+ 24 (* 2 ins))))
+            (declare (type fixnum cost))
+            (when (> cost slack)
+              (setf slack 65536)
+              (b:w-ensure w (+ slack cost)))
+            (decf slack cost))
+          (multiple-value-bind (icode ixv ixb)
+              (length-code ins +ins-lc+ +ins-base+ +ins-bits+)
+            (multiple-value-bind (ccode cxv cxb)
+                (if (plusp cpy)
+                    (length-code cpy +cpy-lc+ +cpy-base+ +cpy-bits+)
+                    (values 0 0 0))
+              (let* ((ring-pos (aref rb 4))
+                     (repeat (and (plusp cpy) (not dictp)
+                                  (= dist (aref rb (logand (+ ring-pos 3) 3)))))
+                     (dist0 (and repeat (<= icode 7) (< ccode 16)))
+                     (csym (if dist0
+                               (cmd-symbol-dist0 icode ccode)
+                               (cmd-symbol icode ccode)))
+                     (dcode -1) (dxv 0) (dxb 0))
+                (declare (type fixnum ring-pos csym dcode dxv dxb))
+                (when (and (plusp cpy) (not dist0))
+                  (if repeat
+                      (setf dcode 0)
+                      (multiple-value-bind (scode sxv sxb)
+                          (if short-dist
+                              (special-distance-code rb dist)
+                              (values nil 0 0))
+                        (if scode
+                            (setf dcode scode dxv sxv dxb sxb)
+                            (multiple-value-setq (dcode dxv dxb)
+                              (encode-distance dist)))))
+                  (unless (or dictp (= dcode 0))
+                    (setf (aref rb (logand ring-pos 3)) dist)
+                    (setf (aref rb 4) (1+ ring-pos))))
+                (unless cmd-single
+                  (b:%wbits-raw w (aref cmd-rc csym) (aref cmd-ln csym)))
+                (b:%wbits-raw w ixv ixb)
+                (b:%wbits-raw w cxv cxb)
+                (unless lit-single
+                  (if (>= ins 16)
+                      (b:w-emit-run w data lit-start (+ lit-start ins)
+                                    lit-rc lit-ln)
+                      (loop for i from lit-start below (+ lit-start ins)
+                            do (let ((sym (aref data i)))
+                                 (b:%wbits-raw w (aref lit-rc sym)
+                                               (aref lit-ln sym))))))
+                (when (>= dcode 0)
+                  (unless dist-single
+                    (b:%wbits-raw w (aref dist-rc dcode)
+                                  (aref dist-ln dcode)))
+                  (b:%wbits-raw w dxv dxb))))))))))
 
 ;;; ---- compressed meta-block --------------------------------------------
 
@@ -1156,7 +1297,8 @@ per command."
 
 (defun write-compressed-block-body (w data base-pos window use-dict dict-limit rb
                                     &key (max-chain 128) (lazy t) (short-dist t)
-                                      (skip-match nil) (insert-interior t) cmds)
+                                      (skip-match nil) (insert-interior t)
+                                      cmds)
   "Write the NBLTYPES/trees/commands part of a compressed meta-block.  The
 MLEN header must already have been written.  RB is the stream-wide distance
 ring shared with the decoder.  CMDS, when supplied, is a precomputed command
@@ -1328,7 +1470,9 @@ whole and moved to the next block when necessary."
 (defun compress-entropy (input &key (use-dict nil) (dict-limit nil)
                                     (max-chain 128) (lazy t) (short-dist t)
                                     (skip-match nil) (insert-interior t)
-                                    (fast-fragment nil))
+                                    (fast-fragment nil)
+                                    (trivial nil)
+                                    (max-lit-bits 15))
   "Entropy-coded brotli stream for INPUT.  Inputs larger than one meta-block
 are split into <= 2^24-byte compressed meta-blocks followed by an empty last
 meta-block."
@@ -1345,17 +1489,28 @@ meta-block."
        (b:wbits w 1 1) (b:wbits w 1 1))                    ; ISLAST + ISLASTEMPTY
       ((<= n #.(ash 1 24))
        (write-mlen-header w n t)
-       (if fast-fragment
-           (multiple-value-bind (cv nc litf cmdf distf)
-               (lz77 data window
-                      :max-chain max-chain :lazy nil :skip-match t
-                      :use-dict nil :insert-interior nil)
-             (write-fast-block-body w data cv nc litf cmdf distf))
-           (write-compressed-block-body w data 0 window use-dict dict-limit rb
-                                        :max-chain max-chain :lazy lazy
-                                        :short-dist short-dist
-                                        :skip-match skip-match
-                                        :insert-interior insert-interior)))
+       (cond
+         (fast-fragment
+          (multiple-value-bind (cv nc litf cmdf distf)
+              (lz77 data window
+                     :max-chain max-chain :lazy nil :skip-match t
+                     :use-dict nil :insert-interior nil)
+            (write-fast-block-body w data cv nc litf cmdf distf)))
+         (trivial
+          (write-trivial-block-body
+           w data
+           (lz77 data window :use-dict use-dict :dict-limit dict-limit
+                          :base-pos 0 :max-chain max-chain :lazy lazy
+                          :skip-match skip-match
+                          :insert-interior insert-interior)
+           rb :short-dist short-dist
+              :max-lit-bits max-lit-bits))
+         (t
+          (write-compressed-block-body w data 0 window use-dict dict-limit rb
+                                       :max-chain max-chain :lazy lazy
+                                       :short-dist short-dist
+                                       :skip-match skip-match
+                                       :insert-interior insert-interior))))
       (t
        (let* ((mb-chain (if fast-fragment 32 max-chain))
               (mb-lazy (if fast-fragment t lazy))
@@ -1374,12 +1529,16 @@ meta-block."
                   (outlen (reduce #'+ block :key #'command-output-length
                                         :initial-value 0)))
              (write-mlen-header w outlen lastp)
-             (write-compressed-block-body w data 0 window use-dict dict-limit
-                                          rb :max-chain max-chain
-                                             :lazy lazy :short-dist short-dist
-                                             :skip-match skip-match
-                                             :insert-interior insert-interior
-                                             :cmds block)
+             (if trivial
+                 (write-trivial-block-body w data block rb
+                                           :short-dist short-dist
+                                           :max-lit-bits max-lit-bits)
+                 (write-compressed-block-body w data 0 window use-dict dict-limit
+                                              rb :max-chain max-chain
+                                                 :lazy lazy :short-dist short-dist
+                                                 :skip-match skip-match
+                                                 :insert-interior insert-interior
+                                                 :cmds block))
              (incf pos outlen)))
          (unless (= pos n)
            (error "multi-block encoder produced ~D bytes, expected ~D" pos n)))))
@@ -1426,10 +1585,10 @@ compresses extremely well."
            (< duplicates (max 16 (/ sample 100)))))))
 
 (defun quality-params (quality)
-  "Encoder effort settings for QUALITY 0..11.  The mapping is deliberately
-simple: quality 0 is stored blocks, low qualities use a short greedy chain,
-middle qualities add lazy matching, and high qualities widen the chain and
-enable the static dictionary."
+  "Encoder effort settings for QUALITY 0..11.  q0/q1 use the C-style
+fast-fragment matcher; q2-q4 use the greedy chain with the trivial entropy
+writer; q5-q11 add lazy matching, widen the chain, and enable the static
+dictionary at q10/q11."
   (case quality
     ;; Quality 0 is the fast path, not raw stored blocks: stored would be
     ;; ~30x larger than C q0 on text-like data.  The stored fallback is still
@@ -1438,9 +1597,12 @@ enable the static dictionary."
           :insert-interior nil :fast-fragment t))
     (1 '(:max-chain 1 :lazy nil :use-dict nil :short-dist nil :skip-match t
           :insert-interior nil :fast-fragment t))
-    (2 '(:max-chain 3 :lazy nil :use-dict nil :short-dist nil :skip-match t :insert-interior nil))
-    (3 '(:max-chain 5 :lazy nil :use-dict nil :short-dist nil :skip-match t :insert-interior nil))
-    (4 '(:max-chain 10 :lazy nil :use-dict nil :short-dist nil :skip-match t :insert-interior nil))
+    (2 '(:max-chain 3 :lazy nil :use-dict nil :short-dist nil :skip-match t
+          :insert-interior nil :trivial t :max-lit-bits 15))
+    (3 '(:max-chain 5 :lazy nil :use-dict nil :short-dist nil :skip-match t
+          :insert-interior nil :trivial t :max-lit-bits 15))
+    (4 '(:max-chain 10 :lazy nil :use-dict nil :short-dist nil :skip-match t
+          :insert-interior nil :trivial t :max-lit-bits 15))
     (5 '(:max-chain 6 :lazy t :use-dict nil :short-dist t))
     (6 '(:max-chain 8 :lazy t :use-dict nil :short-dist t))
     (7 '(:max-chain 24 :lazy t :use-dict nil :short-dist t))
@@ -1451,10 +1613,10 @@ enable the static dictionary."
 
 (defun compress (input &key (quality 11))
   "Compress INPUT to a brotli stream.  QUALITY is an effort level 0..11:
-0 emits stored blocks, low levels use a short greedy hash chain, and high
-levels use lazy matching, a wider chain, and dictionary-assisted matching.
-The stored fallback is only built when the entropy-coded candidates are not
-already smaller than the input."
+0-1 use the fast-fragment matcher, 2-4 a short greedy hash chain with the
+trivial entropy writer, and high levels use lazy matching, a wider chain, and
+dictionary-assisted matching.  The stored fallback is only built when the
+entropy-coded candidates are not already smaller than the input."
   (let* ((data (b:to-octets input))
          (n (length data))
          (params (quality-params quality)))
@@ -1466,6 +1628,8 @@ already smaller than the input."
                (skip-match (getf params :skip-match nil))
                (insert-interior (getf params :insert-interior t))
                (fast-fragment (getf params :fast-fragment nil))
+               (trivial (getf params :trivial nil))
+               (max-lit-bits (getf params :max-lit-bits 15))
                (dict-ok (and (getf params :use-dict) (text-like-data-p data)))
                ;; Run the dictionary parse first.  For normal text it is
                ;; equal to or better than the plain parse, and re-running the
@@ -1479,14 +1643,18 @@ already smaller than the input."
                                                 :short-dist short-dist
                                                 :skip-match skip-match
                                                 :insert-interior insert-interior
-                                                :fast-fragment fast-fragment)
+                                                :fast-fragment fast-fragment
+                                                :trivial trivial
+                                                :max-lit-bits max-lit-bits)
                          (compress-entropy data :use-dict nil
                                                 :max-chain max-chain
                                                 :lazy lazy
                                                 :short-dist short-dist
                                                 :skip-match skip-match
                                                 :insert-interior insert-interior
-                                                :fast-fragment fast-fragment))))
+                                                :fast-fragment fast-fragment
+                                                :trivial trivial
+                                                :max-lit-bits max-lit-bits))))
           (when (and dict-ok (< (length best) 4096))
             (let ((plain (compress-entropy data :use-dict nil
                                                 :max-chain max-chain
@@ -1494,7 +1662,9 @@ already smaller than the input."
                                                 :short-dist short-dist
                                                 :skip-match skip-match
                                                 :insert-interior insert-interior
-                                                :fast-fragment fast-fragment)))
+                                                :fast-fragment fast-fragment
+                                                :trivial trivial
+                                                :max-lit-bits max-lit-bits)))
               (when (< (length plain) (length best)) (setf best plain))))
           (when (>= (length best) (+ n 32))
             (let ((stored (compress-stored data)))

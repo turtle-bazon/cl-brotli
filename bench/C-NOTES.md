@@ -751,6 +751,44 @@ lazy with the short chains above was the better geomean trade. The probe also
 compares 8 bytes ending at `BEST-LEN` once `BEST-LEN >= 7` instead of 4 bytes
 ending at `BEST-LEN`; it is strictly stronger and stays inside the buffer.
 
+## Per-quality q2-q4 trivial entropy path (kept)
+
+`PLAN-COMMANDS` writes a 10-fixnum (80-byte) record per command. For q2-q4
+that is unnecessary: the command list from the chain matcher already has
+everything the emitter needs, and the tree histograms can be rebuilt directly
+from it. `WRITE-TRIVIAL-BLOCK-BODY` now:
+
+* walks the command list once to build literal/command/distance histograms;
+* builds one literal, one command, and one distance tree (NBLTYPES 1/1/1,
+  no context map, no block split);
+* walks the command list again, recomputing the insert/copy/distance codes and
+  emitting immediately. No `RECS` array and no `10 * ncmd` allocation.
+
+q2-q4 select this path with `:trivial t`; q5-q11 keep the generic
+`PLAN-COMMANDS` + `WRITE-COMPRESSED-BLOCK-BODY` path. Speed on 1 MiB inputs is
+within run-to-run noise because q2-q4 are matcher-bound; the useful win is
+allocation. Consing per call drops by about 30% on literal-heavy data:
+
+| corpus | q2 before | q2 after | q4 before | q4 after |
+|---|---:|---:|---:|---:|
+| HTML | 23.1 MB | 15.4 MB | 20.2 MB | 13.8 MB |
+| JSON | 20.3 MB | 13.8 MB | 19.4 MB | 13.2 MB |
+| BINARY | 21.8 MB | 15.3 MB | 21.3 MB | 15.0 MB |
+| TEXT | 6.0 MB | 5.6 MB | 6.0 MB | 5.6 MB |
+
+Two C-shaped variants were measured and are not used:
+
+* a q2 **quick bucket matcher** (H2-style single-entry buckets, optional
+  sweep, distance seed, StoreRange). It was faster on literal-heavy data with
+  no interior inserts (q2 geomean 0.36 -> 0.41x) but produced 1.16-1.21x C
+  size. Adding interior inserts brought the size back to ~1.10x but erased the
+  speed gain. The linked chain remains.
+* a q2 **static command/distance code** path (C's 704-entry 9/11-bit command
+  code and 6-bit distance code). It removed the dynamic command/distance
+  trees and was faster in isolation, but our generic command-symbol
+  distribution is a poor match for the static code: q2 size rose to 1.41x C.
+  It is not enabled.
+
 ## VOP / fusion attempts that lost (reverted)
 
 * **Probe + match length in one VOP.** Folding the 4-byte probe into the
