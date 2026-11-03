@@ -357,3 +357,20 @@ To finish the score matcher in one pass next session:
    BINARY -3.0% previously (before the chain VOP + 64-bit hash work
    which restored part of that speed).
 
+
+## Rev 87: the pre-masked writer (%wbits-raw-pm) — +2-3% on q0
+
+A different answer to the instruction-count question: instead of passing
+more state through the per-literal emit, REMOVE per-literal instructions.
+The writer's width-exact call sites (reversed prefix codes, the
+insert/copy extra values from the length-code tables) went through a
+`logand v (aref +masks+ n)` + table load per emit even though their
+values were already exact; %wbits-raw-pm keeps %wbits-raw's contract and
+just skips the two ops.  The special-distance paths (which can carry
+negative 2-bit offsets) keep the masking via %wbits-raw.
+
+HTML q0 full-compress median across 7 samples (3 runs): 160-163 -> 162-167
+MiB/s.  Sizes are bit-identical.  The lesson generalizes: the emit path's
+remaining cost is per-instruction ARithmetic, not struct traffic, so
+"fewer ops" measurably beats "more inlined state" at the same boundary.
+
