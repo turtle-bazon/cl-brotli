@@ -191,6 +191,55 @@ The verify steps for the next pass:
 3. keep the `validate%wbits-raw-pm vs %wbits-pack` bitwise harness from
    this session's record (the correctness kernel is already written).
 
+## Attempted 4 Nov 2026 (night): u16/u8 encoder arrays — measured, reverted
+
+Typed the encoder's per-symbol hot arrays to shrink footprint:
+`etree` `lengths` fixnum->u8, `rcodes` fixnum->u16 (704-entry command
+trees: 5.6 KB -> 1.4 KB rcodes + 5.6 KB -> 704 B lengths), plus
+`+q0-cmd-map+` and `+cmd-symbol-table+` fixnum->u16 (5.6 KB -> 1.4 KB
+together), with the three emit-path declares split into u16 (rcodes,
+cmd-map) / u8 (lengths) and `w-emit-run` in src/bitio.lisp retyped.
+
+Results (interleaved A/B, 4 runs each version, 7-trial medians per
+run, same harness as the r87 record):
+
+cell      r90 mean   u16 mean   delta
+html q0    160.71     157.31    -2.1%   (nearly disjoint ranges)
+html q5     51.49      51.30    -0.4%
+html q9     17.65      17.46    -1.1%
+json q0    191.22     188.86    -1.2%
+source q0  298.42     292.00    -2.1%   (u16 max 296.89 < r90 min 296.47)
+source q1  262.52     262.27    -0.1%
+binary q9   24.21      24.21     0.0%
+geomean             ->          -1.01%
+
+Full 5-corpus x 5-level sweep: all 25 compressed sizes BIT-IDENTICAL
+(types only change representation, never values), but the speed delta
+is a measured regression, so the change is reverted.
+
+Why it did not win (do not retry this shape): unlike the r89 decoder
+LUT (whose 5.6 KB sat inside a much larger cold working set), these
+encoder arrays are 16.4 KB total as fixnums and already fit L1 in the
+emit loops — there was no cache pressure to relieve, and the u8/u16
+`movzx` loads bought nothing over 8-byte loads (the two cells that did
+move, html/source q0, are the write-fast-block-body hot path where the
+per-literal lit-rc/lit-ln and w-emit-run loads are the innermost ops).
+The lesson refines the r84 rule: "smaller footprint wins" applies only
+when the table is large enough to actually miss cache; at L1-resident
+sizes the typed-array form is neutral-to-slightly-negative.
+
+## DISCOVERY in the same pass: build-code-lengths-a is DEAD CODE
+
+`build-code-lengths-a` (the r81 array-based C port of
+BrotliCreateHuffmanTree) is defined in src/encode.lisp but has NEVER
+been called from any revision: `build-etree` still calls the cons-heavy
+`build-code-lengths`, and `hg log -p` over the whole history shows no
+call site was ever committed (the r81 record's "wired in build-etree"
+claim did not match the tree). Tree building is ~5% of q0 time per the
+r79 profile, and the C-shape builder is list-free — wiring it (after a
+byte-identical old-vs-new sweep over random and real histograms, per
+the r81 recipe) is the next encoder experiment.
+
 ## Attempted 3 Nov 2026: the local-state command loop (step 1 above)
 
 An implementation of the fast command loop as a separate
