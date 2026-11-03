@@ -62,7 +62,8 @@ lengths to symbols by frequency (most frequent -> shortest)."
 ;;; build-code-lengths above is cons-heavy (per-merge REMOVE on lists, a
 ;;; generic STABLE-SORT in limit-lengths).  This reimplementation keeps
 ;;; C BrotliCreateHuffmanTree/BrotliSetDepth's exact shape with flat typed
-;;; scratch arrays reused across calls:
+;;; scratch arrays (fresh per call, so concurrent COMPRESSes do not race
+;;; over a shared scratch — allocation is noise next to the old consing):
 ;;;
 ;;;   TC  weights  (leaves then parents, sentinel-separated)
 ;;;   IL  left child / -1 for leaves
@@ -74,10 +75,8 @@ lengths to symbols by frequency (most frequent -> shortest)."
 ;;; MAXBITS.  Everything is one pass over typed local arrays: no lists,
 ;;; no generic arithmetic, no per-symbol conses.
 
-(defparameter %huff-tc (make-array 1410 :element-type '(unsigned-byte 32)))
-(defparameter %huff-il (make-array 1410 :element-type 'fixnum))
-(defparameter %huff-rv (make-array 1410 :element-type 'fixnum))
-(defparameter %huff-depth (make-array 704 :element-type 'fixnum))
+;; (scratch arrays are allocated per call inside BUILD-CODE-LENGTHS-A: the
+;;  original r81 shared globals would make COMPRESS non-reentrant.)
 
 (declaim (inline %huf-shell-sort))
 (defun %huf-shell-sort (tc rv nnz)
@@ -139,7 +138,10 @@ Port of C BrotliCreateHuffmanTree; >= 2 nonzero frequencies assumed."
   (declare (type (simple-array fixnum (*)) freqs)
            (type fixnum n maxbits)
            (optimize (speed 3) (safety 0)))
-  (let ((tc %huff-tc) (il %huff-il) (rv %huff-rv) (depth %huff-depth))
+  (let ((tc (make-array (* 2 (+ n 2)) :element-type '(unsigned-byte 32)))
+        (il (make-array (* 2 (+ n 2)) :element-type 'fixnum))
+        (rv (make-array (* 2 (+ n 2)) :element-type 'fixnum))
+        (depth (make-array (max n 2) :element-type 'fixnum)))
     (declare (type (simple-array (unsigned-byte 32) (*)) tc)
              (type (simple-array fixnum (*)) il rv depth))
     ;; C retries with a doubled minimum while any leaf exceeds MAXBITS
@@ -287,7 +289,7 @@ one WBITS call per symbol instead of one per bit."
                        :rcodes (reversed-codes codes lengths size)
                        :simple nz))))
       (t
-       (let* ((lengths (build-code-lengths freqs size maxbits))
+       (let* ((lengths (build-code-lengths-a freqs size maxbits))
               (codes (canonical-codes lengths size)))
          (make-etree :lengths lengths :codes codes
                      :rcodes (reversed-codes codes lengths size)))))))
@@ -323,7 +325,7 @@ READ-CLCL): bits written in read order."
       ((null nz) (setf (aref l 0) 1 (aref l 1) 1))
       ((= 1 (length nz))
        (let ((s (first nz))) (setf (aref l s) 1 (aref l (if (= s 0) 1 0)) 1)))
-      (t (setf l (build-code-lengths clfreq 18 5))))
+      (t (setf l (build-code-lengths-a clfreq 18 5))))
     l))
 
 (defun cl-lengths-rle (lengths m)
