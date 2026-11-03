@@ -150,11 +150,14 @@ visible, and MODE is loop-invariant between block switches."
 ;;; Direct 704-symbol command LUT: the RFC's cell + sub-code arithmetic done
 ;;; once at load time, so the hot loop needs four loads instead of shifts,
 ;;; masks, adds, and six table reads.
-(defparameter +cmd-ilen-base+ (make-array 704 :element-type 'fixnum :initial-element 0))
-(defparameter +cmd-ilen-bits+ (make-array 704 :element-type 'fixnum :initial-element 0))
-(defparameter +cmd-clen-base+ (make-array 704 :element-type 'fixnum :initial-element 0))
-(defparameter +cmd-clen-bits+ (make-array 704 :element-type 'fixnum :initial-element 0))
-(declaim (type (simple-array fixnum (704))
+;; (unsigned-byte 16) LUTs: 704 entries x 4 tables x 2 bytes = 5.6 KB -> 2.8 KB,
+;; well inside L1D for the command-dense cells.  Bases fit u16 (max insert
+;; base 22594 < 65536), and the extra-bit widths are 0..24, also u16.
+(defparameter +cmd-ilen-base+ (make-array 704 :element-type '(unsigned-byte 16) :initial-element 0))
+(defparameter +cmd-ilen-bits+ (make-array 704 :element-type '(unsigned-byte 16) :initial-element 0))
+(defparameter +cmd-clen-base+ (make-array 704 :element-type '(unsigned-byte 16) :initial-element 0))
+(defparameter +cmd-clen-bits+ (make-array 704 :element-type '(unsigned-byte 16) :initial-element 0))
+(declaim (type (simple-array (unsigned-byte 16) (704))
                +cmd-ilen-base+ +cmd-ilen-bits+ +cmd-clen-base+ +cmd-clen-bits+))
 (dotimes (cmd 704)
   (let* ((cell (ash cmd -6))
