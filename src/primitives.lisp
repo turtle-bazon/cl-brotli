@@ -30,18 +30,40 @@
 #+sbcl
 (declaim (inline %hashf-sap))
 #+sbcl
-(defun %hashf-sap (sap i hmask)
-  "C Brotli's fast-fragment hash: multiply the low 32-bit word by kHashMul32
-and take the high bits, masked to the table size.  The constant -15 shift
-keeps ASH inline."
-  (declare (type sb-sys:system-area-pointer sap) (type fixnum i hmask)
+(defun %hashf-sap (sap i shift hmask)
+  "C Brotli's fast-fragment hash: take the TOP table-bits of the 64-bit
+product (input << 24) * kHashMul32 with shift = 64 - table-bits, like
+compress_fragment.c's Hash().  The whole chain stays inside
+(unsigned-byte 64) locals, which SBCL keeps untagged.  SHIFT is passed in
+so q0 (15-bit table) and q1 (17-bit) both get C's exact hash."
+  (declare (type sb-sys:system-area-pointer sap) (type fixnum i shift hmask)
+            (optimize (speed 3) (safety 0)))
+  (let* ((w (sb-sys:sap-ref-64 sap i))
+         (b (the (unsigned-byte 64)
+                 (ash (the (unsigned-byte 40) (logand w #xFFFFFFFFFF))
+                      24)))
+         (c (the (unsigned-byte 64)
+                 (logand (the (unsigned-byte 64) (* b #x1E35A7BD))
+                         #xFFFFFFFFFFFFFFFF)))
+         (h (the (unsigned-byte 31) (ash c shift))))
+    (the (unsigned-byte 32) (logand h hmask))))
+
+#+sbcl
+(defun %hashf-tail (data i shift hmask)
+  "The last few trawl positions cannot use the unaligned 8-byte load
+(xs the head of the vector is only n bytes); build the same (w<<24)*k
+value from five byte loads instead.  Slow path: at most a handful of
+positions per compress call."
+  (declare (type (simple-array (unsigned-byte 8) (*)) data)
+           (type fixnum i shift hmask)
            (optimize (speed 3) (safety 0)))
-  (let ((v (sb-sys:sap-ref-32 sap i)))
-    (logand (ash (logand (the (unsigned-byte 64)
-                              (* (the (unsigned-byte 32) v) #x1E35A7BD))
-                         #xFFFFFFFF)
-                 -15)
-            hmask)))
+  (let* ((w (logior (aref data i)
+                    (ash (aref data (+ i 1)) 8)
+                    (ash (aref data (+ i 2)) 16)
+                    (ash (aref data (+ i 3)) 24)
+                    (ash (aref data (+ i 4)) 32)))
+         (c (logand (* w #x1E35A7BD) (ash 1 64) (1- (ash 1 64)))))
+    (logand (ash c shift) hmask)))
 
 #+sbcl
 (defun %hash4-sap (sap i hmask)

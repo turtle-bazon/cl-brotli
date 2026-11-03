@@ -819,14 +819,22 @@ the new last-distance.  Mirrors WRITE-FAST-BLOCK-BODY's emission decisions."
          (cmdf (make-array 64 :element-type 'fixnum :initial-element 0))
          (distf (make-array 64 :element-type 'fixnum :initial-element 0))
          (lit-start 0) (p 1) (limit (- n k))
-         (last-dist -1) (back (if (= k 5) 3 5)))
-    (declare (type fixnum k min-match p lit-start limit last-dist back nc)
+         (last-dist -1) (back (if (= k 5) 3 5))
+         (shift (the fixnum (- table-bits 64))))
+    (declare (type fixnum k min-match p lit-start limit last-dist back nc shift)
              (type (simple-array (unsigned-byte 32) (*)) table cv)
              (type (simple-array fixnum (256)) litf)
              (type (simple-array fixnum (64)) cmdf distf))
     (replace cmdf +q0-seed-cmd+)
     (replace distf +q0-seed-dist+)
-    (labels ((hash (i) (%hashf-sap sap i hmask))
+    (labels ((hash (i)
+               ;; The 8-byte load in %HASHF-SAP reads i..i+7; within 3 bytes
+               ;; of the end that crosses the vector boundary (C's matcher
+               ;; keeps a 16-byte margin we do not have), so the tail
+               ;; positions compute the same hash from a 5-byte u40 build.
+               (if (<= (+ i 8) n)
+                   (%hashf-sap sap i shift hmask)
+                   (%hashf-tail data i shift hmask)))
              (prefix-match (a b)
                (and (= (sb-sys:sap-ref-32 sap a)
                        (sb-sys:sap-ref-32 sap b))
