@@ -1,3 +1,27 @@
+## State after the fragment-hash port (4 Nov 2026, rev 79)
+
+Level-matched 1 MiB, C core reference, this host:
+
+compression (lisp/C core; lisp/C size in parens) | q0 | q1 | q2 | q5
+---                      | ---: | ---: | ---: | ---:
+html                     | 0.32x (0.92) | 0.41x (1.05) | 0.46x (1.09) | 0.74x (1.19)
+json                     | 0.29x (0.82) | 0.48x (0.96) | 0.36x (1.20) | 0.76x (1.10)
+text                     | 6.36x (0.34) | 0.62x (0.43) | 0.53x (1.09) | 0.64x (1.07)
+source                   | 1.28x (0.41) | 0.88x (0.44) | 0.46x (1.13) | 0.66x (1.06)
+binary                   | 0.28x (0.98) | 0.35x (1.03) | 0.33x (1.12) | 0.79x (1.06)
+
+q0/q1 profiles (sb-sprof, HTML 1 MiB, after rev 79): `%LZ77-FRAGMENT`
+46.1% self, `WRITE-FAST-BLOCK-BODY` 39.7%, tree building ~5%. The
+matcher sits ~300 MiB/s alone; the emit pass costs the rest of the 2x.
+The C one-pass structure (pre-LZ77 sampled literal histogram + fixed
+64-symbol command/distance pre-code) would remove the second pass but
+moves ratio to C's per-corpus curve: near-parity on text (+2.6% size)
+but worse on json (+22%) and binary. With the measured precedent that
+both batched-local-writer attempts regressed, the remaining encode
+levers in order are (a) VOPs for the emit loop, (b) the one-pass port
+with a ratio guard, (c) an array-based build-code-lengths (the single
+visible cons/sort cost).
+
 # Reanalysis: where the lisp/C gap comes from (3 Nov 2026)
 
 Fresh pass over `src/`, the C sources (`/tmp/opencode/brotli-c`, HEAD d89c4b1c:
