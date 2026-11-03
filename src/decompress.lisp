@@ -167,11 +167,27 @@ visible, and MODE is loop-invariant between block switches."
 
 (declaim (inline %copy-tiny-match))
 (defun %copy-tiny-match (data pos src length)
-  "Copy a short non-overlapping match.  Returns the new position."
+  "Copy a short non-overlapping match.  Returns the new position.  On
+little-endian SBCL both loads and both stores are unaligned 64-bit
+operations (C Brotli does the same via BrotliShortCopy), so the 16-way
+length CASE below is only the slack/other-implementation fallback."
   (declare (optimize (speed 3) (safety 0))
            (type (simple-array (unsigned-byte 8) (*)) data)
            (type fixnum pos src)
            (type fixnum length))
+  #+(and sbcl little-endian)
+  (when (and (<= (+ pos 16) (length data))
+             (<= (+ src 16) (length data)))
+    ;; Unaligned 8+8 copy: no allocation between the loads and stores, so
+    ;; the pin cannot move the vector out from under us.
+    (sb-sys:with-pinned-objects (data)
+      (let ((sap (sb-sys:vector-sap data)))
+        (declare (type sb-sys:system-area-pointer sap))
+        (setf (sb-sys:sap-ref-64 sap pos)
+              (sb-sys:sap-ref-64 sap src))
+        (setf (sb-sys:sap-ref-64 sap (+ pos 8))
+              (sb-sys:sap-ref-64 sap (+ src 8)))))
+    (return-from %copy-tiny-match (+ pos length)))
   (case length
     (2 (setf (aref data (+ pos 0)) (aref data (+ src 0)) (aref data (+ pos 1)) (aref data (+ src 1))))
     (3 (setf (aref data (+ pos 0)) (aref data (+ src 0)) (aref data (+ pos 1)) (aref data (+ src 1)) (aref data (+ pos 2)) (aref data (+ src 2))))
