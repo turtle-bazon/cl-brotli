@@ -110,6 +110,18 @@ Recorded the harness pitfalls for future sessions: the recurring
 because `lines[a:b] = disp` with a *string* `disp` iterates characters;
 splice with `disp.split('\n')`.
 
+## Attempted 4 Nov 2026: packed per-symbol emit table — measured, reverted
+
+Built a parallel `lit-pc` table (`len<<16 | reversed code`, one u32 aref
+per literal instead of two fixnum loads) and used it in the `lits`
+inline emission of `WRITE-FAST-BLOCK-BODY`. Median HTML q0
+full-compress throughput over 7 samples: r79 writer 160 MiB/s, packed
+variant 157 MiB/s — the reduced table loads did not pay for the extra
+logand/ash per literal, so the change was reverted (consistent with the
+earlier two-literal-batching and bucket-hasher reverts). Rev 81's
+length-tree port needed only one code fix en route: a
+`(let (left right))` cannot declare NIL-typed slots FIXNUM.
+
 ## Attempted 3 Nov 2026: the local-state command loop (step 1 above)
 
 An implementation of the fast command loop as a separate
