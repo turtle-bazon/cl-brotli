@@ -240,6 +240,44 @@ r79 profile, and the C-shape builder is list-free — wiring it (after a
 byte-identical old-vs-new sweep over random and real histograms, per
 the r81 recipe) is the next encoder experiment.
 
+## Wired 4 Nov 2026: build-code-lengths-a (rev 93) — the session's biggest win
+
+Follow-up to the DISCOVERY above.  The equivalence harness (1000 freq
+vectors: n in 18/64/256/704, maxlen 5/14/15, five distribution
+shapes x 40 seeds) shows the two builders are NOT byte-identical:
+309/1000 differ, all where the MAXLEN clamp engages (18/5 zipf 40/40,
+704/15 zipf 40/40, 256/15 zipf 0/40 ...), because the old builder
+clamps AFTER the fact (limit-lengths) while -a escalates the minimum
+count (C's strategy).  Both emit valid codes; the sweep decides ratio:
+
+size deltas (1 MiB, 5 corpora x q0,1,2,5,9): 24 of 25 cells shift,
+16 by FEWER bytes; worst regression +13 B (json q0, +0.006%);
+geomean ~1.000x.  150/150.
+
+speed, interleaved 2 rounds x (baseline | wired), 7-trial medians:
+
+cell      r92 mean   wired mean   delta
+text q0   1335.80    1588.09     +18.9%   (disjoint ranges)
+binary q0  135.02     149.54     +10.8%   (disjoint)
+source q2  159.00     174.16      +9.5%   (disjoint)
+source q0  288.08     304.03      +5.5%   (disjoint)
+html q0    156.93     160.42      +2.2%   (disjoint)
+json q0    193.91     198.01      +2.1%
+html q5     52.84      53.83      +1.9%
+geomean               ->         +7.1%
+
+Mechanism: the 704-symbol command tree took 3169 us per call in the
+old builder (O(n^2) REMOVE merges + STABLE-SORT) vs 14.5 us in the
+array builder (222x); n=256: 429 us -> 4.8 us (85x).  Tree building
+was the "trees ~5%" of q0 and a far larger share of q2-q5, where each
+block builds a 704-symbol tree.
+
+Design note: r81's shared global scratch (%huff-tc etc.) was replaced
+with per-call arrays (the globals would have made COMPRESS
+non-reentrant); allocation is noise at these sizes.  The old
+build-code-lengths/limit-lengths are now unreferenced but retained as
+the portable reference for future equivalence checks.
+
 ## Attempted 3 Nov 2026: the local-state command loop (step 1 above)
 
 An implementation of the fast command loop as a separate
