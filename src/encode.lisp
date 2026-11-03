@@ -57,6 +57,162 @@ lengths to symbols by frequency (most frequent -> shortest)."
           (dotimes (i (aref count ll))
             (setf (aref lengths (aref syms idx)) ll) (incf idx)))))))
 
+;;; ---- array-based length-limited Huffman (C entropy_encode.c port) -----
+;;;
+;;; build-code-lengths above is cons-heavy (per-merge REMOVE on lists, a
+;;; generic STABLE-SORT in limit-lengths).  This reimplementation keeps
+;;; C BrotliCreateHuffmanTree/BrotliSetDepth's exact shape with flat typed
+;;; scratch arrays reused across calls:
+;;;
+;;;   TC  weights  (leaves then parents, sentinel-separated)
+;;;   IL  left child / -1 for leaves
+;;;   RV  right child / symbol for leaves
+;;;
+;;; Leaves are sorted rising-weight (equal weight: larger symbol first),
+;;; parents fill from NNZ+1, the root ends at 2*NNZ-1, and the whole
+;;; build is retried with a doubled minimum count while any leaf exceeds
+;;; MAXBITS.  Everything is one pass over typed local arrays: no lists,
+;;; no generic arithmetic, no per-symbol conses.
+
+(defparameter %huff-tc (make-array 1410 :element-type '(unsigned-byte 32)))
+(defparameter %huff-il (make-array 1410 :element-type 'fixnum))
+(defparameter %huff-rv (make-array 1410 :element-type 'fixnum))
+(defparameter %huff-depth (make-array 704 :element-type 'fixnum))
+
+(declaim (inline %huf-shell-sort))
+(defun %huf-shell-sort (tc rv nnz)
+  "Sort leaves [0..NNZ) by rising TC weight, ties: larger RV symbol first
+(the SortHuffmanTree comparator), over the C shell-gap sequence."
+  (declare (type (simple-array (unsigned-byte 32) (*)) tc)
+           (type (simple-array fixnum (*)) rv)
+           (type fixnum nnz)
+           (optimize (speed 3) (safety 0)))
+  (loop with n of-type fixnum = nnz
+        for gap of-type fixnum in '(132 57 23 10 4 1)
+        do (loop for i of-type fixnum from gap below n
+                 do (let ((wt (aref tc i)) (sym (aref rv i)) (j (- i gap)))
+                      (declare (type fixnum wt j))
+                      (loop while (and (>= j 0)
+                                       (or (> (aref tc j) wt)
+                                           (and (= (aref tc j) wt)
+                                                (< (aref rv j) sym))))
+                             do (setf (aref tc (+ j gap)) (aref tc j)
+                                      (aref rv (+ j gap)) (aref rv j))
+                                (decf j gap))
+                      (setf (aref tc (+ j gap)) wt
+                            (aref rv (+ j gap)) sym)))))
+
+(declaim (inline %huf-set-depth))
+(defun %huf-set-depth (p0 tc il rv depth max-depth)
+  "Write leaf depths into DEPTH by walking the parent pointers with the
+explicit stack of C's BrotliSetDepth.  NIL when any leaf would exceed
+MAX-DEPTH; the caller raises the minimum count and rebuilds."
+  (declare (type fixnum p0 max-depth)
+           (type (simple-array (unsigned-byte 32) (*)) tc)
+           (type (simple-array fixnum (*)) il rv depth)
+           (optimize (speed 3) (safety 0)))
+  (let ((stack (make-array 16 :element-type 'fixnum :initial-element -1))
+        (level 0) (p p0) (ok t))
+    (declare (type fixnum level p) (type boolean ok))
+    (loop
+      (if (>= (aref il p) 0)
+          (progn
+            (incf level)
+            (when (> level max-depth)
+              (setf ok nil)
+              (return))
+            (setf (aref stack level) (aref rv p)
+                  p (aref il p)))
+          (progn
+            (setf (aref depth (aref rv p)) level)
+            (loop while (and (>= level 0) (= (aref stack level) -1))
+                  do (decf level))
+            (when (< level 0)
+              (return))
+            (setf p (aref stack level)
+                  (aref stack level) -1))))
+    ok))
+
+(defun build-code-lengths-a (freqs n maxbits)
+  "Optimal canonical code lengths (<= MAXBITS) for FREQS[0..N); Kraft-exact.
+Port of C BrotliCreateHuffmanTree; >= 2 nonzero frequencies assumed."
+  (declare (type (simple-array fixnum (*)) freqs)
+           (type fixnum n maxbits)
+           (optimize (speed 3) (safety 0)))
+  (let ((tc %huff-tc) (il %huff-il) (rv %huff-rv) (depth %huff-depth))
+    (declare (type (simple-array (unsigned-byte 32) (*)) tc)
+             (type (simple-array fixnum (*)) il rv depth))
+    ;; C retries with a doubled minimum while any leaf exceeds MAXBITS
+    ;; (the count-limit clamp flattens the histogram until the tree fits).
+    (do ((count-limit 1 (* 2 count-limit)))
+        (nil)
+      ;; leaves, descending symbol order so equal-weight ties sort like C's
+      ;; comparator (larger symbol first) after the shell sort
+      (let ((nnz 0))
+        (declare (type fixnum nnz))
+        (loop for i of-type fixnum from (1- n) downto 0
+              do (let ((f (aref freqs i)))
+                   (declare (type fixnum f))
+                   (when (plusp f)
+                     (setf (aref tc nnz) (the (unsigned-byte 32)
+                                            (max f count-limit))
+                           (aref il nnz) -1
+                           (aref rv nnz) i)
+                     (incf nnz))))
+        (cond
+          ((zerop nnz)
+           (return-from build-code-lengths-a
+             (make-array n :element-type 'fixnum :initial-element 0)))
+          ((= 1 nnz)
+           (let ((r (make-array n :element-type 'fixnum
+                                  :initial-element 0)))
+             (declare (type (simple-array fixnum (*)) r))
+             (setf (aref r (aref rv 0)) 1)
+             (return-from build-code-lengths-a r)))
+          (t
+           (%huf-shell-sort tc rv nnz)
+           ;; sentinels at NNZ and NNZ+1; parents rise from NNZ+1; the
+           ;; root sits at 2*NNZ-1 when the merge finishes
+           (setf (aref tc nnz) #xFFFFFFFF (aref il nnz) -1 (aref rv nnz) -1)
+           (setf (aref tc (+ nnz 1)) #xFFFFFFFF
+                 (aref il (+ nnz 1)) -1
+                 (aref rv (+ nnz 1)) -1)
+           (let ((i 0) (j (+ nnz 1)))
+             (declare (type fixnum i j))
+             (loop for k of-type fixnum from (1- nnz) downto 0
+                   do (let ((left 0) (right 0))
+                        (declare (type fixnum left right))
+                        ;; pick 1: C advances the pointer as part of the pick
+                        (cond
+                          ((<= (aref tc i) (aref tc j))
+                           (setf left i) (incf i))
+                          (t (setf left j) (incf j)))
+                        ;; pick 2: sees the advanced pointers
+                        (cond
+                          ((<= (aref tc i) (aref tc j))
+                           (setf right i) (incf i))
+                          (t (setf right j) (incf j)))
+                        (let ((jend (- (* 2 nnz) k)))
+                          (declare (type fixnum jend))
+                          (setf (aref tc jend)
+                                (+ (aref tc left) (aref tc right))
+                                (aref il jend) left
+                                (aref rv jend) right)
+                          ;; re-add the sentinel one slot below jend
+                          (setf (aref tc (+ jend 1)) #xFFFFFFFF
+                                (aref il (+ jend 1)) -1
+                                (aref rv (+ jend 1)) -1)))))))
+        ;; depth walk; on failure the DO retries with the doubled clamp
+        (when (%huf-set-depth (- (* 2 nnz) 1) tc il rv depth maxbits)
+          (let ((r (make-array n :element-type 'fixnum
+                                  :initial-element 0)))
+            (declare (type (simple-array fixnum (*)) r))
+            (dotimes (s (the fixnum n))
+              (setf (aref r s)
+                    (if (plusp (aref freqs s))
+                        (aref depth s) 0)))
+            (return-from build-code-lengths-a r)))))))
+
 (defun build-code-lengths (freqs n maxlen)
   "Optimal canonical code lengths (<= MAXLEN) for FREQS.  Assumes >= 2 nonzero."
   (let* ((sv (coerce (loop for s below n when (plusp (aref freqs s)) collect s) 'vector))
