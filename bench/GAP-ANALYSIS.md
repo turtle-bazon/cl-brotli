@@ -323,3 +323,37 @@ re-verify before citing). q7–q9 stay ≥ C; q10/q11 are 17–20x C.
 Estimated reachable targets on this host (same ratio as today):
 decode 0.43x → ~0.6x geomean; q0/q1 0.33–0.45x → ~0.55–0.7x on literal-heavy
 data; q2–q6 stay ~1.0x with the cap restored; q7+/q10/q11 unchanged.
+
+## Attempted 4 Nov (later): the C-parity score matcher inside %lz77 —
+## carried the whole way up to the last-distance cascade, put aside
+
+The full patch chain (score constants + base 1920, per-quality
+`num-checks` 4/10/16, `%prepare-dist-cands` mirroring C's
+PrepareDistanceCache, the score-based best-len/distance selection in
+`find-match` with `%bref-score`/`%bref-penalty` (C hash.h
+BackwardReferenceScore/PenaltyUsingLastDistance), a >=175 lazy rule and
+the kMinScore baseline accept) reached the last-mile where the correct
+code needs find-match's whole signature change (accepting the
+candidate-prior array and returning best-score) and the emit-normal/lazy
+interplay rewritten as one shape. The draft in this session had the
+reference list wrong in two places; the working tree is reverted to the
+known-good r85 (no code change).
+
+To finish the score matcher in one pass next session:
+1. change `find-match` to take `(pos h checks)` and return
+   `(values len dist score)` with best-len starting at 0 and
+   best-score at (+ 1920 100) (kMinScore);
+2. keep the non-scoreCb path byte-exact (q0-q4: score-p nil,
+   checks 1 — the last-distance candidate only);
+3. fill the prior cascade through `%prepare-dist-cands` at every
+   find-match call (the dc array's slots 4..9/10..15 mirror C);
+4. apply C's per-index penalty ONLY for id >= 1 candidates with the
+   use-last-distance formula for id 0: (+ 1920 15 (* 135 len));
+5. rewrite the lazy gate as (>= next-score (+ best-score 175)) with the
+   4-delay cap and the accept gate (sr.score > kMinScore);
+6. measure with the level sweep AND accept the 5-15% chain speed
+   regression documented in the notes as the trade for sizes 1.03-1.13
+   -> closer to C; the recorded q2 JSON delta was -6.7%, HTML -2.3%,
+   BINARY -3.0% previously (before the chain VOP + 64-bit hash work
+   which restored part of that speed).
+
