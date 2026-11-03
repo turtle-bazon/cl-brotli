@@ -358,6 +358,23 @@ To finish the score matcher in one pass next session:
    which restored part of that speed).
 
 
+## Rev 89: the command LUTs to u16 — +1.7–3% decode on the dense cells
+
+The four 704-slot decode LUTs (`+cmd-ilen-base+/-bits+`,
+`+cmd-clen-base+/-bits+`) were fixnum arrays (8 bytes each → 5.6 KB for
+the four).  The command loop reads all four tables per command, so they
+hold a working set near L1D's sweet boundary.  (unsigned-byte 16)
+halves the footprint (2.8 KB) and fits all values (the largest base is
+22594, the widths 0..24).  Measured on C html streams (5 runs × 200
+decodes of the same stream for each q): q0 +1.7%, q2 +3.0%, q9 +1.7%.
+Sizes bit-identical; 150/150 checks pass.
+
+That is the whole remaining "cheap instruction a change" crop reachable
+without a VOP: the per-symbol emit (`wbits-raw-pm`), the per-symbol
+decode (u16 LUT) and the per-symbol table (`lit-pc` tried, reverted) are
+all at their design-level floors now — the remaining gaps are for a
+VOP pass, not arithmetic edits.
+
 ## Rev 87: the pre-masked writer (%wbits-raw-pm) — +2-3% on q0
 
 A different answer to the instruction-count question: instead of passing
