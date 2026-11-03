@@ -46,6 +46,46 @@ every quality — not a matcher-policy or stream-structure problem at q7+.
    to table-bits 17 / min-match 6: 254,417 bytes instead of 267,557 on HTML
    (−4.9%), same speed, 1.075x C q1 size.
 
+## Attempted 4 Nov 2026: local-state command loop, round 2 (values-passing readers)
+
+The single-expansion readers (`%rsym-cmd`/`%rsym-dist`/`%rsym-lit` plus
+`%rx-ib`/`%rx-cb`/`%rx-db`, each `(r tree|need acc nbits p) →
+(values sym acc nbits p)`) work and pass 150/150 (incl. multi-block,
+into-API bounds, large-secondary-tables) once two self-inflicted bugs
+were fixed:
+
+1. the `%rx-ib`/`%rx-cb` fallback `(values 0 acc nbits p)` sat inside
+   `(when (plusp need) ...)`, so zero-bit reads returned NIL as the
+   first value (the `expected FIXNUM, datum NIL` trap);
+2. the fast loop lacked the loop-head `(>= pos target)` exit, so a
+   copy that lands exactly on MLEN read a phantom command and
+   desynchronized (the `expected (INTEGER 0 (16777215))` trap — the
+   data-array bounds check).
+
+Measured, HTML 1 MiB decode (lisp-on-C-core): r77 generic loop +
+64-bit copies 232/240 MiB/s at q0/q2; the new fast path 222/224 (−4%).
+With the readers de-inlined: 170/179 (−25%). So:
+
+* inline expansion of the readers matters a lot (the p/nbits/acc
+  state moves across a call boundary);
+* even with inline, the multiple-value state rounding still loses to
+  the generic loop's struct accesses + the fast 64-bit copies; the
+  struct fields stay in a cached base register, and the per-read
+  value shuffling costs more than it saves.
+
+The tree keeps the r77 shape. The next step for the command loop is
+not values-passing LISP — it is a VOP-level move (like
+`%MATCH-LEN-SAP`): a `HALF-DECODED-COMMAND` VOP or a restructure that
+keeps acc/nbits/pos as untagged `REG` TNs across the whole loop, or a
+batched "read command + extra bits in one VOP" primitive. The working
+skeleton is preserved at `/tmp/opencode/decompress-rsym.bak` (not in
+the tree).
+
+Recorded the harness pitfalls for future sessions: the recurring
+`(see %decode-simple-meta-block)` char-per-line explosion happened
+because `lines[a:b] = disp` with a *string* `disp` iterates characters;
+splice with `disp.split('\n')`.
+
 ## Attempted 3 Nov 2026: the local-state command loop (step 1 above)
 
 An implementation of the fast command loop as a separate
