@@ -24,6 +24,37 @@ visible cons/sort cost).
 
 # Reanalysis: where the lisp/C gap comes from (3 Nov 2026)
 
+## Current state after rev 84 (the five-corpus level-matched snapshot)
+
+compression — cell = size lisp/C (speed lisp/C-core):
+q | html | json | text | source | binary
+--- | --- | --- | --- | --- | ---
+0 | 0.92 (0.32x) | 0.82 (0.30x) | 0.34 (6.4x) | 0.41 (1.3x) | 0.98 (0.29x)
+1 | 1.05 (0.41x) | 0.96 (0.48x) | 0.43 (0.62x) | 0.44 (0.87x) | 1.03 (0.35x)
+2 | 1.03 (0.46x) | 1.05 (0.44x) | 1.06 (0.54x) | 1.09 (0.45x) | 1.09 (0.36x)
+5 | 1.13 (0.83x) | 1.04 (0.82x) | 1.06 (0.60x) | 1.05 (0.69x) | 1.07 (0.84x)
+9 | 1.04 (0.72x) | 1.02 (0.73x) | 1.05 (2.2x) | 1.03 (0.92x) | 1.07 (1.05x)
+11 | 1.16 (7.7x) | 1.19 (8.6x) | 1.21 (14x) | 1.13 (14x) | 1.20 (25x)
+
+decompression of C streams lisp/C-core:
+q | html | json | text | source | binary
+--- | --- | --- | --- | --- | ---
+0 | 0.44 | 0.41 | 0.51 | 0.45 | 0.52
+1 | 0.38 | 0.37 | 0.46 | 0.38 | 0.53
+2+ | 0.35-0.50 | 0.34-0.35 | 2.4-5.0 | 0.47-0.86 | 0.36-0.60
+
+vs. the session start: q2 sizes 1.09-1.20 (outside the cap) now
+1.03-1.09 (inside); q0 sizes 0.95-0.87 congruent with the hash port;
+decode q0/q1 0.30-0.34 -> 0.35-0.53; the length-tree consing removed;
+the q1 table-bits-17 unreachable hash fixed. What remains where:
+q0/q1 literal-heavy compression (0.29-0.48x) and q0/q1 decode
+(0.35-0.53x); both are per-symbol instruction-count bound in SBCL and
+need VOP-level work (a wbits/ReadSymbol-class VOP or the C one-pass
+encoder structure with ratio guard) — the session's three lisp-level
+local-state attempts all regressed when measured.
+
+
+
 Fresh pass over `src/`, the C sources (`/tmp/opencode/brotli-c`, HEAD d89c4b1c:
 `c/enc`, `c/dec`), SBCL 2.6.9 disassembly, and new measurements on this host
 (Ryzen 7 3700X, C Brotli 1.0.9, 1 MiB generated corpora). Level-matched
