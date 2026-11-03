@@ -15,5 +15,7 @@
                              (:file "dict")
                              (:file "decompress")
                              (:file "brotli")
+                             (:file "vops")
+                             (:file "primitives")
                              (:file "encode")
                              (:file "package")))))
