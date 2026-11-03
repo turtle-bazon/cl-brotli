@@ -1595,7 +1595,11 @@ dictionary at q10/q11."
     ;; used whenever entropy coding cannot beat the input size.
     (0 '(:max-chain 1 :lazy nil :use-dict nil :short-dist nil :skip-match t
           :insert-interior nil :fast-fragment t))
-    (1 '(:max-chain 1 :lazy nil :use-dict nil :short-dist nil :skip-match t
+    ;; C's q1 (compress_fragment_two_pass) uses a 128K-entry table with a
+    ;; 6-byte minimum match; with max-chain 2 the fragment dispatcher selects
+    ;; table-bits 17 / min-match 6.  max-chain 1 gave q1 the same 15-bit/5-byte
+    ;; table as q0, producing byte-identical output and a 5-13% ratio loss.
+    (1 '(:max-chain 2 :lazy nil :use-dict nil :short-dist nil :skip-match t
           :insert-interior nil :fast-fragment t))
     (2 '(:max-chain 3 :lazy nil :use-dict nil :short-dist nil :skip-match t
           :insert-interior nil :trivial t :max-lit-bits 15))

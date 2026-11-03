@@ -291,7 +291,8 @@ bytes of capacity.  Returns the position after the last literal."
                       ;; End-of-stream tail: fewer bits remain than the
                       ;; primary table width, but the code itself may still
                       ;; fit.  Hand the rest of the run over to the generic
-                      ;; reader, which decodes the tail bit-by-bit.
+                      ;; reader, which decodes the remainder bit-by-bit from
+                      ;; this symbol boundary.
                       (setf (b:brd-acc r) acc (b:brd-nbits r) nbits (b:brd-pos r) p)
                       (loop for j from k below count do
                         (setf (aref out pos) (read-huff r tree))
@@ -314,18 +315,54 @@ bytes of capacity.  Returns the position after the last literal."
                ;; Secondary table: consume tbits bits, then 5 more.
                (let ((sub (aref subs (1- (ash entry -4)))))
                  (declare (type (simple-array (unsigned-byte 16) (*)) sub))
-                 (setf acc (ash acc (- tbits)) nbits (- nbits tbits))
-                 (refill 5)
-                 (let ((entry2 (aref sub (logand acc #x1F))))
-                   (declare (type fixnum entry2))
-                   (let ((rem (logand entry2 15)))
-                     (declare (type fixnum rem))
-                     (unless (plusp rem)
-                       (berr "invalid prefix code"))
-                     (setf acc (ash acc (- rem))
-                           nbits (- nbits rem)
-                           (aref out pos) (ash entry2 -4))
-                     (incf pos)))))
+                 ;; The slow hand-off must resume at a symbol boundary, so
+                 ;; remember the reservoir as it was before this code's
+                 ;; primary bits were consumed and restore it when the
+                 ;; refill near end-of-input cannot be satisfied (a valid
+                 ;; stream may end inside the secondary part of its last
+                 ;; code).
+                 (let ((saved-acc acc) (saved-nbits nbits) (saved-p p))
+                   (declare (type fixnum saved-acc saved-nbits saved-p))
+                   (setf acc (ash acc (- tbits)) nbits (- nbits tbits))
+                   ;; Top up 5 bits without the symbol-boundary hand-off.
+                   (unless (>= nbits 5)
+                     #+sbcl
+                     (when (and sap (<= (+ p 8) end))
+                       (let* ((bytes (min 7 (ash (- 59 nbits) -3)))
+                              (m (aref b::+wide-masks+ (* 8 bytes)))
+                              (w (the fixnum
+                                      (logand (sb-sys:sap-ref-64 sap p) m))))
+                         (declare (type fixnum bytes m w))
+                         (setf acc (the fixnum
+                                        (logior acc
+                                                (the fixnum
+                                                     (ash w nbits))))
+                               nbits (+ nbits (* 8 bytes))
+                               p (+ p bytes))))
+                     (unless (>= nbits 5)
+                       ;; End of input inside the secondary part of the
+                       ;; current code: restore the state saved before the
+                       ;; primary bits were consumed and decode the rest of
+                       ;; the run with the slow reader.
+                       (setf (b:brd-acc r) saved-acc
+                             (b:brd-nbits r) saved-nbits
+                             (b:brd-pos r) saved-p)
+                       (loop for j from k below count do
+                         (setf (aref out pos) (read-huff r tree))
+                         (incf pos))
+                       (setf acc (b:brd-acc r) nbits (b:brd-nbits r)
+                             p (b:brd-pos r))
+                       (return-from %decode-lit-run pos)))
+                   (let ((entry2 (aref sub (logand acc #x1F))))
+                     (declare (type fixnum entry2))
+                     (let ((rem (logand entry2 15)))
+                       (declare (type fixnum rem))
+                       (unless (plusp rem)
+                         (berr "invalid prefix code"))
+                       (setf acc (ash acc (- rem))
+                             nbits (- nbits rem)
+                             (aref out pos) (ash entry2 -4))
+                       (incf pos))))))
               (t (berr "invalid prefix code"))))))
       (setf (b:brd-acc r) acc (b:brd-nbits r) nbits (b:brd-pos r) p)
       pos)))
