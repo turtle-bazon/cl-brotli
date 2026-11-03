@@ -66,15 +66,38 @@ positions per compress call."
     (logand (ash c shift) hmask)))
 
 #+sbcl
-(defun %hash4-sap (sap i hmask)
-  (declare (type sb-sys:system-area-pointer sap) (type fixnum i hmask)
+(defun %hash4-sap (sap i shift hmask)
+  "The chain matcher's hash, same u64 algebra as %hashf-sap: the top
+table-bits of ((input<<24) mod 2^64) * kHashMul32, via untagged
+(unsigned-byte 64) locals.  The old load-32 + fixnum-tagged version took
+bits 15..30 of the 32-bit product, so the 17-bit chain table's top half
+was never reachable; this restores the full spread."
+  (declare (type sb-sys:system-area-pointer sap) (type fixnum i shift hmask)
            (optimize (speed 3) (safety 0)))
-  (let ((v (sb-sys:sap-ref-32 sap i)))
-    (logand (ash (logand (the (unsigned-byte 64)
-                              (* (the (unsigned-byte 32) v) 2654435761))
-                         #xffffffff)
-                 -15)
-            hmask)))
+  (let* ((w (sb-sys:sap-ref-64 sap i))
+         (b (the (unsigned-byte 64)
+                 (ash (the (unsigned-byte 40) (logand w #xFFFFFFFFFF))
+                      24)))
+         (c (the (unsigned-byte 64)
+                 (logand (the (unsigned-byte 64) (* b #x1E35A7BD))
+                         #xFFFFFFFFFFFFFFFF)))
+         (h (the (unsigned-byte 31) (ash c shift))))
+    (the (unsigned-byte 32) (logand h hmask))))
+
+#+sbcl
+(defun %hash4-tail (data i shift hmask)
+  "Chain-hash tail build for positions within 3 bytes of the data end
+(the 8-byte load in %hash4-sap would cross the boundary)."
+  (declare (type (simple-array (unsigned-byte 8) (*)) data)
+           (type fixnum i shift hmask)
+           (optimize (speed 3) (safety 0)))
+  (let* ((w (logior (aref data i)
+                    (ash (aref data (+ i 1)) 8)
+                    (ash (aref data (+ i 2)) 16)
+                    (ash (aref data (+ i 3)) 24)
+                    (ash (aref data (+ i 4)) 32)))
+         (c (logand (* w #x1E35A7BD) (1- (ash 1 64)))))
+    (logand (ash c shift) hmask)))
 
 #+(and sbcl x86-64 64-bit little-endian)
 (declaim (inline %trailing-zeros))

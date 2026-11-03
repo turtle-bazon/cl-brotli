@@ -652,13 +652,18 @@ or NIL on other implementations."
                (prev (and chained
                           (make-array n :element-type '(unsigned-byte 32))))
                (cmds '()) (lit-start 0) (p 0) (last (- n min-match))
-               (skip 32) (dict-used 0) (last-dist 0))
+               (skip 32) (dict-used 0) (last-dist 0)
+               (shift (the fixnum (- hbits 64))))
           (declare (type (simple-array (unsigned-byte 32) (*)) head)
                    (type (or null (simple-array (unsigned-byte 32) (*))) prev)
-                   (type fixnum p lit-start last skip dict-used last-dist))
+                   (type fixnum p lit-start last skip dict-used last-dist shift))
           (labels (#+sbcl
                    (hash (i)
-                     (if sap (%hash4-sap sap i hmask) (%hash4 data i hmask)))
+                     ;; the 8-byte load in %hash4-sap needs the tail branch
+                     ;; for i within 3 bytes of the end
+                     (if (and sap (<= (+ i 8) n))
+                         (%hash4-sap sap i shift hmask)
+                         (%hash4-tail data i shift hmask)))
                    #-sbcl
                    (hash (i) (%hash4 data i hmask))
                    #+(and sbcl x86-64 64-bit little-endian)
