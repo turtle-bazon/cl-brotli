@@ -676,3 +676,29 @@ Ratio-compliant speed: q0 0.44x, q1 0.34x, q2 0.62x, q3 0.67x, q4 0.77x,
 q5 0.76x, q6 0.75x, q7 0.86x, q8 0.86x, q9 2.00x, q10 19.23x, q11 16.83x.
 Sizes: 0.53-1.08x C for q0-q10, 1.20x for q11. Closing the q0-q8 gap now
 requires faster codegen, not a different ratio/speed tradeoff.
+
+## Full H6 port: implemented and measured, not kept
+
+A standalone `%LZ77-H6` was implemented with:
+- `num[2^15]` + `buckets[2^15 * block_size]`
+- uninitialized bucket storage via `sb-sys:allocate-system-memory` (no 2-32 MiB zero-fill)
+- C's 4-entry distance cache and `BackwardReferenceScore`
+- C's lazy parser, `StoreRange`, and command emission
+
+With C's large candidate budgets it was slower. With a tuned budget (32
+candidates, 4-entry cache) it was faster only on literal-heavy HTML/JSON:
+
+| cell | chain | H6 |
+|---|---:|---:|
+| q6 HTML | 23.4 | 24.1 |
+| q7 HTML | 20.5 | 24.2 |
+| q8 HTML | 16.8 | 24.0 |
+| q9 HTML | 14.3 | 24.1 |
+| q6 JSON | 23.4 | 25.2 |
+| q9 JSON | 14.8 | 24.0 |
+
+But it lost badly on text (q7 440->225), source q6 (48.6->39.4), and
+binary q6/q7 (22.3->19.2 / 21.0->19.2), and q9 HTML size grew from 164213 to
+173142 (1.127x C, over the 10% cap). Net geomean is not a win, so the chain
+matcher remains. This is strong evidence that the remaining gap is
+per-candidate/per-symbol codegen, not the hasher layout.
