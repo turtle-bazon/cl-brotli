@@ -1562,7 +1562,7 @@ histograms.  The MLEN header must already have been written."
 (defun plan-commands (data cmds
                       &optional (rb (make-array 5 :element-type 'fixnum
                                                   :initial-contents '(16 15 11 4 4)))
-                      &key (short-dist t))
+                      &key (short-dist t) (quality 5))
   "Turn raw LZ77 commands into flat fixnum records and tally literal/command/
 distance frequencies.  Returns (values RECS NCOMMANDS LITFREQ CMDFREQ DISTFREQ).
 RB is the distance ring shared by all meta-blocks of the stream; it must
@@ -1573,7 +1573,11 @@ per command."
          (recs (make-array (* +cmd-stride+ ncmd)
                            :element-type 'fixnum))
          (ri 0)
-         (litfreq (make-array 256 :element-type 'fixnum :initial-element 0))
+         (ctx (multiple-value-list (literal-contexts data quality)))
+         (lit-k (first ctx))
+         (lit-cmap (second ctx))
+         (litfreq (make-array (* lit-k 256) :element-type 'fixnum
+                                            :initial-element 0))
          (cmdfreq (make-array 704 :element-type 'fixnum :initial-element 0))
          (distfreq (make-array 64 :element-type 'fixnum :initial-element 0)))
     (declare (type fixnum ri)
@@ -1607,8 +1611,18 @@ per command."
                      (dcode -1) (dxv 0) (dxb 0))
                 (declare (type fixnum csym dcode dxv dxb))
                 (incf (aref cmdfreq csym))
-                (loop for i from lit-start below (+ lit-start ins)
-                      do (incf (aref litfreq (aref data i))))
+                (if (null lit-cmap)
+                    (loop for i from lit-start below (+ lit-start ins)
+                          do (incf (aref litfreq (aref data i))))
+                    (loop for i from lit-start below (+ lit-start ins)
+                          do (let* ((sym (aref data i))
+                                    (p1 (if (plusp i) (aref data (1- i)) 0))
+                                    (p2 (if (> i 1) (aref data (- i 2)) 0))
+                                    (cid (aref lit-cmap
+                                               (logior (aref +lut0+ p1)
+                                                       (aref +lut1+ p2)))))
+                               (declare (type fixnum sym p1 p2 cid))
+                               (incf (aref litfreq (+ (* cid 256) sym))))))
                 (when copyp
                   (unless dist0
                     (if repeat
@@ -1638,7 +1652,7 @@ per command."
                       (aref recs (+ ri 8)) dxv
                       (aref recs (+ ri 9)) dxb)
                 (incf ri +cmd-stride+)))))))
-    (values recs ncmd litfreq cmdfreq distfreq)))
+    (values recs ncmd litfreq cmdfreq distfreq lit-k lit-cmap)))
 
 (defun write-mlen-header (w n last)
   (let* ((m1 (1- n)) (nib (cond ((<= m1 #xFFFF) 4) ((<= m1 #xFFFFF) 5) (t 6))))
@@ -1648,10 +1662,182 @@ per command."
     (b:wbits w m1 (* 4 nib))                             ; MLEN-1
     (unless last (b:wbits w 0 1))))                      ; ISUNCOMPRESSED=0
 
+
+;; ---- literal context modeling (C encode.c: DecideOverLiteralContext
+;; ---- / ChooseContextMap / ShouldUseComplexStaticContextMap) --------------
+
+(defparameter +ctx-simple-utf8+
+  #(0 0 1 1 0 0 0 0 0 0 0 0 0 0 0 0
+    0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+    0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+    0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0))
+
+(defparameter +ctx-continuation+
+  #(1 1 2 2 0 0 0 0 0 0 0 0 0 0 0 0
+    0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+    0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+    0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0))
+
+(defparameter +ctx-complex-utf8+
+  #(11 11 12 12 0 0 0 0 1 1 9 9 2 2 2 2
+    1 1 1 1 8 3 3 3 1 1 1 1 2 2 2 2
+    8 4 4 4 8 7 4 4 8 0 0 0 3 3 3 3
+    5 5 10 5 5 5 10 5 6 6 6 6 6 6 6 6))
+
+(declaim (type simple-vector +ctx-simple-utf8+ +ctx-continuation+
+                         +ctx-complex-utf8+))
+
+(defun estimate-entropy (histo off size)
+  "C EstimateEntropy (encode.c): total*log2(total) - sum p*log2(p)."
+  (declare (type (simple-array fixnum (*)) histo)
+           (type fixnum off size)
+           (optimize (speed 3) (safety 0)))
+  (let ((total 0) (result 0.0d0))
+    (declare (type fixnum total) (type double-float result))
+    (dotimes (i size)
+      (let ((p (aref histo (+ off i))))
+        (declare (type fixnum p))
+        (incf total p)
+        (when (plusp p)
+          (incf result (* (float p 1.0d0) (log (float p 1.0d0) 2.0d0))))))
+    (if (zerop total)
+        0.0d0
+        (- (* (float total 1.0d0) (log (float total 1.0d0) 2.0d0)) result))))
+
+(defun complex-context-map (data n)
+  "C ShouldUseComplexStaticContextMap: entropy gate over5-bit literal
+histograms per complex-map context.  Returns the13-context map or NIL."
+  (declare (type (simple-array (unsigned-byte 8) (*)) data)
+           (type fixnum n)
+           (optimize (speed 3) (safety 0)))
+  (let ((combined (make-array 32 :element-type 'fixnum :initial-element 0))
+        (chisto (make-array (* 32 64) :element-type 'fixnum
+                                    :initial-element 0))
+        (total 0))
+    (declare (type (simple-array fixnum (*)) combined chisto)
+             (type fixnum total))
+    (loop for start of-type fixnum from 0 to (- n 64) by 4096 do
+      (let ((prev2 (aref data start)) (prev1 (aref data (1+ start))))
+        (declare (type fixnum prev1 prev2))
+        (loop for pos of-type fixnum from (+ start 2) below (+ start 64)
+              do (let* ((lit (aref data pos))
+                        (ctx (aref +ctx-complex-utf8+
+                                   (logior (aref +lut0+ prev1)
+                                           (aref +lut1+ prev2)))))
+                   (declare (type fixnum lit ctx))
+                   (incf total)
+                   (incf (aref combined (ash lit -3)))
+                   (incf (aref chisto (+ (ash ctx 5) (ash lit -3))))
+                   (setf prev2 prev1 prev1 lit)))))
+    (when (plusp total)
+      (let ((e1 (* (estimate-entropy combined 0 32)
+                   (/ 1.0d0 total)))
+            (e2 0.0d0))
+        (declare (type double-float e1 e2))
+        (dotimes (i 64)
+          (incf e2 (estimate-entropy chisto (* i 32) 32)))
+        (setf e2 (* e2 (/ 1.0d0 total)))
+        (unless (or (> e2 3.0d0) (< (- e1 e2) 0.2d0))
+          (return-from complex-context-map +ctx-complex-utf8+))))
+    nil))
+
+(defun bigram-context-map (data n quality)
+  "C DecideOverLiteralContextModeling's bigram path + ChooseContextMap.
+Returns (values K CMAP) with K in {1,2,3}."
+  (declare (type (simple-array (unsigned-byte 8) (*)) data)
+           (type fixnum n quality)
+           (optimize (speed 3) (safety 0)))
+  (let ((bigram (make-array 9 :element-type 'fixnum :initial-element 0))
+        (lut #(0 0 1 2)))
+    (declare (type (simple-array fixnum (*)) bigram) (type simple-vector lut))
+    (loop for start of-type fixnum from 0 to (- n 64) by 4096 do
+      (let ((prev (* 3 (aref lut (ash (aref data start) -6)))))
+        (declare (type fixnum prev))
+        (loop for pos of-type fixnum from (1+ start) below (+ start 64)
+              do (let ((cls (* 3 (aref lut (ash (aref data pos) -6)))))
+                   (declare (type fixnum cls))
+                   (incf (aref bigram (+ prev cls)))
+                   (setf prev cls)))))
+    (let ((mono (make-array 3 :element-type 'fixnum :initial-element 0))
+          (two (make-array 6 :element-type 'fixnum :initial-element 0))
+          (total 0))
+      (declare (type (simple-array fixnum (*)) mono two) (type fixnum total))
+      (dotimes (i 9)
+        (incf (aref mono (mod i 3)) (aref bigram i))
+        (incf (aref two (mod i 6)) (aref bigram i))
+        (incf total (aref bigram i)))
+      (if (zerop total)
+          (values 1 nil)
+          (let* ((scale (/ 1.0d0 total))
+                 (e1 (* (estimate-entropy mono 0 3) scale))
+                 (e2 (* (+ (estimate-entropy two 0 3)
+                           (estimate-entropy two 3 3))
+                        scale))
+                 (e3 0.0d0))
+            (declare (type double-float e1 e2 e3))
+            (dotimes (i 3)
+              (incf e3 (estimate-entropy bigram (* i 3) 3)))
+            (setf e3 (* e3 scale))
+            (when (< quality 7)        ; MIN_QUALITY_FOR_HQ_CONTEXT_MODELING
+              (setf e3 (* e1 10.0d0)))
+            (cond ((and (< (- e1 e2) 0.2d0) (< (- e1 e3) 0.2d0))
+                   (values 1 nil))
+                  ((< (- e2 e3) 0.02d0)
+                   (values 2 +ctx-simple-utf8+))
+                  (t (values 3 +ctx-continuation+))))))))
+
+(defun literal-contexts (data quality)
+  "C DecideOverLiteralContextModeling.  Returns (values K CMAP64)."
+  (declare (type (simple-array (unsigned-byte 8) (*)) data)
+           (type fixnum quality))
+  (let ((n (length data)))
+    (cond ((< quality 5) (values 1 nil))
+          ((< n 64) (values 1 nil))
+          ((and (>= n #.(ash 1 20)) (complex-context-map data n))
+           (values 13 +ctx-complex-utf8+))
+          (t (bigram-context-map data n quality)))))
+
+(defun write-nbltypes (w n)
+  "Inverse of the decoder's READ-NBLTYPES varint (N >= 1)."
+  (declare (type b:bwr w) (type fixnum n))
+  (cond ((= n 1) (b:wbits w 0 1))
+        ((= n 2) (b:wbits w 1 1) (b:wbits w 0 3))
+        (t (let ((k 0))
+             (declare (type fixnum k))
+             (loop while (not (and (<= (1+ (ash 1 k)) n)
+                                   (<= n (ash 1 (1+ k)))))
+                   do (incf k))
+             (b:wbits w 1 1)
+             (b:wbits w k 3)
+             (b:wbits w (- n (1+ (ash 1 k))) k)))))
+
+(defun write-lit-context-map (w cmap k)
+  "Write the64-static-context -> K-tree map in READ-CONTEXT-MAP's format
+with RLEMAX=0 and the IMTF bit clear."
+  (declare (type b:bwr w) (type fixnum k))
+  (b:wbits w 0 1)                             ; RLEMAX = 0
+  (let* ((freqs (make-array k :element-type 'fixnum :initial-element 1))
+         (et (build-etree freqs k 15)))
+    (write-etree w et k)
+    (dotimes (cid 64)
+      (declare (type fixnum cid))
+      (etree-emit w et (aref cmap cid))))
+  (b:wbits w 0 1))                            ; no IMTF
+
+(defun lit-slice (litf k)
+  "The K-th256-symbol histogram of a K*256 flat literal frequency array."
+  (declare (type (simple-array fixnum (*)) litf) (type fixnum k))
+  (let ((f (make-array 256 :element-type 'fixnum :initial-element 0)))
+    (declare (type (simple-array fixnum (*)) f))
+    (dotimes (j 256 f)
+      (declare (type fixnum j))
+      (setf (aref f j) (aref litf (+ (* k 256) j))))))
+
 (defun write-compressed-block-body (w data base-pos window use-dict dict-limit rb
                                     &key (max-chain 128) (lazy t) (short-dist t)
                                       (skip-match nil) (insert-interior t)
                                       (score-p nil) (checks 1)
+                                      (quality 5)
                                       cmds)
   "Write the NBLTYPES/trees/commands part of a compressed meta-block.  The
 MLEN header must already have been written.  RB is the stream-wide distance
@@ -1663,7 +1849,7 @@ list covering exactly this block."
            (type (or null fixnum) dict-limit)
            (type (simple-array fixnum (*)) rb)
            (type fixnum max-chain))
-  (multiple-value-bind (recs ncmd litf cmdf distf)
+  (multiple-value-bind (recs ncmd litf cmdf distf lit-k lit-cmap)
         (plan-commands
          data
          (or cmds
@@ -1672,30 +1858,63 @@ list covering exactly this block."
                             :skip-match skip-match
                             :insert-interior insert-interior
                             :score-p score-p :checks checks))
-         rb :short-dist short-dist)
+         rb :short-dist short-dist :quality quality)
       (declare (type (simple-array fixnum (*)) recs litf cmdf distf)
-               (type fixnum ncmd))
-      (let ((lit (build-etree litf 256 15))
-            (cmd (build-etree cmdf 704 15))
-            (dist (build-etree distf 64 15)))
+               (type fixnum ncmd lit-k)
+               (type (or null simple-vector) lit-cmap))
+      (let* ((cmd (build-etree cmdf 704 15))
+             (dist (build-etree distf 64 15))
+             (lit (when (= lit-k 1) (build-etree litf 256 15)))
+             (lits (when (>= lit-k 2)
+                     (let ((v (make-array lit-k)))
+                       (dotimes (k lit-k v)
+                         (setf (aref v k)
+                               (build-etree (lit-slice litf k) 256 15)))))))
         (b:wbits w 0 1) (b:wbits w 0 1) (b:wbits w 0 1)   ; NBLTYPES L/I/D = 1
         (b:wbits w 0 2)                                   ; NPOSTFIX=0
         (b:wbits w 0 4)                                   ; NDIRECT=0
-        (b:wbits w 0 2)                                   ; context mode (literal type 0)
-        (b:wbits w 0 1) (b:wbits w 0 1)                   ; NTREESL=1, NTREESD=1
-        (write-etree w lit 256)
+        (if (= lit-k 1)
+            (b:wbits w 0 2)                               ; context mode (unused)
+            (b:wbits w 2 2))                              ; context mode 2 = UTF8
+        (if (= lit-k 1)
+            (b:wbits w 0 1)                               ; NTREESL=1
+            (write-nbltypes w lit-k))
+        (when (>= lit-k 2)
+          (write-lit-context-map w lit-cmap lit-k))       ; before NTREESD
+        (b:wbits w 0 1)                                   ; NTREESD=1
+        (if (= lit-k 1)
+            (write-etree w lit 256)
+            (dotimes (k lit-k)
+              (write-etree w (aref lits k) 256)))
         (write-etree w cmd 704)
         (write-etree w dist 64)
         ;; Hoist the per-tree slot reads and the "single symbol" tests out of
         ;; the per-command loop.  Literal-heavy blocks otherwise re-read four
         ;; slots and re-test a branch for every literal.
         (let ((cmd-single (etree-single cmd))
-              (lit-single (etree-single lit))
+              (lit-single (and lit (etree-single lit)))
               (dist-single (etree-single dist))
               (cmd-rc (or (etree-rcodes cmd) +empty-fixnums+))
               (cmd-ln (or (etree-lengths cmd) +empty-fixnums+))
-              (lit-rc (or (etree-rcodes lit) +empty-fixnums+))
-              (lit-ln (or (etree-lengths lit) +empty-fixnums+))
+              (lit-rc (or (and lit (etree-rcodes lit)) +empty-fixnums+))
+              (lit-ln (or (and lit (etree-lengths lit)) +empty-fixnums+))
+              (lit-rcl (when (>= lit-k 2)
+                         (let ((v (make-array lit-k)))
+                           (dotimes (k lit-k v)
+                             (setf (aref v k)
+                                   (or (etree-rcodes (aref lits k))
+                                       +empty-fixnums+))))))
+              (lit-lnl (when (>= lit-k 2)
+                         (let ((v (make-array lit-k)))
+                           (dotimes (k lit-k v)
+                             (setf (aref v k)
+                                   (or (etree-lengths (aref lits k))
+                                       +empty-fixnums+))))))
+              (lit-sng (when (>= lit-k 2)
+                         (let ((v (make-array lit-k :initial-element nil)))
+                           (dotimes (k lit-k v)
+                             (setf (aref v k)
+                                   (etree-single (aref lits k)))))))
               (dist-rc (or (etree-rcodes dist) +empty-fixnums+))
               (dist-ln (or (etree-lengths dist) +empty-fixnums+))
               (slack 0))
@@ -1724,15 +1943,27 @@ list covering exactly this block."
                                 (aref cmd-ln (aref recs (+ b 2)))))
                 (b:%wbits-raw-pm w (aref recs (+ b 3)) (aref recs (+ b 4)))
                 (b:%wbits-raw-pm w (aref recs (+ b 5)) (aref recs (+ b 6)))
-                (unless lit-single
-                  ;; Long runs amortize the pin/state setup of the run
-                  ;; writer; short runs are cheaper inline.
-                  (if (>= ins 16)
-                      (b:w-emit-run w data ls (+ ls ins) lit-rc lit-ln)
-                      (loop for i from ls below (+ ls ins)
-                            do (let ((sym (aref data i)))
-                                 (b:%wbits-raw w (aref lit-rc sym)
-                                               (aref lit-ln sym))))))
+                (if (>= lit-k 2)
+                    (loop for i of-type fixnum from ls below (+ ls ins)
+                          do (let* ((sym (aref data i))
+                                    (p1 (if (plusp i) (aref data (1- i)) 0))
+                                    (p2 (if (> i 1) (aref data (- i 2)) 0))
+                                    (cid (aref lit-cmap
+                                               (logior (aref +lut0+ p1)
+                                                       (aref +lut1+ p2)))))
+                               (declare (type fixnum sym p1 p2 cid))
+                               (unless (aref lit-sng cid)
+                                 (b:%wbits-raw w (aref (aref lit-rcl cid) sym)
+                                               (aref (aref lit-lnl cid) sym)))))
+                    (unless lit-single
+                      ;; Long runs amortize the pin/state setup of the run
+                      ;; writer; short runs are cheaper inline.
+                      (if (>= ins 16)
+                          (b:w-emit-run w data ls (+ ls ins) lit-rc lit-ln)
+                          (loop for i from ls below (+ ls ins)
+                                do (let ((sym (aref data i)))
+                                     (b:%wbits-raw w (aref lit-rc sym)
+                                                   (aref lit-ln sym)))))))
                 (let ((dcode (aref recs (+ b 7))))
                   (declare (type fixnum dcode))
                   (when (>= dcode 0)
@@ -1828,7 +2059,8 @@ whole and moved to the next block when necessary."
                                     (fast-fragment nil)
                                     (trivial nil)
                                     (max-lit-bits 15)
-                                    (score-p nil) (checks 1))
+                                    (score-p nil) (checks 1)
+                                    (quality 5))
   "Entropy-coded brotli stream for INPUT.  Inputs larger than one meta-block
 are split into <= 2^24-byte compressed meta-blocks followed by an empty last
 meta-block."
@@ -1867,7 +2099,8 @@ meta-block."
                                        :short-dist short-dist
                                        :skip-match skip-match
                                        :insert-interior insert-interior
-                                       :score-p score-p :checks checks))))
+                                       :score-p score-p :checks checks
+                                       :quality quality))))
       (t
        (let* ((mb-chain (if fast-fragment 32 max-chain))
               (mb-lazy (if fast-fragment t lazy))
@@ -1896,6 +2129,7 @@ meta-block."
                                                  :lazy lazy :short-dist short-dist
                                                  :skip-match skip-match
                                                  :insert-interior insert-interior
+                                                 :quality quality
                                                  :cmds block))
              (incf pos outlen)))
          (unless (= pos n)
@@ -1974,16 +2208,16 @@ dictionary at q10/q11."
     ;; -1.0% at q9 (json q9 even grew 477 B), outside the recorded 5-15%
     ;; envelope at levels whose sizes are already inside the cap.
     ;; See GAP-ANALYSIS for the full per-level table.
-    (5 '(:max-chain 6 :lazy t :use-dict nil :short-dist t
+    (5 '(:max-chain 6 :lazy t :use-dict nil :short-dist t :quality 5
           :score-p t :checks 4))
-    (6 '(:max-chain 8 :lazy t :use-dict nil :short-dist t
+    (6 '(:max-chain 8 :lazy t :use-dict nil :short-dist t :quality 6
           :score-p t :checks 4))
-    (7 '(:max-chain 24 :lazy t :use-dict nil :short-dist t))
-    (8 '(:max-chain 32 :lazy t :use-dict nil :short-dist t))
-    (9 '(:max-chain 128 :lazy t :use-dict nil :short-dist t))
-    (10 '(:max-chain 256 :lazy t :use-dict t :short-dist t
+    (7 '(:max-chain 24 :lazy t :use-dict nil :short-dist t :quality 7))
+    (8 '(:max-chain 32 :lazy t :use-dict nil :short-dist t :quality 8))
+    (9 '(:max-chain 128 :lazy t :use-dict nil :short-dist t :quality 9))
+    (10 '(:max-chain 256 :lazy t :use-dict t :short-dist t :quality 10
            :score-p t :checks 16))
-    (t '(:max-chain 512 :lazy t :use-dict t :short-dist t
+    (t '(:max-chain 512 :lazy t :use-dict t :short-dist t :quality 11
           :score-p t :checks 16))))
 
 (defun %compress-bytes (data n params)
@@ -2004,6 +2238,7 @@ returning fresh octets.  Shared by COMPRESS and COMPRESS-INTO."
                (max-lit-bits (getf params :max-lit-bits 15))
                (score-p (getf params :score-p nil))
                (checks (getf params :checks 1))
+               (quality (getf params :quality 5))
                (dict-ok (and (getf params :use-dict) (text-like-data-p data)))
                ;; Run the dictionary parse first.  For normal text it is
                ;; equal to or better than the plain parse, and re-running the
@@ -2021,7 +2256,8 @@ returning fresh octets.  Shared by COMPRESS and COMPRESS-INTO."
                                                 :trivial trivial
                                                 :max-lit-bits max-lit-bits
                                                 :score-p score-p
-                                                :checks checks)
+                                                :checks checks
+                                                :quality quality)
                          (compress-entropy data :use-dict nil
                                                 :max-chain max-chain
                                                 :lazy lazy
@@ -2032,7 +2268,8 @@ returning fresh octets.  Shared by COMPRESS and COMPRESS-INTO."
                                                 :trivial trivial
                                                 :max-lit-bits max-lit-bits
                                                 :score-p score-p
-                                                :checks checks))))
+                                                :checks checks
+                                                :quality quality))))
           (when (and dict-ok (< (length best) 4096))
             (let ((plain (compress-entropy data :use-dict nil
                                                 :max-chain max-chain
@@ -2044,7 +2281,8 @@ returning fresh octets.  Shared by COMPRESS and COMPRESS-INTO."
                                                 :trivial trivial
                                                 :max-lit-bits max-lit-bits
                                                 :score-p score-p
-                                                :checks checks)))
+                                                :checks checks
+                                                :quality quality)))
               (when (< (length plain) (length best)) (setf best plain))))
           (when (>= (length best) (+ n 32))
             (let ((stored (compress-stored data)))
