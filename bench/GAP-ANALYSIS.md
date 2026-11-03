@@ -278,6 +278,57 @@ non-reentrant); allocation is noise at these sizes.  The old
 build-code-lengths/limit-lengths are now unreferenced but retained as
 the portable reference for future equivalence checks.
 
+## Score matcher (rev 95): shipped at q5/q6/q10/q11, rejected at q7-q9
+
+The r86 recipe finished and measured.  What landed in %lz77 (score
+mode, driven by :score-p/:checks from quality-params):
+
+* find-match-score: C's FindLongestMatch shape — prepared
+  distance-cache candidates first (i < checks; byte-at-best-len
+  probe; len >= 3 or len == 2 with i < 2; score minus the
+  BackwardReferencePenaltyUsingLastDistance for i > 0), then the
+  chain walk accepting by score (1920 + 135*len −
+  30*floor(log2 dist)) instead of by length; kMinScore = 2020 gate.
+* PrepareDistanceCache's ±1/2/3 cascade (4/10/16 entries), seeded
+  {4, 11, 15, 16} like encode.c, rotated on every copy except a
+  dc[0] repeat — mirroring the emit-side RB ring and short-code 0.
+* Lazy gate next-score >= best + 175 with the 4-delay cap, carried
+  forward as C's inner loop (the FIRST draft re-searched delayed
+  positions and cost an extra search per delay — worth ~20%; the
+  carry-forward version searches every position exactly once).
+* Score mode emits C's 2/3-byte cache hits as copies (copy length
+  codes start at 2); min-cop 2 there, min-match 4 elsewhere.
+
+Measurement (interleaved sweep vs r94, 5 corpora, 1 MiB):
+
+level | size geomean | speed geomean | verdict
+q0-q4 | byte-identical (by design) | ~1.0 (layout noise ±5%)  | keep
+q5    | −1.5% (5/5 smaller) | −12%          | SHIP (inside 5-15% envelope; q5 is the cap violator)
+q6    | −1.2% (5/5 smaller) | −15%          | SHIP (inside envelope)
+q7    | −1.2% (5/5 smaller) | −25%          | REJECT — outside envelope
+q8    | (not swept)         | (same shape)  | REJECT with q7
+q9    | −1.0%, json +477 B  | −25%          | REJECT — outside envelope, sizes already in cap
+q10   | −0.7% (json +0.6%)  | −18%          | SHIP (17-20x headroom → 14-16x)
+q11   | −0.9% (json +0.9%)  | −18%          | SHIP (same)
+
+Why q7-q9 lose: counters (*fmn*/*fms*/*mln*, stripped) show search
+counts are NOT higher (score: −3..−11%), but mlen scans are: binary
+q9 163K → 386K (+137%), html q9 +26%, binary q5 +41%.  Cause: the
+probe rejects on best-len, plain ratchets best-len to the greedy
+max on every improvement, score mode only on score improvements — so
+the bar stays low and probe-ok passes far more chain candidates to
+the full u64 scan.  sb-sprof agrees: find-match-score self is 1.9x
+find-match self.  The cost scales with chain length (chain 6 → −12%,
+chain 24/128 → −25%), which is the level split above.
+
+Ratio state after r95 (lisp/C): q5 1.03–1.11, q6 ~1.03–1.11, q7-q9
+1.01–1.07, q10/q11 1.12–1.21 (json still the worst).  HTML q5 is
+still 1.110 > the 1.10 cap — the next q5 ratio lever is BLOCK
+SPLITTING: C has MIN_QUALITY_FOR_BLOCK_SPLIT=4 with lgblock=16, so C
+q5 splits into sub-blocks with separate trees; our writer uses one
+tree set per metablock.  That is the structural follow-up (alongside
+the r86-noted q10/q11 context-modeling gap).
+
 ## Attempted 3 Nov 2026: the local-state command loop (step 1 above)
 
 An implementation of the fast command loop as a separate
