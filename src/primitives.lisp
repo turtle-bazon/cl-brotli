@@ -142,4 +142,3 @@ uses this so the inlined RETURN-FROM block exists only once per expansion."
   (declare (type sb-sys:system-area-pointer sap) (type fixnum a b n)
            (optimize (speed 3) (safety 0)))
   (%match-len-sap sap a b n))
-
