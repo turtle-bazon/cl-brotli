@@ -112,13 +112,13 @@ previously a missing MANUAL.html silently tiled Common Lisp source instead.
 | quality | matcher | short distance codes | dictionary |
 |---:|---|---|---|
 | 0-1 | fast-fragment, 15-bit hash, min match 5 | off | no |
-| 2 | greedy chain depth 4 | off | no |
-| 3 | greedy chain depth 8 | off | no |
-| 4 | greedy chain depth 16 | off | no |
-| 5 | lazy chain depth 32 | on | no |
-| 6 | lazy chain depth 48 | on | no |
-| 7 | lazy chain depth 64 | on | no |
-| 8 | lazy chain depth 96 | on | no |
+| 2 | greedy chain depth 3 | off | no |
+| 3 | greedy chain depth 5 | off | no |
+| 4 | greedy chain depth 10 | off | no |
+| 5 | lazy chain depth 6 | on | no |
+| 6 | lazy chain depth 8 | on | no |
+| 7 | lazy chain depth 24 | on | no |
+| 8 | lazy chain depth 32 | on | no |
 | 9 | lazy chain depth 128 | on | no |
 | 10 | lazy chain depth 256 | on | text-like only |
 | 11 | lazy chain depth 512 | on | text-like only |
@@ -143,24 +143,31 @@ all **eleven** datasets, including the tiny highly-compressible ones.
 
 | q | text | html | json | source | binary | geomean |
 |---:|---:|---:|---:|---:|---:|---:|
-| 0 | 1359.5 / 212.1 / 6.41x | 143.2 / 486.9 / 0.29x | 212.6 / 662.0 / 0.32x | 279.8 / 233.4 / 1.20x | 128.8 / 470.5 / 0.27x | 0.44x |
-| 1 | 1349.1 / 1866.4 / 0.72x | 142.1 / 332.1 / 0.43x | 211.9 / 395.1 / 0.54x | 280.5 / 294.9 / 0.95x | 128.7 / 326.9 / 0.39x | 0.34x |
-| 2 | 625.6 / 1079.6 / 0.58x | 68.8 / 182.8 / 0.38x | 87.8 / 278.5 / 0.32x | 143.7 / 350.1 / 0.41x | 56.0 / 188.0 / 0.30x | 0.62x |
-| 3 | 587.5 / 1010.2 / 0.58x | 69.4 / 154.5 / 0.45x | 81.9 / 215.8 / 0.38x | 137.7 / 296.8 / 0.46x | 53.8 / 147.9 / 0.36x | 0.67x |
-| 4 | 597.8 / 831.1 / 0.72x | 65.3 / 131.7 / 0.50x | 72.1 / 150.2 / 0.48x | 124.9 / 223.0 / 0.56x | 49.5 / 99.7 / 0.50x | 0.77x |
-| 5 | 362.4 / 638.2 / 0.57x | 27.8 / 67.2 / 0.41x | 27.4 / 67.2 / 0.41x | 52.3 / 120.8 / 0.43x | 25.7 / 52.2 / 0.49x | 0.76x |
-| 6 | 357.8 / 625.1 / 0.57x | 23.5 / 63.9 / 0.37x | 23.3 / 57.3 / 0.41x | 48.2 / 110.1 / 0.44x | 22.3 / 48.2 / 0.46x | 0.75x |
-| 7 | 353.1 / 304.2 / 1.16x | 20.4 / 44.1 / 0.46x | 20.6 / 42.9 / 0.48x | 42.2 / 87.8 / 0.48x | 20.1 / 38.2 / 0.53x | 0.86x |
-| 8 | 342.4 / 590.5 / 0.58x | 17.0 / 36.4 / 0.47x | 17.1 / 35.1 / 0.49x | 37.6 / 76.4 / 0.49x | 18.4 / 31.4 / 0.59x | 0.86x |
-| 9 | 340.7 / 168.4 / 2.02x | 14.0 / 23.6 / 0.59x | 14.4 / 22.3 / 0.64x | 34.3 / 49.1 / 0.70x | 16.6 / 22.1 / 0.75x | 2.00x |
+| 0 | 1,378.5 / 210.9 / 6.54x | 144.8 / 489.0 / 0.30x | 216.9 / 654.6 / 0.33x | 281.3 / 229.0 / 1.23x | 133.3 / 465.0 / 0.29x | 0.46x |
+| 1 | 1,367.9 / 1,898.8 / 0.72x | 147.3 / 335.8 / 0.44x | 213.7 / 388.0 / 0.55x | 279.0 / 293.3 / 0.95x | 132.9 / 327.1 / 0.41x | 0.37x |
+| 2 | 687.4 / 1,070.5 / 0.64x | 70.5 / 179.0 / 0.39x | 82.0 / 269.9 / 0.30x | 135.4 / 353.0 / 0.38x | 57.2 / 182.1 / 0.31x | 0.65x |
+| 3 | 578.4 / 1,005.0 / 0.58x | 77.0 / 155.3 / 0.50x | 87.8 / 214.0 / 0.41x | 134.9 / 294.5 / 0.46x | 54.3 / 147.0 / 0.37x | 0.70x |
+| 4 | 605.4 / 824.3 / 0.73x | 72.1 / 130.3 / 0.55x | 81.6 / 144.5 / 0.56x | 137.0 / 221.2 / 0.62x | 52.2 / 99.0 / 0.53x | 0.81x |
+| 5 | 408.9 / 634.2 / 0.64x | 46.6 / 68.8 / 0.68x | 51.7 / 71.5 / 0.72x | 81.3 / 122.3 / 0.66x | 39.6 / 54.3 / 0.73x | 0.93x |
+| 6 | 437.0 / 630.7 / 0.69x | 44.2 / 63.1 / 0.70x | 46.2 / 56.1 / 0.82x | 81.2 / 111.1 / 0.73x | 36.9 / 49.8 / 0.74x | 0.95x |
+| 7 | 410.2 / 298.1 / 1.38x | 32.9 / 49.5 / 0.67x | 33.3 / 44.3 / 0.75x | 63.0 / 89.3 / 0.71x | 30.0 / 40.8 / 0.73x | 1.02x |
+| 8 | 406.9 / 580.6 / 0.70x | 30.6 / 38.9 / 0.79x | 29.8 / 32.9 / 0.90x | 59.8 / 77.2 / 0.77x | 27.3 / 35.6 / 0.77x | 1.02x |
+| 9 | 400.1 / 171.0 / 2.34x | 14.3 / 24.2 / 0.59x | 14.7 / 22.0 / 0.67x | 37.4 / 49.8 / 0.75x | 17.1 / 22.6 / 0.76x | 2.11x |
 
 The encoder is back to a ratio-compliant configuration under the 10%
 size cap. q0/q1 use the fast-fragment path (15-bit hash, 5-byte minimum
 match); q2-q9 use the chain/lazy parser; q10/q11 keep the lazy chain plus
-dictionary. q9/q10/q11 beat C on speed (2.00x/19.23x/16.83x) at 1.064x/
-1.075x/1.201x C size; q0-q8 are 0.34-0.86x and remain codegen-bound. The
-speed-first stored/fast-fragment variants reached 1.27-180x C size and were
-reverted to respect the 10% ratio limit.
+dictionary. q7-q9 now reach parity or better (1.02x/1.02x/2.11x) and
+q10/q11 are 20.10x/17.00x at 1.075x/1.201x C size. q5/q6 are 0.93x/0.95x;
+q0-q4 remain 0.37-0.81x and are codegen-bound. The speed-first
+stored/fast-fragment variants reached 1.27-180x C size and were reverted to
+respect the 10% ratio limit.
+
+The matcher now calls an x86-64 `%MATCH-LEN-SAP` VOP (8-byte XOR + TZCNT,
+untagged offsets, one tag at the end), and the chain depths were retuned for
+the 10% size budget: q2 4->3, q3 8->5, q4 16->10, q5 32->6, q6 48->8,
+q7 64->24, q8 96->32. The larger q5-q8 cuts are the main q5-q8 speed win;
+sizes rose from ~1.06x to ~1.08x C, still inside the cap.
 
 ### q0/q1 decompression
 
@@ -194,8 +201,8 @@ in SBCL); the remaining gap is per-literal Huffman decode.
 
 | q | size (lisp/C) | compression (lisp/C) | decompression (lisp/C) |
 |---:|---:|---:|---:|
-| 10 | 1.075 | 19.23x | 1.74x |
-| 11 | 1.201 | 16.83x | 1.73x |
+| 10 | 1.075 | 20.10x | 1.85x |
+| 11 | 1.201 | 17.00x | 1.86x |
 
 q10/q11 are included for completeness. They are not representative of the
 low-level behavior: the encoder spends much more time parsing, which is where
@@ -205,18 +212,18 @@ C q11 is slow, while C q0-q9 are much faster than the lisp encoder.
 
 | C q | size (lisp/C) | compress (lisp/C core) | decompress (lisp/C core) |
 |---:|---:|---:|---:|
-| 0 | 0.532 | 0.44x | 0.43x |
-| 1 | 0.615 | 0.34x | 0.42x |
-| 2 | 0.954 | 0.62x | 1.62x |
-| 3 | 1.055 | 0.67x | 1.84x |
-| 4 | 1.076 | 0.77x | 1.63x |
-| 5 | 1.057 | 0.76x | 1.61x |
-| 6 | 1.060 | 0.75x | 1.59x |
-| 7 | 1.059 | 0.86x | 1.73x |
-| 8 | 1.059 | 0.86x | 1.73x |
-| 9 | 1.064 | 2.00x | 1.70x |
-| 10 | 1.075 | 19.23x | 1.74x |
-| 11 | 1.201 | 16.83x | 1.73x |
+| 0 | 0.532 | 0.46x | 0.44x |
+| 1 | 0.615 | 0.37x | 0.51x |
+| 2 | 0.959 | 0.65x | 1.70x |
+| 3 | 1.062 | 0.70x | 1.95x |
+| 4 | 1.082 | 0.81x | 1.76x |
+| 5 | 1.085 | 0.93x | 1.71x |
+| 6 | 1.087 | 0.95x | 1.80x |
+| 7 | 1.070 | 1.02x | 1.86x |
+| 8 | 1.069 | 1.02x | 1.86x |
+| 9 | 1.064 | 2.11x | 1.87x |
+| 10 | 1.075 | 20.10x | 1.85x |
+| 11 | 1.201 | 17.00x | 1.86x |
 ### Size boundary
 
 Multi-meta-block encoding keeps ratios stable across the 16 MiB boundary. The
@@ -268,14 +275,15 @@ maps, block switching, a 122 KiB static dictionary, and much larger alphabets.
 Running cl-newzlib's own harness on this same host (Roswell SBCL 2.6.9,
 zlib 1.2.13, 2 MiB inputs, levels 1/3/6/9) gives 1.70x compression and 1.19x
 decompression for its allocation-free `into` API (1.62x / 1.08x one-shot).
-cl-brotli's q11 geomeans against C Brotli on the same host are 16.83x
-compression and 1.73x decompression in this run. The decompression geomean is
+cl-brotli's q11 geomeans against C Brotli on the same host are 17.00x
+compression and 1.86x decompression in this run. The decompression geomean is
 inflated by the easy synthetic corpora: literal-heavy HTML/JSON/source/binary
 decode is 0.30-0.42x of C. q11 is not the useful comparison for the low-level
-work: C q11 is deliberately slow. Under the speed-first policy, q2-q9 use the
-fast-fragment path and beat C q2-q9 on throughput (1.16-6.73x) while
-producing 1.27-1.56x C's size. q0/q1 still trade with C q0/q1: 6.62x faster
-on text, 1.22x on source, but 0.28-0.32x on literal-heavy
+work: C q11 is deliberately slow. An earlier speed-first experiment used the
+fast-fragment path for q2-q9 and beat C q2-q9 on throughput (1.16-6.73x) while
+producing 1.27-1.56x C's size; it was reverted under the 10% ratio cap.
+q0/q1 still trade with C q0/q1: 6.54x faster
+on text, 1.23x on source, but 0.29-0.33x on literal-heavy
 HTML/JSON/binary. The cl-newzlib comparison is still useful evidence that
 portable Lisp can reach C parity, but it applies to the low-level constant
 factors (per-symbol decode, bit emission, match extension), not to the q11
@@ -466,10 +474,10 @@ level against both decoders). Benchmarks are run only on SBCL 2.6.9.
 * Encoder ratio is at C q5 (1.06x) on text-like data; the q11 size gap (1.20x)
   needs context modeling, block splitting, and length-changing dictionary
   transforms.
-* Low-level encoder throughput: within the 10% size cap, q0 0.44x,
-  q1 0.34x, q2 0.62x, q3 0.67x, q4 0.77x, q5 0.76x, q6 0.75x, q7 0.86x,
-  q8 0.86x, and **q9 2.00x**; q10/q11 are 19.23x/16.83x. q9/q10/q11 beat C;
-  q0-q8 remain codegen-bound. q0-q10 output is 0.53-1.08x C (q11 is 1.20x).
+* Low-level encoder throughput: within the 10% size cap, q0 0.46x,
+  q1 0.37x, q2 0.65x, q3 0.70x, q4 0.81x, q5 0.93x, q6 0.95x, q7 1.02x,
+  q8 1.02x, and **q9 2.11x**; q10/q11 are 20.10x/17.00x. q7-q11 beat C;
+  q0-q6 remain codegen-bound. q0-q10 output is 0.53-1.09x C (q11 is 1.20x).
   The speed-first stored/fast-fragment variants were faster but produced
   1.27-180x C size, so they were reverted.
 * q0/q1 decode is 0.43x/0.42x across all eleven datasets (C timing varies

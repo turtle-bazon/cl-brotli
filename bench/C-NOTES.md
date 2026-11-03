@@ -672,9 +672,12 @@ The speed-first experiment (stored q0-q4, fast-fragment q2-q9) made every q
 faster than C, but output sizes reached 1.27-180x C. Under the new rule that
 ratio may lose at most 10%, those paths are not usable. The encoder is back
 to q0/q1 fast-fragment + q2-q9 chain/lazy + q10/q11 chain+dictionary.
-Ratio-compliant speed: q0 0.44x, q1 0.34x, q2 0.62x, q3 0.67x, q4 0.77x,
-q5 0.76x, q6 0.75x, q7 0.86x, q8 0.86x, q9 2.00x, q10 19.23x, q11 16.83x.
-Sizes: 0.53-1.08x C for q0-q10, 1.20x for q11. Closing the q0-q8 gap now
+Ratio-compliant speed at rev 67 (before the VOP and chain retune): q0 0.44x,
+q1 0.34x, q2 0.62x, q3 0.67x, q4 0.77x, q5 0.76x, q6 0.75x, q7 0.86x,
+q8 0.86x, q9 2.00x, q10 19.23x, q11 16.83x. After the native match-length
+VOP and the chain retune: q0 0.46x, q1 0.37x, q2 0.65x, q3 0.70x, q4 0.81x,
+q5 0.93x, q6 0.95x, q7 1.02x, q8 1.02x, q9 2.11x, q10 20.10x, q11 17.00x.
+Sizes: 0.53-1.09x C for q0-q10, 1.20x for q11. Closing the q0-q4 gap still
 requires faster codegen, not a different ratio/speed tradeoff.
 
 ## Full H6 port: implemented and measured, not kept
@@ -702,3 +705,75 @@ binary q6/q7 (22.3->19.2 / 21.0->19.2), and q9 HTML size grew from 164213 to
 173142 (1.127x C, over the 10% cap). Net geomean is not a win, so the chain
 matcher remains. This is strong evidence that the remaining gap is
 per-candidate/per-symbol codegen, not the hasher layout.
+
+## Native `%MATCH-LEN-SAP` VOP (kept)
+
+C's `find_match_length.h` is one unaligned 64-bit XOR + `TZCNT` per word.
+cl-brotli now compiles the same shape as an SBCL x86-64 VOP:
+
+* `src/primitives.lisp` keeps the portable body as `%MATCH-LEN-SAP-LISP`.
+* `src/vops.lisp` registers `%MATCH-LEN-SAP` with `sb-c::defknown` and
+  `define-vop` (untagged `signed-num` offsets, 8-byte XOR/TZCNT loop, byte tail,
+  one tag at the end).
+* `src/package.lisp` installs the Lisp body as the runtime `symbol-function`, so
+  `funcall` and any call site compiled before the VOP still work.
+* `cl-brotli.asd` loads `vops` before `primitives`, so the encoder and the
+  primitive wrappers are compiled after the template is registered.
+
+Two registration traps mattered: a plain `defun` does not expose `fun-info` at
+compile time (the VOP macro fails with "not a known function"), and redefining
+the function after the VOP drops the template ("overwriting old FUN-INFO").
+There must be no `defun` for the translated symbol on SBCL; `defknown` plus the
+VOP replace it.
+
+Effect at rev 68, before the chain retune: q5 HTML 29.8 -> 30.1 MiB/s, q5 text
+383 -> 435 MiB/s, q9 text 373 -> 411 MiB/s; q5/q7/q8 geomeans moved
+0.76/0.86/0.86 -> 0.83/0.90/0.87 with unchanged output sizes.
+
+## Chain retune for the 10% size budget (kept)
+
+With the VOP in place, the chain depths were lowered until the geomean size was
+still below 1.10x C:
+
+| q | old chain | new chain | size (lisp/C) | speed (lisp/C) |
+|---:|---:|---:|---:|---:|
+| 2 | 4 | 3 | 0.959 | 0.65x |
+| 3 | 8 | 5 | 1.062 | 0.70x |
+| 4 | 16 | 10 | 1.082 | 0.81x |
+| 5 | 32 | 6 | 1.085 | 0.93x |
+| 6 | 48 | 8 | 1.087 | 0.95x |
+| 7 | 64 | 24 | 1.070 | 1.02x |
+| 8 | 96 | 32 | 1.069 | 1.02x |
+
+q5/q6 were also compared against non-lazy parsing (`lazy nil` with chains
+32/48). Non-lazy was faster on text but worse on JSON/binary for the same size;
+lazy with the short chains above was the better geomean trade. The probe also
+compares 8 bytes ending at `BEST-LEN` once `BEST-LEN >= 7` instead of 4 bytes
+ending at `BEST-LEN`; it is strictly stronger and stays inside the buffer.
+
+## VOP / fusion attempts that lost (reverted)
+
+* **Probe + match length in one VOP.** Folding the 4-byte probe into the
+  match-length VOP produced the same decisions but 10-15% lower q5/q9
+  throughput. The extra argument and probe registers made the allocator spill
+  `BEST-LEN` around every call, so the matcher lost more in the surrounding
+  loop than it gained in the template.
+* **Whole-chain VOP.** A native chain walk needs the data SAP, the `PREV` SAP,
+  `POSPTR`, `POS`, `CAND`, `BEST-LEN`, `BEST-DIST`, `MAX-CHAIN`, `MAXL`, and
+  `MINCAND`, plus the match loop state. SBCL could not pack load TNs for the
+  later arguments (all `SIGNED-REG` elements in use), and packing the state in
+  memory to fit would give back most of the win. Not integrated.
+* **Fused `plan-commands` in the matcher.** `%LZ77` gained a command sink that
+  planned records and histograms as commands were emitted. It reproduced the
+  exact records, histograms, and ring state of `plan-commands` on a 200 KiB
+  sample, and passed the full suite, but the full 1 MiB harness was slower:
+  * every call allocated a `recs` buffer sized from the input length, so
+    sparse-command datasets (`dict`, `zeros`, `utf8`, `pattern`, `periodic`)
+    paid several MiB of allocation per compress for a few hundred commands;
+  * on command-dense corpora the inlined planning calls bloated the matcher
+    and increased register pressure, so even HTML/JSON lost 5-20%.
+
+  The command-list path allocates only `10 * ncmd` fixnums after the match
+  pass and keeps the matcher loop small. Reverted; the remaining win would
+  have to come from a sink that plans out of line and allocates lazily, which
+  no longer looked like a clear win.
