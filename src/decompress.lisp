@@ -103,9 +103,17 @@ visible, and MODE is loop-invariant between block switches."
 
 (defstruct (outbuf (:constructor make-outbuf (data)))
   (data nil :type (simple-array (unsigned-byte 8) (*)))
-  (pos 0 :type fixnum))
+  (pos 0 :type fixnum)
+  ;; Absolute output ceiling for DECOMPRESS-INTO; NIL means growable.  When
+  ;; set, DATA is caller-owned and must never be replaced.
+  (limit nil :type (or null fixnum)))
 
 (defun %grow (out need)
+  (when (and (outbuf-limit out) (> need (outbuf-limit out)))
+    (error 'brotli-output-overflow
+           :msg (format nil "brotli: output buffer too small (needs ~D bytes)"
+                        need)
+           :needed need))
   (let* ((data (outbuf-data out)) (len (length data)))
     (when (> need len)
       ;; Small buffers quadruple to avoid repeated copies; large ones grow by
@@ -121,6 +129,11 @@ visible, and MODE is loop-invariant between block switches."
 
 (defun %grow-exact (out need)
   "Reserve exactly NEED bytes, without the usual growth overshoot."
+  (when (and (outbuf-limit out) (> need (outbuf-limit out)))
+    (error 'brotli-output-overflow
+           :msg (format nil "brotli: output buffer too small (needs ~D bytes)"
+                        need)
+           :needed need))
   (let ((data (outbuf-data out)))
     (when (> need (length data))
       (let ((new (make-array need :element-type '(unsigned-byte 8))))
@@ -272,6 +285,10 @@ bytes of capacity.  Returns the position after the last literal."
         (dotimes (k count) (setf (aref out pos) sym) (incf pos))
         (setf (b:brd-acc r) acc (b:brd-nbits r) nbits (b:brd-pos r) p)
         (return-from %decode-lit-run pos)))
+    (let ((tbl (the (simple-array (unsigned-byte 16) (*)) table))
+          (subvec (the simple-vector (or subs #()))))
+      (declare (type (simple-array (unsigned-byte 16) (*)) tbl)
+               (type simple-vector subvec))
     (macrolet ((refill (need)
                  `(unless (>= nbits ,need)
                     #+sbcl
@@ -301,7 +318,7 @@ bytes of capacity.  Returns the position after the last literal."
                       (return-from %decode-lit-run pos)))))
       (dotimes (k count)
         (refill tbits)
-        (let ((entry (aref table (logand acc mask))))
+        (let ((entry (aref tbl (logand acc mask))))
           (declare (type fixnum entry))
           (let ((len (logand entry 15)))
             (declare (type fixnum len))
@@ -313,7 +330,7 @@ bytes of capacity.  Returns the position after the last literal."
                (incf pos))
               ((plusp entry)
                ;; Secondary table: consume tbits bits, then 5 more.
-               (let ((sub (aref subs (1- (ash entry -4)))))
+               (let ((sub (aref subvec (1- (ash entry -4)))))
                  (declare (type (simple-array (unsigned-byte 16) (*)) sub))
                  ;; The slow hand-off must resume at a symbol boundary, so
                  ;; remember the reservoir as it was before this code's
@@ -365,7 +382,7 @@ bytes of capacity.  Returns the position after the last literal."
                        (incf pos))))))
               (t (berr "invalid prefix code"))))))
       (setf (b:brd-acc r) acc (b:brd-nbits r) nbits (b:brd-pos r) p)
-      pos)))
+      pos))))
 
 (defun decode-compressed-meta-block (r out mlen window rb)
   "Decode one compressed meta-block of MLEN bytes into OUT.  RB is the 4-entry

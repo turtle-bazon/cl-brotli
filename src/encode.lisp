@@ -510,10 +510,13 @@ or NIL on other implementations."
                    #-(and sbcl x86-64 64-bit little-endian)
                    (mlen (a b) (%match-len data a b n))
                    (ins (q h)
+                     (declare (type fixnum q h))
                      (let ((old (aref head h)))
+                       (declare (type fixnum old))
                        (setf (aref head h) q)
                        (when chained (setf (aref prev q) old))))
                    (probe-ok (cand pos best-len)
+                     (declare (type fixnum cand pos best-len))
                      #+(and sbcl x86-64 64-bit little-endian)
                      (cond
                        ;; Once BEST-LEN is long enough, an 8-byte compare
@@ -534,33 +537,41 @@ or NIL on other implementations."
                      #-(and sbcl x86-64 64-bit little-endian)
                      t)
                    (find-match (pos h)
+                     (declare (type fixnum pos h))
                      (let ((cand (aref head h)) (best-len 0) (best-dist 0))
+                       (declare (type fixnum cand best-len best-dist))
                        ;; C checks the last distance before walking the
                        ;; chain.  A good hit also raises BEST-LEN, which
                        ;; makes PROBE-OK reject more chain candidates.
                        (when (plusp last-dist)
                          (let ((prev (- pos last-dist)))
+                           (declare (type fixnum prev))
                            (when (and (>= prev 0) (<= last-dist window)
                                       (probe-ok prev pos best-len))
                              (let ((ml (mlen prev pos)))
+                               (declare (type fixnum ml))
                                (when (> ml best-len)
                                  (setf best-len ml best-dist last-dist))))))
                        (if chained
                            (let ((chain max-chain))
+                             (declare (type fixnum chain))
                              (loop while (and (/= cand #xFFFFFFFF) (> chain 0)) do
                                (when (> (- pos cand) window) (return))
                                (when (probe-ok cand pos best-len)
                                  (let ((ml (mlen cand pos)))
+                                   (declare (type fixnum ml))
                                    (when (> ml best-len)
                                      (setf best-len ml best-dist (- pos cand)))))
-                               (setf cand (aref prev cand)) (decf chain)))
+                               (setf cand (the fixnum (aref prev cand))) (decf chain)))
                            (when (and (/= cand #xFFFFFFFF) (<= (- pos cand) window))
                              (when (probe-ok cand pos best-len)
                                (let ((ml (mlen cand pos)))
+                                 (declare (type fixnum ml))
                                  (when (> ml best-len)
                                    (setf best-len ml best-dist (- pos cand)))))))
                        (values best-len best-dist)))
                    (emit-normal (best-len best-dist inserted h)
+                     (declare (type fixnum best-len best-dist h))
                      (unless inserted (ins p h))
                      (if (>= best-len min-match)
                          (progn
@@ -1615,16 +1626,13 @@ dictionary at q10/q11."
     (10 '(:max-chain 256 :lazy t :use-dict t :short-dist t))
     (t '(:max-chain 512 :lazy t :use-dict t :short-dist t))))
 
-(defun compress (input &key (quality 11))
-  "Compress INPUT to a brotli stream.  QUALITY is an effort level 0..11:
-0-1 use the fast-fragment matcher, 2-4 a short greedy hash chain with the
-trivial entropy writer, and high levels use lazy matching, a wider chain, and
-dictionary-assisted matching.  The stored fallback is only built when the
-entropy-coded candidates are not already smaller than the input."
-  (let* ((data (b:to-octets input))
-         (n (length data))
-         (params (quality-params quality)))
-    (if (or (eq (getf params :mode) :stored) (incompressible-p data))
+(defun %compress-bytes (data n params)
+  "The COMPRESS selection (entropy candidates plus stored fallback),
+returning fresh octets.  Shared by COMPRESS and COMPRESS-INTO."
+  (declare (type (simple-array (unsigned-byte 8) (*)) data)
+           (type fixnum n)
+           (type list params))
+  (if (or (eq (getf params :mode) :stored) (incompressible-p data))
         (compress-stored data)
         (let* ((max-chain (getf params :max-chain 128))
                (lazy (getf params :lazy t))
@@ -1673,4 +1681,44 @@ entropy-coded candidates are not already smaller than the input."
           (when (>= (length best) (+ n 32))
             (let ((stored (compress-stored data)))
               (when (< (length stored) (length best)) (setf best stored))))
-          best))))
+          best)))
+
+(defun compress (input &key (quality 11))
+  "Compress INPUT to a brotli stream.  QUALITY is an effort level 0..11:
+0-1 use the fast-fragment matcher, 2-4 a short greedy hash chain with the
+trivial entropy writer, and high levels use lazy matching, a wider chain, and
+dictionary-assisted matching.  The stored fallback is only built when the
+entropy-coded candidates are not already smaller than the input."
+  (let* ((data (b:to-octets input))
+         (n (length data))
+         (params (quality-params quality)))
+    (%compress-bytes data n params)))
+
+(defun compress-into (input output &key (start 0) (end (length output))
+                                     (quality 11))
+  "Compress INPUT into OUTPUT[START..END), writing bytes in place without
+allocating the result.  Returns the end offset.  Size OUTPUT with
+(MAX-COMPRESSED-SIZE (LENGTH INPUT)); smaller buffers signal
+BROTLI-OUTPUT-OVERFLOW.  Stored (incompressible) inputs encode directly into
+OUTPUT; entropy-coded inputs use a bounded temporary that is copied once."
+  (check-type output (simple-array (unsigned-byte 8) (*)))
+  (check-type start fixnum) (check-type end fixnum)
+  (assert (<= 0 start end (length output)) (start end)
+          "brotli: invalid output range ~D..~D for ~D bytes" start end
+          (length output))
+  (let* ((data (b:to-octets input))
+         (n (length data))
+         (params (quality-params quality)))
+    (if (or (eq (getf params :mode) :stored) (incompressible-p data))
+        (let ((w (b:make-bwr-into output start end)))
+          (compress-stored data :w w)
+          (b:bwr-pos w))
+        (let ((best (%compress-bytes data n params)))
+          (let ((len (length best)))
+            (when (> (+ start len) end)
+              (error 'brotli-output-overflow
+                     :msg (format nil "brotli: output buffer too small (needs ~D bytes)"
+                                  (+ start len))
+                     :needed (+ start len)))
+            (replace output best :start1 start)
+            (+ start len))))))

@@ -12,6 +12,11 @@
   (:report (lambda (c s) (format s "brotli: ~a" (brotli-error-msg c)))))
 (defun berr (fmt &rest a) (error 'brotli-error :msg (apply #'format nil fmt a)))
 
+(define-condition brotli-output-overflow (brotli-error)
+  ((needed :initarg :needed :reader brotli-output-overflow-needed))
+  (:documentation "Signalled by COMPRESS-INTO/DECOMPRESS-INTO when the caller
+buffer is too small.  NEEDED is the required end offset when known."))
+
 ;;; ---- WBITS (window) header (RFC 7932 9.1) -----------------------------
 (defun read-wbits (r)
   (if (zerop (b:rbit r)) 16
@@ -26,6 +31,20 @@
         ((<= 10 wbits 16) (b:wbits w 1 1) (b:wbits w 0 3) (b:wbits w (- wbits 8) 3))
         (t (berr "unsupported WBITS ~d" wbits))))
 
+(defun max-compressed-size (n)
+  "Upper bound on (LENGTH (COMPRESS INPUT)) for an N-octet INPUT.  Size
+COMPRESS-INTO output buffers with this: (make-array (max-compressed-size n)
+:element-type '(unsigned-byte 8)).
+Proof: the stored form needs WBITS (<= 7 bits) plus, per <= 16 MiB chunk,
+1 + 2 + 24 + 1 header bits plus byte-alignment (<= 35 bits, i.e. 5 bytes),
+plus a 2-bit final empty block.  The entropy form is kept only when shorter
+than N + 32 (see COMPRESS), and the stored-vs-entropy comparison keeps the
+smaller, so the total never exceeds N + MAX(32, 5 * chunks + 2)."
+  (check-type n fixnum)
+  (assert (>= n 0) (n))
+  (let ((chunks (if (zerop n) 0 (ceiling n #.(ash 1 24)))))
+    (+ n (max 32 (+ 2 (* 5 chunks))))))
+
 ;;; ---- decompress -------------------------------------------------------
 (defun %out () (make-outbuf (make-array 4096 :element-type '(unsigned-byte 8))))
 (defun %append (out src)
@@ -34,15 +53,30 @@
     (replace (outbuf-data out) src :start1 pos)
     (setf (outbuf-pos out) (+ pos n))))
 
+(defun %decode-stream (r out)
+  "Decode one stream from R into OUT (growable or bounded).  Returns OUT."
+  (let ((window (- (ash 1 (read-wbits r)) 16))
+        ;; distance ring buffer: 4 slots + rolling write index (slot 4),
+        ;; pre-seeded with 4 pushes so the initial last distances are 16,15,11,4.
+        (rb (make-array 5 :element-type 'fixnum
+                         :initial-contents '(16 15 11 4 4))))
+    (%decode-blocks r out window rb)
+    out))
+
 (defun %decompress (r)
   "Decode a brotli stream from the reader R."
-  (let* ((out (%out))
-         (window (- (ash 1 (read-wbits r)) 16))
-         ;; distance ring buffer: 4 slots + rolling write index (slot 4),
-         ;; pre-seeded with 4 pushes so the initial last distances are 16,15,11,4.
-         (rb (make-array 5 :element-type 'fixnum
-                          :initial-contents '(16 15 11 4 4))))
-    (loop named blocks do
+  (let ((out (%decode-stream r (%out))))
+    (let ((data (outbuf-data out)) (pos (outbuf-pos out)))
+      (if (= pos (length data)) data (subseq data 0 pos)))))
+
+(defun %decode-blocks (r out window rb)
+  "Decode meta-blocks from R into OUT; RB is the stream-wide distance ring.
+Shared by DECOMPRESS (growable OUT) and DECOMPRESS-INTO (bounded OUT)."
+  (declare (type b:brd r) (type outbuf out)
+           (type (simple-array fixnum (*)) rb)
+           (type fixnum window)
+           (optimize (speed 3) (safety 0)))
+  (loop named blocks do
       (let ((islast (b:rbit r)))
         (when (and (= islast 1) (= (b:rbit r) 1)) (return-from blocks)) ; ISLAST + ISLASTEMPTY
         (let ((mnib (b:rbits r 2)))
@@ -77,9 +111,7 @@
                   (when (= islast 1)
                     (%grow-exact out (+ (outbuf-pos out) mlen)))
                   (decode-compressed-meta-block r out mlen window rb)))))))
-        (when (= islast 1) (return-from blocks))))
-    (let ((data (outbuf-data out)) (pos (outbuf-pos out)))
-      (if (= pos (length data)) data (subseq data 0 pos)))))
+        (when (= islast 1) (return-from blocks)))))
 
 (defun decompress (input)
   "Decode a brotli stream (RFC 7932).  Returns OCTETS.  Handles uncompressed and
@@ -94,15 +126,49 @@ static dictionary span the whole stream."
     #-(and sbcl little-endian)
     (%decompress (b:make-brd data))))
 
+(defun decompress-into (input output &key (start 0) (end (length output))
+                                          (istart 0) (iend (length input)))
+  "Decode the brotli stream in INPUT[ISTART..IEND) into OUTPUT[START..END),
+writing bytes in place without allocating the result.  Returns the end
+offset.  Signals BROTLI-OUTPUT-OVERFLOW when END - START is too small, and
+BROTLI-ERROR on truncated input.  Trailing input bytes after the stream are
+ignored, as in DECOMPRESS."
+  (check-type output (simple-array (unsigned-byte 8) (*)))
+  (check-type start fixnum) (check-type end fixnum)
+  (check-type istart fixnum) (check-type iend fixnum)
+  (assert (<= 0 start end (length output)) (start end)
+          "brotli: invalid output range ~D..~D for ~D bytes" start end
+          (length output))
+  (let ((data (b:to-octets input)))
+    (assert (<= 0 istart iend (length data)) (istart iend)
+            "brotli: invalid input range ~D..~D for ~D bytes" istart iend
+            (length data))
+    #+(and sbcl little-endian)
+    (sb-sys:with-pinned-objects (data output)
+      (let ((r (b:make-brd data istart iend)))
+        (setf (b:brd-sap r) (sb-sys:vector-sap data))
+        (let ((out (make-outbuf output)))
+          (setf (outbuf-pos out) start (outbuf-limit out) end)
+          (%decode-stream r out)
+          (outbuf-pos out))))
+    #-(and sbcl little-endian)
+    (let ((r (b:make-brd data istart iend))
+          (out (make-outbuf output)))
+      (setf (outbuf-pos out) start (outbuf-limit out) end)
+      (%decode-stream r out)
+      (outbuf-pos out))))
+
 ;;; ---- compress (uncompressed/stored meta-blocks) -----------------------
 (defconstant +mlen-max+ #xFFFFFF)   ; 6 nibbles
 
-(defun compress-stored (input)
+(defun compress-stored (input &key (w nil w-p))
   "Encode INPUT as a valid brotli stream of uncompressed (stored) meta-blocks.
 Reference-decodable; no actual compression.  Used as the fallback when entropy
-coding would not shrink the data (see COMPRESS in encode.lisp)."
+coding would not shrink the data (see COMPRESS in encode.lisp).  With W, a
+caller-owned (possibly bounded) writer, the stream is written there and W is
+returned; otherwise a fresh writer is used and the bytes are returned."
   (let* ((data (b:to-octets input)) (n (length data))
-         (w (b:make-bwr (max 1024 (+ n 1024)))))
+         (w (if w-p w (b:make-bwr (max 1024 (+ n 1024))))))
     (write-wbits w 16)
     (if (zerop n)
         (progn (b:wbits w 1 1) (b:wbits w 1 1))                          ; ISLAST + ISLASTEMPTY
@@ -120,4 +186,4 @@ coding would not shrink the data (see COMPRESS in encode.lisp)."
               (incf pos chunk)))
           (b:wbits w 1 1) (b:wbits w 1 1)))                             ; final empty last block
     (b:w-align w)
-    (b:bwr-result w)))
+    (if w-p w (b:bwr-result w))))
