@@ -229,6 +229,36 @@ least eight bytes of slack at the current position (see W-ENSURE)."
       (setf acc (ash acc (* -8 emit)))
       (setf nbits (logand nbits 7)))
     (setf (bwr-acc w) acc (bwr-nbits w) nbits (bwr-pos w) pos)))
+(declaim (inline %wbits-raw-pm))
+(defun %wbits-raw-pm (w v n)
+  "PRE-MASKED writer: V must already satisfy 0 <= V < 2^N (the writer's
+hot paths emit reversed codes / extra values from width-exact tables).
+No mask-table load, no logand; the call sites that can carry a negative
+or un-masked value (the special-distance offsets) keep using %WBITS-RAW."
+  (declare (type bwr w) (type fixnum v n)
+           (optimize (speed 3) (safety 0)))
+  (let* ((prev (bwr-nbits w))
+         (acc (logior (the (unsigned-byte 64) (bwr-acc w))
+                      (the (unsigned-byte 32) (ash v prev))))
+         (nbits (+ prev n))
+         (emit (ash nbits -3))
+         (pos (bwr-pos w)))
+    (declare (type (unsigned-byte 64) acc) (type fixnum nbits pos emit)
+             (type (integer 0 7) prev))
+    (when (plusp emit)
+      (let ((out (bwr-out w)))
+        (declare (type (simple-array (unsigned-byte 8) (*)) out))
+        #+(and sbcl little-endian)
+        (sb-sys:with-pinned-objects (out)
+          (setf (sb-sys:sap-ref-64 (sb-sys:vector-sap out) pos) acc))
+        #-(and sbcl little-endian)
+        (loop for i below emit
+              do (setf (aref out (+ pos i))
+                       (logand (ash acc (* -8 i)) #xff))))
+      (incf pos emit)
+      (setf acc (ash acc (* -8 emit)))
+      (setf nbits (logand nbits 7)))
+    (setf (bwr-acc w) acc (bwr-nbits w) nbits (bwr-pos w) pos)))
 
 (defun w-ensure (w slack)
   "Ensure SLACK writable bytes after the current output position."
@@ -262,8 +292,7 @@ The caller must ensure two bytes per symbol plus eight bytes of slack."
                  (n (aref lengths sym))
                  (new-acc (logior acc
                                   (the (unsigned-byte 32)
-                                       (ash (the (unsigned-byte 32)
-                                                 (logand v (aref +masks+ n)))
+                                       (ash (the (unsigned-byte 32) v)
                                             nbits))))
                  (new-nbits (+ nbits n))
                  (emit (ash new-nbits -3)))

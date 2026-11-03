@@ -1253,9 +1253,9 @@ compression ratio for encoder throughput."
                     (setf (aref rb (logand ring-pos 3)) dist)
                     (setf (aref rb 4) (1+ ring-pos))))
                 (unless cmd-single
-                  (b:%wbits-raw w (aref cmd-rc csym) (aref cmd-ln csym)))
-                (b:%wbits-raw w ixv ixb)
-                (b:%wbits-raw w cxv cxb)
+                  (b:%wbits-raw-pm w (aref cmd-rc csym) (aref cmd-ln csym)))
+                (b:%wbits-raw-pm w ixv ixb)
+                (b:%wbits-raw-pm w cxv cxb)
                 (unless lit-single
                   (if (>= ins 16)
                       (b:w-emit-run w data lit-start (+ lit-start ins)
@@ -1266,8 +1266,8 @@ compression ratio for encoder throughput."
                                                (aref lit-ln sym))))))
                 (when (>= dcode 0)
                   (unless dist-single
-                    (b:%wbits-raw w (aref dist-rc dcode)
-                                  (aref dist-ln dcode)))
+                    (b:%wbits-raw-pm w (aref dist-rc dcode)
+                                                     (aref dist-ln dcode)))
                   (b:%wbits-raw w dxv dxb))))))))))
 
 ;;; ---- compressed meta-block --------------------------------------------
@@ -1314,8 +1314,8 @@ histograms.  The MLEN header must already have been written."
                    `(unless cmd-single
                       (let ((c ,code))
                         (declare (type fixnum c))
-                        (b:%wbits-raw w (aref cmd-rc (aref cmd-map c))
-                                      (aref cmd-ln (aref cmd-map c)))
+                        (b:%wbits-raw-pm w (aref cmd-rc (aref cmd-map c))
+                                         (aref cmd-ln (aref cmd-map c)))
                         (when (plusp ,nbits)
                           (b:%wbits-raw w ,extra ,nbits)))))
                  (emit-dist (code extra nbits)
@@ -1332,8 +1332,8 @@ histograms.  The MLEN header must already have been written."
                                       lit-rc lit-ln)
                         (loop for i from ,start below (+ ,start ,count)
                               do (let ((sym (aref data i)))
-                                   (b:%wbits-raw w (aref lit-rc sym)
-                                                 (aref lit-ln sym)))))))
+                                   (b:%wbits-raw-pm w (aref lit-rc sym)
+                                                    (aref lit-ln sym)))))))
         (dotimes (ci nc)
           (let* ((base (* 4 ci))
                  (ins (aref cv base))
@@ -1547,8 +1547,8 @@ list covering exactly this block."
                 (unless cmd-single
                   (b:%wbits-raw w (aref cmd-rc (aref recs (+ b 2)))
                                 (aref cmd-ln (aref recs (+ b 2)))))
-                (b:%wbits-raw w (aref recs (+ b 3)) (aref recs (+ b 4)))
-                (b:%wbits-raw w (aref recs (+ b 5)) (aref recs (+ b 6)))
+                (b:%wbits-raw-pm w (aref recs (+ b 3)) (aref recs (+ b 4)))
+                (b:%wbits-raw-pm w (aref recs (+ b 5)) (aref recs (+ b 6)))
                 (unless lit-single
                   ;; Long runs amortize the pin/state setup of the run
                   ;; writer; short runs are cheaper inline.
@@ -1564,8 +1564,8 @@ list covering exactly this block."
                     (unless dist-single
                       (b:%wbits-raw w (aref dist-rc dcode)
                                     (aref dist-ln dcode)))
-                    (b:%wbits-raw w (aref recs (+ b 8))
-                                  (aref recs (+ b 9))))))))))))
+                    (b:%wbits-raw-pm w (aref recs (+ b 8))
+                                     (aref recs (+ b 9))))))))))))
 
 (defun command-output-length (cmd)
   (+ (first cmd) (third cmd)))

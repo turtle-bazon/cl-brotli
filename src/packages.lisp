@@ -5,7 +5,7 @@
            #:peek-bits #:bits-available
            #:brd-bytes #:brd-pos #:brd-end #:brd-acc #:brd-nbits #:brd-sap #:%word-at
            #:bwr #:make-bwr #:wbits #:w-align #:w-bytes #:w-bytes-range #:bwr-out
-           #:w-ensure #:%wbits-raw #:w-emit-run #:make-bwr-into
+           #:w-ensure #:%wbits-raw #:%wbits-raw-pm #:w-emit-run #:make-bwr-into
            #:bwr-pos #:bwr-limit #:bwr-result))
 (defpackage #:cl-brotli.lisp
   (:use #:cl)
