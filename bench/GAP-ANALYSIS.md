@@ -374,6 +374,57 @@ lever in order of expected ratio value:
    alphabet): bigger (new command alphabet in the writer + cluster
    algorithm), only after (1).
 
+## Shipped 4 Nov (late): literal context modeling (rev 98) — the q5 cap is fixed
+
+The (1) above, done.  All three of C's decision paths ported from
+encode.c — and the key simplification discovered on the way: every
+ChooseContextMap outcome uses a STATIC 64-entry map
+(kStaticContextMapSimpleUTF8 / kStaticContextMapContinuation /
+kStaticContextMapComplexUTF8), so NO clustering (cluster.c) is needed,
+and the decoder already reads every piece of the format (cmapl over
+64*nbl-l, READ-CONTEXT-MAP, per-context lit-trees, %lit-context with
+mode 2 = UTF8 on +lut0+/+lut1+).  Encoder-only work:
+
+* literal-contexts: complex-map path first (n >= 1 MiB, C's entropy
+  gates, K=13), else bigram-prefix analysis -> K in {1,2,3} with the
+  quality-dependent entropy[3] below q7;
+* plan-commands: K*256 literal frequencies, per-literal (p1,p2) UTF8
+  context using the decoder's own LUTs (guaranteed agreement);
+* complex writer: context mode 2, NTREESL via write-nbltypes (inverse
+  of READ-NBLTYPES), the64-entry map with RLEMAX=0/no-IMTF, K literal
+  trees, per-literal tree selection (single-symbol context trees emit
+  nothing, mirroring lit-single); K=1 keeps the byte-exact old path.
+
+Measured vs r95 (interleaved sweeps,5 corpora x1 MiB):
+
+level | html | json | text | source | binary | geomean | speed
+q0-q2 | byte-identical (different writer)                      | ~1.0
+q5    | -0.93% | +4 B | -1.97% | -1.64% | same | -0.9% | -4.2% geo
+q6    | -0.76% | +6 B | -2.00% | -1.64% | same |        |
+q7    | -0.39% |+19 B | -2.02% | -1.62% | same |        |
+q9    | -0.24% |+22 B | -2.09% | -1.61% | same |        |
+q10   | -0.18% |+15 B | -1.75% | -1.60% | same |        | ~1.0
+q11   | -0.16% |+19 B | -1.75% | -1.60% | same |        | ~1.0
+
+BINARY is byte-identical everywhere: its entropy gates pick K=1
+exactly as C would.  JSON's +4..22 B is the map/tree overhead on
+data with no context structure.
+
+**HTML Q5: 1.110 -> 1.0999 - inside the 10% cap for the first time**
+(193041 vs C 175500).  Remaining over-cap cells: none at q0-q9;
+q10/q11 stay 1.12-1.20 (the context-modeling feature gap there is
+now smaller: html 152965/132230 = 1.157 at q11).
+
+Costs: compression -4.2% geomean at q5-q9 (the per-literal context
+select C pays too); decode of OUR streams -5..-26% on context levels
+(the single-lit-tree fast path no longer applies - C's streams always
+paid this, and the dec-of-C column, i.e. decode of C's streams, is
+unchanged).
+
+Next: GREEDY SUB-BLOCK SPLITTING (2 above) for the rest of the q5+
+gap (clustered sub-blocks + block-switch alphabet in the writer;
+decoder already supports NBLTYPES>1, block lengths and switch codes).
+
 ## Attempted 3 Nov 2026: the local-state command loop (step 1 above)
 
 An implementation of the fast command loop as a separate
