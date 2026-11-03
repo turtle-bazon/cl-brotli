@@ -163,6 +163,34 @@ earlier two-literal-batching and bucket-hasher reverts). Rev 81's
 length-tree port needed only one code fix en route: a
 `(let (left right))` cannot declare NIL-typed slots FIXNUM.
 
+## Attempted 4 Nov (evening): the %wbits-pack VOP — prototype shape correct,
+## the 3-result tuple did not land in the harness; reverted
+
+Wrote the pack+flush VOP following the in-tree `%match-len-sap` pattern
+(defknown with the raw unsigned-reg for the accumulator, the SAP for the
+pinned out buffer, a positive-fixnum outpos, 3 results) plus a LISP
+runtime fallback in src/package.lisp mirroring the VOP (the same rule as
+the match-len hook). The VOP *compiles* and calls dispatch, but the
+harness only saw a single zero result: SBCL's multiple-value VOP results
+require the result-tuple VALUE layout (each result must come out as a
+properly tagged register sequence; bit fields like the nbits result want
+an explicit `inst_shl`, 2) — and the third result got lost. The
+implementation is mechanical but the numeric encode needs its own
+careful session; it is recorded here with the exact defknown/body shape
+(at hg r91 in the notes) so the next session lands the *results
+tuple* correctly and re-measures.
+
+The verify steps for the next pass:
+1. In `define-vop`, use (:results (racc rnbits rpos)) with
+   (:result-types ...) or just (:results) fixnums, and emit all three
+   registers as TAGGED results (each with `inst shl ... 1` or an
+   `(inst mov r1 raw-value)` and one tag);
+2. check that the LISP interpreter used in --script top-level forms
+   calls the function through the runtime LISP body BOTH when the VOP
+   applies AND when it doesn't (the correct fallback path);
+3. keep the `validate%wbits-raw-pm vs %wbits-pack` bitwise harness from
+   this session's record (the correctness kernel is already written).
+
 ## Attempted 3 Nov 2026: the local-state command loop (step 1 above)
 
 An implementation of the fast command loop as a separate
