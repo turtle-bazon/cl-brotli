@@ -3,10 +3,18 @@
   (:import-from #:cl-brotli.lisp
                 #:compress
                 #:decompress
-                #:brotli-error)
+                #:brotli-error
+                #:compress-into
+                #:decompress-into
+                #:max-compressed-size
+                #:brotli-output-overflow)
   (:export #:compress
            #:decompress
-           #:brotli-error))
+           #:brotli-error
+           #:compress-into
+           #:decompress-into
+           #:max-compressed-size
+           #:brotli-output-overflow))
 
 ;;; The %MATCH-LEN-SAP VOP replaces calls compiled after src/vops.lisp; this
 ;;; runtime definition keeps FUNCALL and pre-VOP call sites working.

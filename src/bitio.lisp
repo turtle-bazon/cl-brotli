@@ -176,12 +176,23 @@ does not allocate an intermediate vector."
   (out (make-array capacity :element-type '(unsigned-byte 8))
    :type (simple-array (unsigned-byte 8) (*)))
   (pos 0 :type fixnum)
-  (acc 0 :type (unsigned-byte 64)) (nbits 0 :type (integer 0 7)))
+  (acc 0 :type (unsigned-byte 64)) (nbits 0 :type (integer 0 7))
+  ;; Absolute output ceiling for COMPRESS-INTO; NIL means growable.  When set,
+  ;; OUT is caller-owned and must never be replaced.
+  (limit nil :type (or null fixnum)))
 
 (declaim (inline %w-grow))
 (defun %w-grow (w need)
   (declare (type bwr w) (type fixnum need)
            (optimize (speed 3) (safety 0)))
+  ;; The class name is quoted: BWR is defined before CL-BROTLI.LISP's
+  ;; BROTLI-OUTPUT-OVERFLOW (serial system), so the class is resolved at
+  ;; signal time, when the whole system is loaded.
+  (when (and (bwr-limit w) (> need (bwr-limit w)))
+    (error 'cl-brotli.lisp::brotli-output-overflow
+           :msg (format nil "brotli: output buffer too small (needs ~D bytes)"
+                        need)
+           :needed need))
   (let ((out (bwr-out w)))
     (when (> need (length out))
       (let ((new (make-array (max need (* 2 (length out)))
@@ -320,3 +331,15 @@ The caller must ensure two bytes per symbol plus eight bytes of slack."
   "The bytes written so far as a fresh simple octet vector."
   (declare (type bwr w))
   (subseq (bwr-out w) 0 (bwr-pos w)))
+
+(defun make-bwr-into (array start end)
+  "A bounded writer over the caller-owned ARRAY, writing at START and never
+growing past END.  Excess writes signal BROTLI-OUTPUT-OVERFLOW."
+  (check-type array (simple-array (unsigned-byte 8) (*)))
+  (check-type start fixnum) (check-type end fixnum)
+  (assert (<= 0 start end (length array)) (start end)
+          "brotli: invalid output range ~D..~D for ~D bytes" start end
+          (length array))
+  (let ((w (make-bwr 0)))
+    (setf (bwr-out w) array (bwr-pos w) start (bwr-limit w) end)
+    w))

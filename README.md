@@ -39,6 +39,24 @@ Roswell SBCL 2.6.9 via `bench/run.sh`.
 512-deep hash chain, and dictionary-assisted matches). The stored fallback is
 still selected automatically when entropy coding would expand the input.
 
+## Allocation-free API
+
+```lisp
+(cl-brotli:compress-into *data* *out* :quality 5) ; => end offset in *out*
+(cl-brotli:decompress-into *stream* *out*)        ; => end offset in *out*
+(cl-brotli:max-compressed-size (length *data*))  ; size *out* for compress-into
+```
+
+`compress-into` / `decompress-into` write into a caller-owned
+`(simple-array (unsigned-byte 8) (*))` at `:start`, return the end offset, and
+signal `cl-brotli:brotli-output-overflow` when the range is too small, so
+long-lived buffers can be reused across calls. Results are byte-identical to
+the one-shot API. Incompressible inputs (stored blocks) encode straight into
+the caller's buffer with no temporary; on 1 MiB of `/dev/urandom` output,
+`compress-into` halves time and conses nothing (one-shot: ~2 ms / 2 MB),
+and `decompress-into` conses nothing (one-shot: ~1 MB of growth overshoot).
+Entropy-coded inputs still use a bounded temporary for candidate selection.
+
 ## Reference bindings
 
 `cl-brotli-reference` is a test-only system that wraps the system Brotli C
