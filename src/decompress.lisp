@@ -243,6 +243,93 @@ caller has already validated DISTANCE."
 
 (declaim (inline out-copy-preallocated))
 
+(defun %decode-lit-run (r out pos count tree)
+  "Decode COUNT literals from R into OUT at POS using the single literal
+TREE, keeping the bit reservoir, bit count, read position, and output
+position in locals for the whole run.  The caller has reserved POS+COUNT
+bytes of capacity.  Returns the position after the last literal."
+  (declare (type b:brd r)
+           (type (simple-array (unsigned-byte 8) (*)) out)
+           (type fixnum pos count)
+           (type huff tree)
+           (optimize (speed 3) (safety 0)))
+  (let ((table (huff-table tree)) (mask (huff-mask tree))
+        (tbits (huff-table-bits tree))
+        (subs (huff-subtables tree))
+        (acc (b:brd-acc r)) (nbits (b:brd-nbits r)) (p (b:brd-pos r))
+        #+sbcl (sap (b:brd-sap r)) #-sbcl (sap nil)
+        (end (b:brd-end r)))
+    (declare (type (or null (simple-array (unsigned-byte 16) (*))) table)
+             (type fixnum mask tbits acc nbits p end)
+             (type (or null simple-vector) subs)
+             #+sbcl (type (or null sb-sys:system-area-pointer) sap)
+             #-sbcl (type null sap)
+             )
+    (when (null table)
+      ;; Single-symbol tree: every literal is the same byte.
+      (let ((sym (huff-single tree)))
+        (declare (type fixnum sym))
+        (dotimes (k count) (setf (aref out pos) sym) (incf pos))
+        (setf (b:brd-acc r) acc (b:brd-nbits r) nbits (b:brd-pos r) p)
+        (return-from %decode-lit-run pos)))
+    (macrolet ((refill (need)
+                 `(unless (>= nbits ,need)
+                    #+sbcl
+                    (when (and sap (<= (+ p 8) end))
+                      (let* ((bytes (min 7 (ash (- 59 nbits) -3)))
+                             (m (aref b::+wide-masks+ (* 8 bytes)))
+                             (w (the fixnum
+                                     (logand (sb-sys:sap-ref-64 sap p) m))))
+                        (declare (type fixnum bytes m w))
+                        (setf acc (the fixnum
+                                       (logior acc
+                                               (the fixnum
+                                                    (ash w nbits))))
+                              nbits (+ nbits (* 8 bytes))
+                              p (+ p bytes))))
+                    (when (< nbits ,need)
+                      ;; End-of-stream tail: fewer bits remain than the
+                      ;; primary table width, but the code itself may still
+                      ;; fit.  Hand the rest of the run over to the generic
+                      ;; reader, which decodes the tail bit-by-bit.
+                      (setf (b:brd-acc r) acc (b:brd-nbits r) nbits (b:brd-pos r) p)
+                      (loop for j from k below count do
+                        (setf (aref out pos) (read-huff r tree))
+                        (incf pos))
+                      (setf acc (b:brd-acc r) nbits (b:brd-nbits r) p (b:brd-pos r))
+                      (return-from %decode-lit-run pos)))))
+      (dotimes (k count)
+        (refill tbits)
+        (let ((entry (aref table (logand acc mask))))
+          (declare (type fixnum entry))
+          (let ((len (logand entry 15)))
+            (declare (type fixnum len))
+            (cond
+              ((plusp len)
+               (setf acc (ash acc (- len))
+                     nbits (- nbits len)
+                     (aref out pos) (ash entry -4))
+               (incf pos))
+              ((plusp entry)
+               ;; Secondary table: consume tbits bits, then 5 more.
+               (let ((sub (aref subs (1- (ash entry -4)))))
+                 (declare (type (simple-array (unsigned-byte 16) (*)) sub))
+                 (setf acc (ash acc (- tbits)) nbits (- nbits tbits))
+                 (refill 5)
+                 (let ((entry2 (aref sub (logand acc #x1F))))
+                   (declare (type fixnum entry2))
+                   (let ((rem (logand entry2 15)))
+                     (declare (type fixnum rem))
+                     (unless (plusp rem)
+                       (berr "invalid prefix code"))
+                     (setf acc (ash acc (- rem))
+                           nbits (- nbits rem)
+                           (aref out pos) (ash entry2 -4))
+                     (incf pos)))))
+              (t (berr "invalid prefix code"))))))
+      (setf (b:brd-acc r) acc (b:brd-nbits r) nbits (b:brd-pos r) p)
+      pos)))
+
 (defun decode-compressed-meta-block (r out mlen window rb)
   "Decode one compressed meta-block of MLEN bytes into OUT.  RB is the 4-entry
 distance ring buffer (persists across the stream)."
@@ -321,10 +408,8 @@ distance ring buffer (persists across the stream)."
              (if single-lit-tree
                  (if single-lblock
                      ;; The common q0/q1 C stream: one literal block, one
-                     ;; tree.  Hoist the block-switch test out of the loop.
-                     (dotimes (k ilen)
-                       (setf (aref data pos) (read-huff r single-lit-tree))
-                       (incf pos))
+                     ;; tree.  Local reservoir, no per-literal struct work.
+                     (setf pos (%decode-lit-run r data pos ilen single-lit-tree))
                      (dotimes (k ilen)
                        (blk-maybe-switch r blkL)
                        (setf (aref data pos) (read-huff r single-lit-tree))

@@ -21,10 +21,11 @@
 (defstruct (brd (:constructor make-brd (bytes &optional (pos 0) (end (length bytes)))))
   (bytes nil :type octets) (pos 0 :type fixnum) (end 0 :type fixnum)
   ;; Bit accumulator: ACC holds NBITS unconsumed bits, least-significant bit
-  ;; first.  A 64-bit reservoir lets %FILL-BITS load four input bytes at a
-  ;; time instead of one; NBITS stays <= 55 after a refill because callers
-  ;; never request more than 24 bits.
-  (acc 0 :type (unsigned-byte 64)) (nbits 0 :type (integer 0 63))
+  ;; first.  NBITS <= 59 at all times so ACC always fits a fixnum; every
+  ;; refill adds at most 59-NBITS bits.  All shifts/masks on ACC are fixnum
+  ;; operations: no bignums, no generic arithmetic.  Callers never request
+  ;; more than 24 bits.
+  (acc 0 :type fixnum) (nbits 0 :type (integer 0 59))
   (sap nil))
 
 (defun r-eof-p (r)
@@ -47,27 +48,43 @@
            (optimize (speed 3) (safety 0)))
   (loop while (< (brd-nbits r) n) do
     (let ((pos (brd-pos r)) (end (brd-end r)) (nbits (brd-nbits r)))
-      (declare (type fixnum pos end) (type (integer 0 63) nbits))
+      ;; The loop guard implies NBITS < N <= 24, so at least 4 refill
+      ;; bytes always fit under the 59-bit fixnum bound.
+      (declare (type fixnum pos end) (type (integer 0 23) nbits))
       (cond
         ((>= pos end) (error "brotli: end of input"))
         #+(and sbcl little-endian)
         ((and (brd-sap r) (<= (+ pos 8) end))
-         (let* ((bytes (min 7 (ash (- 63 nbits) -3)))
+         ;; Refill with the widest 8-byte read that still keeps ACC below
+         ;; 2^59, so every shift and logior below stays in fixnum.
+         (let* ((bytes (min 7 (ash (- 59 nbits) -3)))
+                ;; NBITS < N <= 24 here, so at least 4 bytes always fit.
                 (mask (aref +wide-masks+ (* 8 bytes)))
-                (word (logand (sb-sys:sap-ref-64 (brd-sap r) pos) mask)))
-           (setf (brd-acc r) (logior (brd-acc r) (ash word nbits)))
+                (word (the fixnum
+                           (logand (sb-sys:sap-ref-64 (brd-sap r) pos)
+                                   mask))))
+           (setf (brd-acc r)
+                 (the fixnum
+                      (logior (brd-acc r)
+                              (the fixnum (ash word nbits)))))
            (incf (brd-nbits r) (* 8 bytes))
            (incf (brd-pos r) bytes)))
         ((<= (+ pos 4) end)
          (setf (brd-acc r)
-               (logior (brd-acc r)
-                       (ash (%word-at (brd-bytes r) pos) nbits)))
+               (the fixnum
+                    (logior (brd-acc r)
+                            (the fixnum
+                                 (ash (the fixnum
+                                           (%word-at (brd-bytes r) pos))
+                                      nbits)))))
          (incf (brd-nbits r) 32)
          (incf (brd-pos r) 4))
         (t
          (setf (brd-acc r)
-               (logior (brd-acc r)
-                       (ash (aref (brd-bytes r) pos) nbits)))
+               (the fixnum
+                    (logior (brd-acc r)
+                            (the fixnum
+                                 (ash (aref (brd-bytes r) pos) nbits)))))
          (incf (brd-nbits r) 8)
          (incf (brd-pos r)))))))
 

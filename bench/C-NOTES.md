@@ -815,3 +815,56 @@ Two C-shaped variants were measured and are not used:
   pass and keeps the matcher loop small. Reverted; the remaining win would
   have to come from a sink that plans out of line and allocates lazily, which
   no longer looked like a clear win.
+
+## Decoder bit reader: fixnum reservoir (bignum arithmetic removed)
+
+`%fill-bits` assembled its wide refill from `(unsigned-byte 64)` values.
+SBCL could not prove that the shifted word fit a fixnum, so every refill
+emitted an out-of-line `ASH` call, a conditional
+`ALLOC-UNSIGNED-BIGNUM-IN-RDX`, and a generic `TWO-ARG-IOR`. In the decoder's
+inlined copy of the refill there were 108 such call sites; the flat profile
+showed `ASH` 3.0%, `TWO-ARG-IOR` 1.1%, and bignum allocation 0.9% of decode.
+
+The accumulator is now a `fixnum` with the invariant `NBITS <= 59`: each
+refill loads at most `59 - NBITS` bits, so every shift, mask, and logior
+stays in fixnum range. The refill is also `THE FIXNUM`-wrapped at each step.
+After the change the decoder body shrank from 36.6 KB to 27.6 KB and contains
+no bignum or generic-arithmetic calls on the per-symbol path (only the
+one-per-meta-block header reads and the end-of-stream slow path still call
+generic operators).
+
+## Decoder: local literal-run decode
+
+`%DECODE-LIT-RUN` decodes a run of literals with the reservoir, bit count,
+input position and output position in locals instead of round-tripping through
+the `BRD` struct per symbol, and refills from the input SAP directly. It is
+used when a meta-block has one literal block and one literal tree (q0/q1
+streams and most C streams).
+
+One correctness detail matters: a valid stream may end with a code shorter
+than the primary table width (`HUFFMAN_TABLE_BITS`), so fewer than
+`TABLE-BITS` bits can remain at the end of the last meta-block. `READ-HUFF`
+handles this with its slow bit-by-bit path; the fast run must too. When a SAP
+refill cannot supply `TABLE-BITS` bits, `%DECODE-LIT-RUN` hands the rest of the
+run to `READ-HUFF` instead of signalling end-of-input. Without this, valid
+q0/q5 streams decoded one literal short (caught by a 1 MiB generated-JSON
+round-trip, not by the unit suite).
+
+Measured (1 MiB, HTML/TEXT, this host): decode of C streams +3-8%, decode of
+cl-brotli streams +4-7%; the level-matched decompression geomean rises from
+about 0.66-0.68x to 0.68-0.73x of the C core. TEXT q0 lisp-stream decode is
+4.3-4.7 GiB/s.
+
+## Measured and reverted: SAP match-copy
+
+`%copy-match-bytes` was rewritten to copy through pinned SAPs with unaligned
+8/4/2-byte loads and stores (word size chosen by distance, so overlap is
+safe). It was correct, but net-negative: for long non-overlapping matches
+SBCL's `REPLACE` (`UB8-BASH-COPY`, vectorized memcpy) is faster than an
+8-byte scalar loop, and TEXT decode fell about 25%. Keeping the original
+seed-plus-double `REPLACE` scheme for overlapping copies is faster than any
+scalar loop tried. Reverted; the existing copy path remains.
+
+Encoder paths are untouched by this work: the q0-q9 compression gap is the
+structural one-pass-emission difference described above, not a local codegen
+tweak.
