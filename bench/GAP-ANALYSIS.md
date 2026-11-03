@@ -329,6 +329,51 @@ q5 splits into sub-blocks with separate trees; our writer uses one
 tree set per metablock.  That is the structural follow-up (alongside
 the r86-noted q10/q11 context-modeling gap).
 
+## Attempted 4 Nov (night): 64 KiB meta-block partitioning — measured, reverted
+
+First, an INSTRUMENTED-DECODER discovery (temporary *mb-log* in
+%decode-blocks, reverted): **C's one-shot encoder emits ONE meta-block
+for the whole 1 MiB input at every quality** (q5/q7/q9/q11 all logged
+a single 1048576-byte metablock).  ComputeLgBlock's 14/16/18 values
+only chunk the STREAMING path (BrotliEncoderCompressStream input
+blocks) — the bench's one-shot BrotliCompress does not chunk.  So C's
+q5 edge is entirely INTRA-metablock: DecideOverLiteralContextModeling
+(literal context modeling is on from quality >= 5: bigram-prefix
+analysis -> ChooseContextMap) plus BrotliBuildMetaBlockGreedy (sub-
+block splitting with block-switch commands), inside one meta-block.
+
+Experiment: add :mb-size to quality-params (q5/q6 = 65536) and route
+compress-entropy through the EXISTING partition-commands path (which
+splits on input bytes, exactly metablock semantics), so q5/q6 emit 16
+metablocks instead of 1 - histogram adaptation with zero new format
+code.  Measured vs r95 (5 corpora, 1 MiB):
+
+size q5 / q6: html -0.03% / -0.06% (THE CAP CASE: NEUTRAL),
+json -1.0% / -1.0%, binary -1.8% / -1.7%, source +0.3% / +0.3%,
+text +1.4% / +1.4%  -> geomean -0.24% (split, not a fix)
+compression speed: -10% geomean (all 10 cells < 1.0)
+OUR-decoder on our own q5/q6 streams: -22% to -61% (text q5 decode
+3294 -> 1292 MiB/s) - 16x the per-metablock read-huff/build-huff
+tree construction, which is invisible at 1 metablock/MiB but not at
+16.  (Independent finding: our DECODER's build-huff is slow enough
+that multi-metablock streams pay for it - a decode lever for any
+future multi-block work, and for >16 MiB inputs.)
+
+Reverted (tree back at r96).  The conclusion: html q5 does not need
+smaller histograms, it needs C's two INTRA-metablock features.  Next
+lever in order of expected ratio value:
+
+1. LITERAL CONTEXT MODELING at q5+ (C: DecideOverLiteralContextModeling,
+   bigram-prefix -> ChooseContextMap -> NTREESL in {1,2,3,6,10,13,...}):
+   the decoder ALREADY reads context maps (it decodes C's streams), so
+   this is encoder-writer work only - split the literal histogram by
+   (p1,p2) context, write NPOSTFIX-style context map, per-context
+   literal etrees, and track p1/p2 through plan-commands/emit.
+   Estimate: 3-6% on html-like data -> html q5 1.110 under the cap.
+2. GREEDY SUB-BLOCK SPLITTING (BrotliBuildMetaBlockGreedy + block-switch
+   alphabet): bigger (new command alphabet in the writer + cluster
+   algorithm), only after (1).
+
 ## Attempted 3 Nov 2026: the local-state command loop (step 1 above)
 
 An implementation of the fast command loop as a separate
