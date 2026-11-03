@@ -46,6 +46,28 @@ every quality — not a matcher-policy or stream-structure problem at q7+.
    to table-bits 17 / min-match 6: 254,417 bytes instead of 267,557 on HTML
    (−4.9%), same speed, 1.075x C q1 size.
 
+## Attempted 3 Nov 2026: the local-state command loop (step 1 above)
+
+An implementation of the fast command loop as a separate
+`%decode-simple-meta-block` with the reservoir kept in loop locals was
+written and fills/compiles, but SBCL 2.6.9 compiles three of the
+`macrolet`-expanded per-symbol readers (`GET-BITS`/`GET-SYMBOL`) into out-of-line
+function calls (`CALL CL-BROTLI.LISP::GET-SYMBOL in the disassembly) even
+though the macrolet is lexically in scope; at runtime this signals
+UNDEFINED-FUNCTION (the macrolet never becomes a function). Reproduced with
+both the original and a renamed/docstring-stripped variant. The same macrolet
+pattern works in a minimal standalone repro, so the trigger is
+size/shadowing-sensitive — worth a reduced reproducer filed against SBCL.
+
+For the next iteration, avoid `macrolet` here entirely and use this
+codebase's proven single-expansion pattern (the one %MATCH-LEN-SAP-FRAG
+relies on): three top-level inline readers `%RSYM-CMD`/`%RSYM-DIST`/`%
+RSYM-CMD`-shaped (one per call site — command/module/literal-tree/extra bits),
+each taking `(r tree acc nbits p)` and returning
+`(values symbol acc nbits p)`, with the end-of-stream fallback inside the
+reader itself. The WIP register/reader skeleton is preserved at
+`/tmp/opencode/decompress-fastloop.wip` (not in the tree) as a starting point.
+
 ## Decoder: the 0.30–0.48x band, cell by cell
 
 `sb-sprof` flat profile, decoding the C q0 HTML stream (1 MiB, 29k commands):
