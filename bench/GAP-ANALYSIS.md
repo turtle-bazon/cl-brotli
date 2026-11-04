@@ -1360,3 +1360,25 @@ Next: text q11 (0.50 - estimate+bt-do+two DP passes dominate),
 html/json 0.79 (z-iterate self + bt-do constant factors), and the
 q11 second-iteration candidate count (z-cands 3 -> 1 for pass 2,
 ratio margins are >=2.4%).
+
+## Rev 117: dictionary probe speed + q11 pass-2 candidate cut — speed 2/10 -> 4/10
+
+1. **dict-matches-at on SAP**: the 4-byte key now comes from
+   sap-ref-32 (same trick as bt-hash) instead of 4 byte arefs + shifts,
+   and *dict-index* got a type declaim so the bucket AREF open-codes
+   (was VECTOR-HAIRY).  ~9% of html q10 before, now ~5%.
+2. **q11 second iteration runs with z-cands 1 instead of 3**: with
+   exact costs from iteration 0 in hand, one queue entry keeps most of
+   the parse quality at明显 less pass-2 time (C re-runs all five; this
+   is a deliberate deviation).  z-cands is setf'd around the pass and
+   restored.
+
+**Gates (1 MiB vs C 1.0.9 core):**
+  ratio <= 1.10: 10/10 (q11 sizes moved up but hold: html 1.014,
+  json 1.015, source 1.031, text 1.081, binary 1.072).
+  speed >= 1.0x: **4/10** (was 2/10) - binary q10 1.68x / q11 1.84x,
+  source q11 1.13x, text q10 1.00x.  Near: html q11 0.93, json q11
+  0.94, source q10 0.94.  Behind: html q10 0.79, json q10 0.78,
+  text q11 0.54.
+  BOTH gates: binary q10/q11, source q11, text q10 (4 cells).
+  q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean.

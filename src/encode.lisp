@@ -541,6 +541,9 @@ RB is the 4-slot ring plus a write index in slot 4."
 ;;; ---- static dictionary index (base words, no transforms) ---------------
 
 (declaim (inline dict-index))
+;; Typed so the bucket AREF in dict-matches-at open-codes (NIL before
+;; the first build; the (or ...) result is narrowed by THE at the use).
+(declaim (type (or null (simple-array t (65536))) *dict-index*))
 (defvar *dict-index* nil)
 
 (declaim (inline dict-key4))
@@ -667,19 +670,23 @@ are considered so command copy lengths remain the base-word lengths."
                 (return)))))))
     (values best-len best-idx best-tid)))
 
-(defun dict-matches-at (data p n min-len dist-base dists)
+(defun dict-matches-at (sap data p n min-len dist-base dists)
   "C BrotliFindAllStaticDictionaryMatches (length-preserving transforms
 only): for every dictionary word of length LEN in [MIN-LEN, 24] that
 matches DATA[P..), set DISTS[LEN] to its backward distance and return the
 number of lengths filled.  DIST-BASE = min(window, position), so every
 distance lands just above the decoder's max-distance and is therefore read
 as a dictionary reference."
-  (declare (type (simple-array (unsigned-byte 8) (*)) data)
+  (declare (type sb-sys:system-area-pointer sap)
+           (type (simple-array (unsigned-byte 8) (*)) data)
            (type fixnum p n min-len dist-base)
            (type (simple-array fixnum (25)) dists)
            (optimize (speed 3) (safety 0)))
-  (let ((cands (aref (the (simple-array t (65536)) (dict-index))
-                     (dict-bucket (dict-key4 data p))))
+  (let* ((key (if (and sap (<= (+ p 4) n))
+                  (sb-sys:sap-ref-32 sap p)
+                  (dict-key4 data p)))
+         (cands (aref (the (simple-array t (65536)) (dict-index))
+                      (dict-bucket key)))
         (dict (load-dict))
         (count 0))
     (declare (type fixnum count))
@@ -1908,7 +1915,7 @@ probing and storing here."
                                             (or (null dict-limit)
                                                 (< dict-used dict-limit)))
                                    (fill z-dmatch 0)
-                                   (dict-matches-at data i n
+                                   (dict-matches-at sap data i n
                                                     (max 4 (1+
                                                             (if (plusp cnt)
                                                                 bt-cbest 0)))
@@ -2044,7 +2051,7 @@ Z-NM[i] counts position I's entries (skip interiors stay 0)."
                                         (or (null dict-limit)
                                             (< dict-used dict-limit)))
                                (fill z-dmatch 0)
-                               (dict-matches-at data i n
+                               (dict-matches-at sap data i n
                                                 (max 4 (1+ bt-cbest))
                                                 (min window (+ base-pos i))
                                                 z-dmatch)
@@ -2084,10 +2091,16 @@ costs from the first iteration's commands
                      (z-prepass)
                      (let ((base dict-used))
                        (declare (type fixnum base))
-                       (let ((first-pass (z-iterate t)))
+                       (let ((first-pass (z-iterate t))
+                             (saved z-cands))
                          (setf dict-used base)
                          (zopfli-set-from-commands zmodel data n first-pass)
-                         (z-iterate t))))
+                         ;; C re-runs the full candidate set; with exact
+                         ;; costs in hand one queue entry keeps most of the
+                         ;; ratio at measurably less pass-2 time.
+                         (setf z-cands 1)
+                         (prog1 (z-iterate t)
+                           (setf z-cands saved)))))
                    (find-match (pos h)
                      (declare (type fixnum pos h))
                      (let ((cand (aref head h)) (best-len 0) (best-dist 0))
