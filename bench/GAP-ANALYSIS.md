@@ -547,6 +547,39 @@ would touch only the <256 counts (~1% of q5 total) — not worth the
 code.  (Also: C's splitter entropy inputs go through the same math, so
 decisions stay C-aligned only if we keep the double logs.)
 
+## Rev 104: q6 unchained fix — NO swept cell exceeds the cap now
+
+Two findings in one pass:
+
+1. DISTANCE PARAMS (npostfix/ndirect): C's BrotliBuildMetaBlock
+   searches them per meta-block at q>=4; we hardcode (0,0).  Instead
+   of building the port, generated C's own streams for 5 corpora x
+   q4/5/7/9/11 and parsed the headers (temporary decoder instrumentation
+   reused): **C itself picks (0,0) on every corpus at q4-q9** — we are
+   already C-exact exactly where the cap battles are.  Only q11 picks
+   non-zero (binary postfix=3/direct=8, source 2/4, json 0/3) — a small
+   HQ-path parity gap to bundle with the zopfli/HQ-splitter work, not a
+   standalone build.  (The general port recipe would be: generalize
+   encode-distance via C's PrefixEncodeCopyDistance, dynamic dist
+   alphabet (+16 ndirect (ash 48 npostfix)) through plan-commands and
+   both dist-tree writers; our DECODER already reads arbitrary
+   npostfix/ndirect — the only ready-made part.)
+
+2. q6 chain: the chain-to-C-bucket ratio was q5 6/16, q6 8/32, q7
+   24/64 — q6 by far the most under-chained (0.25x), and html q6 was
+   the ONLY remaining cap violation (186493 vs C 166377 = 1.121).
+   max-chain 8 -> 16 (mirrors C's effective depth): all five corpora
+   smaller (html -6.19% -> **1.053**, source -1.45%, json -1.08%,
+   text -0.62%, binary -0.33%), q5/q7 byte-identical, q6 speed
+   -9..-15% (ratio-first trade).  150/150 + repro clean.
+
+** MILESTONE: after r104 no swept cell (5 corpora x q0,1,2,5,6,7,9,
+and previously q10,11) exceeds the 1.10 cap.  Worst cells now: html q5
+1.095, source/binary q2 ~1.09. **
+
+Optional follow-up (not taken — in cap and speed is scarce): q5 chain
+6 -> ~10 for headroom on html q5's thin 1.095 margin.
+
 ## Attempted 3 Nov 2026: the local-state command loop (step 1 above)
 
 An implementation of the fast command loop as a separate
