@@ -532,6 +532,21 @@ future move is porting that tree-store pair as a unit, not the count
 massage alone; the ported function above (with the uint32 notes) is
 the recipe to re-apply when that happens.  Reverted; tree clean at r101.
 
+## Data point: r100's speed cost is inherent, not a Lisp pathology
+
+Microbench: estimate-entropy over 704 counts = 8.0 us/call (~11 ns per
+double log2, including the float boxing and the sum loop) — essentially
+C's FastLog2 cost (C's table only accelerates values < 256; above that
+it calls libm log2 exactly as we do).  The greedy splitter makes ~3
+entropy calls per decision (2 combined + 1 current, each over the
+alphabet) at 1024/512-symbol intervals ≈ 1.7 ms per 1 MiB html q5 —
+which accounts for roughly half of r100's measured -5..-12%; the rest
+is the extra per-type trees and switch writes, all of it C-parity work
+C itself pays.  No cheap reclaim available; a FastLog2-style table
+would touch only the <256 counts (~1% of q5 total) — not worth the
+code.  (Also: C's splitter entropy inputs go through the same math, so
+decisions stay C-aligned only if we keep the double logs.)
+
 ## Attempted 3 Nov 2026: the local-state command loop (step 1 above)
 
 An implementation of the fast command loop as a separate
