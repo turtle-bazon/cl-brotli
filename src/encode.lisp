@@ -1037,6 +1037,8 @@ prefix sum + analytic command/distance costs (log2(11+i)/log2(20+i))."
       (setf (aref cd i) (float (log (float (+ 20 i) 1.0d0) 2.0d0) 1.0f0)))
     (make-zmodel cc cd prefix (float (log 11.0d0 2.0d0) 1.0f0))))
 
+(defvar *b-max* 0) (defvar *b-push0* 0)
+(defvar *p-minn* 0) (defvar *p-maxmin* 0)
 (declaim (inline encode-postfix postfix-extra))
 (defun encode-postfix (d np nd)
   "Distance D (>=1) -> distance code under NPOSTFIX=NP NDIRECT=ND; inverse
@@ -1578,8 +1580,15 @@ shortcut."
                                (let* ((ins (logand (aref zins pos) #x7FFFFFF))
                                       (short (ash (aref zins pos) -27)))
                                  (declare (type fixnum ins short))
-                                 (if (and (zerop short)
-                                          (zerop (aref zdict pos)))
+                                 ;; C ComputeDistanceShortcut: shortcut = POS
+                                 ;; iff the copy updates the last distances:
+                                 ;; not a dictionary reference and distance
+                                 ;; code > 0.  Code 0 is short code 1 (repeat
+                                 ;; last); codes 1..15 (our short 2..16) DO
+                                 ;; push and must land on POS, not on the
+                                 ;; predecessor.
+                                 (if (and (zerop (aref zdict pos))
+                                          (/= short 1))
                                      pos
                                      (aref zsc (- pos clen ins))))))))
                    (z-update-node (pos start len len-code dist short dictp cost)
@@ -4081,7 +4090,11 @@ returning fresh octets.  Shared by COMPRESS and COMPRESS-INTO."
                (quality (getf params :quality 5))
                (bt (getf params :bt nil))
                (one-pass (getf params :one-pass nil))
-               (dict-ok (and (getf params :use-dict) (text-like-data-p data)))
+               ;; C consults the static dictionary at q10/11 regardless of
+               ;; content (its probe is an array lookup); the old text-like
+               ;; gate here cost binary 20%+ vs C at small sizes.  q<=9
+               ;; pass :use-dict nil, so this only affects q10/11.
+               (dict-ok (getf params :use-dict))
                ;; Run the dictionary parse first.  For normal text it is
                ;; equal to or better than the plain parse, and re-running the
                ;; whole matcher just to compare doubled q10/q11 time and

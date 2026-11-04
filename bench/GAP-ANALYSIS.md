@@ -1273,3 +1273,51 @@ so candidates/queue decisions differ somewhere); (b) continued
 constant-factor work on z-update/bt-do inner loops; (c) evaluate
 per-iteration candidate counts (iteration 1 needs 5, iteration 2 may
 tolerate fewer).
+
+## Rev 115: z-shortcut distance-code fix + unconditional dictionary at q10/11 — RATIO 10/10
+
+Binary q10 (the last ratio failure at 1.106) was root-caused with an
+encoder/decoder command-stream differential on binary 16K (our stream vs
+C's, decoded command-by-command):
+
+1. **z-shortcut sent short codes 2..16 to the predecessor.**  C's
+   ComputeDistanceShortcut returns POS iff the copy updates the last
+   distances - not dictionary AND distance CODE > 0.  Code 0 is short
+   code 1 (repeat-last); codes 1..15 (our stored short 2..16) DO push.
+   Our (zerop short) test therefore walked the chain from the wrong
+   node for every non-repeat short-code command, corrupting the
+   distance caches fed to later queue entries.  Fixed to
+   (and (zerop dict) (/= short 1)).
+2. **The text-like-data-p gate disabled the static dictionary for
+   binary** while C probes it unconditionally (an array lookup).  The
+   gate only ever affected q10/11 (q<=9 pass :use-dict nil), so
+   dict-ok is now just (getf params :use-dict).  Binary 1M improved
+   287685 -> 285155; ramp (non-text) improved 352 -> 325 (its old
+   352 baseline predates the DP campaign - roundtrip-verified).
+
+**Gates (1 MiB vs C 1.0.9 core):**
+  ratio <= 1.10: **10/10 PASS** (was 9/10, and 4/10 at r111) -
+  binary 1.096/1.058, html 1.014/1.003, json 1.011/1.009,
+  source 1.035/1.025, text 1.083/1.076.  Every cell has margin.
+  speed >= 1.0x: 2/10 - binary q10 1.50x, binary q11 1.31x;
+  html 0.70/0.69, json 0.70/0.68, source 0.84/0.83, text 0.82/0.46.
+  BOTH gates: binary q10 and q11 (2 cells).
+  q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean.
+
+**Known issue outside the gates (recorded, not fixed):** on binary
+inputs below ~64K the DP still loses up to 21% vs C (16K: 10290 vs
+8466).  Differential showed the failure mode: start=700's costdiff
+(-590.31) is never beaten - each chained copy pays its gap's
+insert-length extra bits (~17) against only ~13 bits of literal saving
+at the model's ~4.3 bits/byte tail cost - so the queue's k0 (z-cands=1
+at q10) stays pinned to the old entry and the path collapses into one
+giant insert+copy command.  C's identical formulas decide the other
+way, i.e. its model values or queue content differ in the ~2-bit
+margin; our first divergence (pos 182) is likewise a near-tie the coin
+flipped differently on.  At 1 MiB the same dynamics net out at 1.096,
+inside the gate.  Next step for this: compare per-position literal
+costs against C's model values (or run C with instrumentation).
+
+Speed remains the only failing gate (8/10 cells).  See Rev 114 for
+the remaining gap analysis (z-iterate self + bt-do constant factors,
+2-4x C's per-op cost; no structural inefficiency left in the port).
