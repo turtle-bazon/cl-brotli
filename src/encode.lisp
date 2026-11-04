@@ -2560,7 +2560,10 @@ dictionary at q10/q11."
     ;; See GAP-ANALYSIS for the full per-level table.
     (5 '(:max-chain 6 :lazy t :use-dict nil :short-dist t :quality 5
           :score-p t :checks 4))
-    (6 '(:max-chain 8 :lazy t :use-dict nil :short-dist t :quality 6
+    ;; q6 was under-chained relative to C's bucket (block_bits 5 = 32
+    ;; entries vs our 8): html q6 measured 1.121 vs C, the only cap
+    ;; violation left.  16 mirrors C's q5/q6 effective search depth.
+    (6 '(:max-chain 16 :lazy t :use-dict nil :short-dist t :quality 6
           :score-p t :checks 4))
     (7 '(:max-chain 24 :lazy t :use-dict nil :short-dist t :quality 7))
     (8 '(:max-chain 32 :lazy t :use-dict nil :short-dist t :quality 8))
