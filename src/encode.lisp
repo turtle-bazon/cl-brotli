@@ -1055,23 +1055,102 @@ histograms)."
   (let ((sum 0))
     (declare (type fixnum sum))
     (dotimes (i size) (incf sum (aref histo i)))
-    (let* ((log2sum (if (plusp sum) (log (float sum 1.0d0) 2.0d0) 0.0d0))
+    (let* ((log2sum (fast-log2 sum))
            (missing sum)
            (mcost 0.0d0))
       (declare (type double-float log2sum mcost)
                (type fixnum missing))
       (unless literal-p
         (dotimes (i size) (when (zerop (aref histo i)) (incf missing))))
-      (setf mcost (+ (log (float missing 1.0d0) 2.0d0) 2.0d0))
+      (setf mcost (+ (fast-log2 missing) 2.0d0))
       (dotimes (i size)
         (let ((h (aref histo i)))
           (setf (aref costs i)
                 (if (zerop h)
                     (float mcost 1.0f0)
-                    (float (max 1.0d0 (- log2sum
-                                         (log (float h 1.0d0) 2.0d0)))
+                    (float (max 1.0d0 (- log2sum (fast-log2 h)))
                            1.0f0))))))
     costs))
+
+(defun zopfli-set-from-commands (model data n commands)
+  "C ZopfliCostModelSetFromCommands: replay COMMANDS to tally the literal,
+command, and distance histograms, then refine MODEL's cost tables in
+place (Shannon costs via SetCost) and rebuild the literal-cost prefix.
+The final insert-only trailing command is not part of C's command stream
+(C keeps it in last_insert_len) and is skipped."
+  (declare (type zmodel model)
+           (type (simple-array (unsigned-byte 8) (*)) data)
+           (type fixnum n) (type list commands)
+           (optimize (speed 3) (safety 0)))
+  (let ((hl (make-array 256 :element-type 'fixnum :initial-element 0))
+        (hc (make-array 704 :element-type 'fixnum :initial-element 0))
+        (hd (make-array 64 :element-type 'fixnum :initial-element 0))
+        (ct (make-array 256 :element-type 'single-float
+                            :initial-element 0.0f0))
+        (rb (make-array 5 :element-type 'fixnum
+                           :initial-contents '(16 15 11 4 4))))
+    (declare (type (simple-array fixnum (*)) hl hc hd rb)
+             (type (simple-array single-float (*)) ct))
+    (dolist (c commands)
+      (let ((ins (car c)) (ls (cadr c)) (cpy (caddr c))
+            (dist (cadddr c)) (dictp (car (cddddr c))))
+        (declare (type fixnum ins ls cpy dist))
+        (when (plusp cpy)
+          (multiple-value-bind (icode ixv ixb)
+              (length-code ins +ins-code+ +ins-xval+ +ins-xbits+
+                               +ins-base+ +ins-bits+)
+            (declare (ignore ixv ixb))
+            (multiple-value-bind (ccode cxv cxb)
+                (length-code cpy +cpy-code+ +cpy-xval+ +cpy-xbits+
+                                 +cpy-base+ +cpy-bits+)
+              (declare (ignore cxv cxb))
+              (let* ((ring-pos (aref rb 4))
+                     (repeat (and (not dictp)
+                                  (= dist (aref rb (logand (+ ring-pos 3) 3)))))
+                     (dist0 (and repeat (<= icode 7) (< ccode 16)))
+                     (csym (if dist0 (cmd-symbol-dist0 icode ccode)
+                               (cmd-symbol icode ccode)))
+                     (dcode -1))
+                (declare (type fixnum ring-pos icode ccode csym dcode)
+                         (type boolean repeat dist0))
+                (incf (aref hc csym))
+                (unless dist0
+                  (if repeat
+                      (setf dcode 0)
+                      (multiple-value-bind (scode sxv sxb)
+                          (special-distance-code rb dist)
+                        (declare (ignore sxv sxb))
+                        (if scode
+                            (setf dcode scode)
+                            (setf dcode (encode-distance dist)))))
+                  (when (>= csym 128) (incf (aref hd dcode)))
+                  ;; Distance symbol 0 reuses the last distance without
+                  ;; pushing; dictionary references are not pushed either.
+                  (unless (or dictp (= dcode 0))
+                    (setf (aref rb (logand ring-pos 3)) dist
+                          (aref rb 4) (1+ ring-pos))))
+                (loop for i of-type fixnum from ls below (+ ls ins)
+                      do (incf (aref hl (aref data i))))))))))
+    ;; C SetCost on all three histograms, then min-cost-cmd.
+    (zopfli-set-cost hl 256 t ct)
+    (zopfli-set-cost hc 704 nil (zmodel-cost-cmd model))
+    (zopfli-set-cost hd 64 nil (zmodel-cost-dist model))
+    (let ((mc +z-infinity+))
+      (declare (type single-float mc))
+      (dotimes (i 704)
+        (let ((v (aref (zmodel-cost-cmd model) i)))
+          (declare (type single-float v))
+          (when (< v mc) (setf mc v))))
+      (setf (zmodel-min-cost-cmd model) mc))
+    ;; Literal costs: plain prefix of cost_literal[data[i]] (C's carry
+    ;; dance resets every iteration, i.e. reduces to this).
+    (let ((prefix (zmodel-lit-prefix model)))
+      (declare (type (simple-array single-float (*)) prefix))
+      (setf (aref prefix 0) 0.0f0)
+      (dotimes (i n)
+        (setf (aref prefix (1+ i))
+              (+ (aref prefix i) (aref ct (aref data i))))))
+    model))
 
 (defun %lz77 (data sap window use-dict dict-limit base-pos max-chain lazy
               skip-match insert-interior &optional (score-p nil) (checks 1)
@@ -1127,6 +1206,17 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                (z-sdc #(4 11 15 16))
                (z-dc (make-array 4 :element-type 'fixnum))
                (z-dmatch (and bt (make-array 25 :element-type 'fixnum)))
+               ;; HQ (q11) pre-collected match storage: one packed entry per
+               ;; match, (dist << 25) | (dict-flag << 24) | len.
+               (z-nm (and bt (>= bt 64)
+                          (make-array (1+ n) :element-type 'fixnum
+                                             :initial-element 0)))
+               (z-flat-adj (and bt (>= bt 64)
+                                (make-array (max 64 n) :element-type 'fixnum
+                                                       :adjustable t
+                                                       :fill-pointer 0)))
+               (z-flat (and bt (>= bt 64)
+                            (make-array 0 :element-type 'fixnum)))
                (z-cands (if (and bt (>= bt 64)) 5 1))
                (z-maxlen (if (and bt (>= bt 64)) 325 150))
                (head (make-array (ash 1 hbits)
@@ -1172,6 +1262,8 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                    (type (simple-array fixnum (*))
                          zlen zdist zins zsc znext zdict)
                    (type (simple-array fixnum (25)) z-dmatch)
+                   (type (simple-array fixnum (*)) z-nm z-flat)
+                   (type (vector fixnum) z-flat-adj)
                    (type zpq zq)
                    (type (simple-array fixnum (4)) z-dc)
                    (type fixnum z-cands z-maxlen)
@@ -1663,10 +1755,13 @@ position.  Returns the longest newly-reached copy length."
                                                        (setf result len)))))
                                                (incf len))))))))))))
                        result)))
-                   (z-iterate ()
+                   (z-iterate (hq)
                      "C BrotliZopfliComputeShortestPath: per position BT+dict
 candidates into the DP (analytic cost model), long-copy skip logic, then
-the shortest path becomes our command list."
+the shortest path becomes our command list.  HQ (the q11 second
+iteration) loads the matches pre-collected by Z-PREPASS instead of
+probing and storing here."
+                     (declare (type boolean hq))
                      (fill zcostf +z-infinity+)
                      (fill zlen 1)
                      (fill zdist 0)
@@ -1676,42 +1771,74 @@ the shortest path becomes our command list."
                      ;; looks at earlier positions) and the backward walk
                      ;; writes znext before the forward walk reads it.
                      (fill zdict 0)
+                     ;; C re-Inits the queue for every ZopfliIterate run.
+                     (setf (zpq-idx zq) 0)
                      (setf (aref zlen 0) 0
                            (aref zcostf 0) 0.0f0)
-                     (let ((i 0))
-                       (declare (type fixnum i))
+                     (let ((i 0) (off 0))
+                       (declare (type fixnum i off))
                        (loop while (< (+ i 3) n) do
-                         (let* ((cnt (progn (bt-do i t) bt-cnt))
+                         (let* ((cnt (if hq (aref z-nm i)
+                                             (progn (bt-do i t) bt-cnt)))
                                 (dok nil))
                            (declare (type fixnum cnt) (type boolean dok))
-                           ;; C FindAllMatches consults the dictionary for
-                           ;; every word length >= max(4, best_len + 1); with
-                           ;; best >= 24 no word can contribute, so skip the
-                           ;; probe entirely.  Each length gets its own
-                           ;; candidate (C appends one match per length).
-                           (when (and use-dict
-                                      (< (if (plusp cnt) bt-cbest 0) 24)
-                                      (or (null dict-limit)
-                                          (< dict-used dict-limit)))
-                             (fill z-dmatch 0)
-                             (dict-matches-at data i n
-                                              (max 4 (1+
-                                                      (if (plusp cnt)
-                                                          bt-cbest 0)))
-                                              (min window (+ base-pos i))
-                                              z-dmatch)
-                             (setf dok t))
-                           ;; C: only the longest match survives when it
-                           ;; exceeds MaxZopfliLen.
-                           (when (and (> cnt 0)
-                                      (> (aref bt-ml (1- cnt)) z-maxlen))
-                             (setf (aref bt-md 0) (aref bt-md (1- cnt))
-                                   (aref bt-ml 0) (aref bt-ml (1- cnt))
-                                   cnt 1))
+                           (if hq
+                               ;; Load this position's recorded matches:
+                               ;; BT entries into bt-md/bt-ml, dictionary
+                               ;; entries into z-dmatch (length-keyed).
+                               (progn
+                                 (when (plusp cnt) (fill z-dmatch 0))
+                                 (let ((mi 0))
+                                   (declare (type fixnum mi))
+                                   (loop for k of-type fixnum below cnt do
+                                     (let ((e (aref z-flat (+ off k))))
+                                       (declare (type fixnum e))
+                                       (if (logbitp 24 e)
+                                           (progn
+                                             (setf (aref z-dmatch
+                                                         (logand e #xFFFFFF))
+                                                   (ash e -25)
+                                                   dok t))
+                                           (progn
+                                             (setf (aref bt-md mi)
+                                                   (ash e -25)
+                                                   (aref bt-ml mi)
+                                                   (logand e #xFFFFFF))
+                                             (incf mi)))))
+                                   (setf bt-cnt mi))
+                                 (incf off cnt))
+                               (progn
+                                 ;; C FindAllMatches consults the dictionary
+                                 ;; for every word length >= max(4, best_len
+                                 ;; + 1); with best >= 24 no word can
+                                 ;; contribute.  Each length gets its own
+                                 ;; candidate (C appends one match per length).
+                                 (when (and use-dict
+                                            (< (if (plusp cnt) bt-cbest 0) 24)
+                                            (or (null dict-limit)
+                                                (< dict-used dict-limit)))
+                                   (fill z-dmatch 0)
+                                   (dict-matches-at data i n
+                                                    (max 4 (1+
+                                                            (if (plusp cnt)
+                                                                bt-cbest 0)))
+                                                    (min window (+ base-pos i))
+                                                    z-dmatch)
+                                   (setf dok t))
+                                 ;; C: only the longest match survives when
+                                 ;; it exceeds MaxZopfliLen.
+                                 (when (and (> cnt 0)
+                                            (> (aref bt-ml (1- cnt)) z-maxlen))
+                                   (setf (aref bt-md 0) (aref bt-md (1- cnt))
+                                         (aref bt-ml 0) (aref bt-ml (1- cnt))
+                                         cnt 1))))
                            (let ((skip (z-update i dok)))
                              (declare (type fixnum skip))
                              (when (< skip 16384) (setf skip 0))
-                             (when (and (= cnt 1)
+                             ;; (PLUSP BT-CNT): in HQ mode CNT counts
+                             ;; dictionary entries too, and a lone
+                             ;; dictionary entry must not test bt-ml[0].
+                             (when (and (= cnt 1) (plusp bt-cnt)
                                         (> (aref bt-ml 0) z-maxlen))
                                (setf skip (max (aref bt-ml 0) skip)))
                              (when (> skip 1)
@@ -1724,7 +1851,7 @@ the shortest path becomes our command list."
                                  ;; bulk at stride 8, the last 63 positions
                                  ;; individually, and the 64..574 window's
                                  ;; bulk is skipped.
-                                 (let ((ii beg) (jj beg))
+                                 (unless hq (let ((ii beg) (jj beg))
                                    (declare (type fixnum ii jj))
                                    (when (<= (+ beg 63) end)
                                      (setf ii (- end 63)))
@@ -1734,12 +1861,16 @@ the shortest path becomes our command list."
                                        (incf jj 8)))
                                    (loop while (< ii end) do
                                      (bt-do ii nil)
-                                     (incf ii))))
+                                     (incf ii)))))
                                (decf skip)
                                (loop while (plusp skip) do
                                  (incf i)
                                  (when (>= (+ i 3) n) (return))
                                  (z-eval i)
+                                 ;; HQ: the skipped positions were recorded
+                                 ;; by the pre-pass; step the flat cursor
+                                 ;; past their entries.
+                                 (when hq (incf off (aref z-nm i)))
                                  (decf skip)))
                              (incf i)))))
                      ;; C ComputeShortestPathFromNodes -> backward links
@@ -1756,7 +1887,9 @@ the shortest path becomes our command list."
                            (decf index len)
                            (setf (aref znext index) len))))
                      ;; C BrotliZopfliCreateCommands -> our command list
-                     (let ((pos 0) (off (aref znext 0)) (out cmds))
+                     ;; A fresh list per iteration: C restores
+                     ;; num_commands/last_insert_len before each run.
+                     (let ((pos 0) (off (aref znext 0)) (out nil))
                        (declare (type fixnum pos off) (type list out))
                        (loop while (/= off -1) do
                          (let* ((q (+ pos off))
@@ -1783,6 +1916,88 @@ the shortest path becomes our command list."
                          (when (plusp trail)
                            (push (list trail pos 0 0 nil) out)))
                        (nreverse out)))
+                   (z-prepass ()
+                     "C BrotliCreateHqZopfliBackwardReferences pre-pass:
+FindAllMatches at every position (with the long-copy StoreRangeH10 skip)
+recorded into Z-FLAT, packed as (dist << 25) | (dict << 24) | len;
+Z-NM[i] counts position I's entries (skip interiors stay 0)."
+                     (let ((i 0) (total 0))
+                       (declare (type fixnum i total))
+                       (labels ((record (dist len dict)
+                                  (declare (type fixnum dist len dict))
+                                  (vector-push-extend
+                                   (logior (ash dist 25) (ash dict 24) len)
+                                   z-flat-adj)
+                                  (incf total)
+                                  (incf (aref z-nm i))))
+                         (loop while (< (+ i 3) n) do
+                           (bt-do i t)
+                           (let ((cnt bt-cnt) (longp nil))
+                             (declare (type fixnum cnt)
+                                      (type boolean longp))
+                             ;; C: last match > MaxZopfliLen -> keep only it
+                             ;; and skip the copy's interior.
+                             (when (and (> cnt 0)
+                                        (> (aref bt-ml (1- cnt)) z-maxlen))
+                               (setf longp t
+                                     (aref bt-md 0) (aref bt-md (1- cnt))
+                                     (aref bt-ml 0) (aref bt-ml (1- cnt))
+                                     cnt 1))
+                             ;; Dictionary (C appends these inside
+                             ;; FindAllMatches; the gate is false exactly
+                             ;; when C's minlen would exceed 24).
+                             (when (and use-dict
+                                        (< bt-cbest 24)
+                                        (or (null dict-limit)
+                                            (< dict-used dict-limit)))
+                               (fill z-dmatch 0)
+                               (dict-matches-at data i n
+                                                (max 4 (1+ bt-cbest))
+                                                (min window (+ base-pos i))
+                                                z-dmatch)
+                               (loop for l of-type fixnum from 4 to 24 do
+                                 (let ((d (aref z-dmatch l)))
+                                   (declare (type fixnum d))
+                                   (when (plusp d) (record d l 1)))))
+                             (loop for k of-type fixnum below cnt do
+                               (record (aref bt-md k) (aref bt-ml k) 0))
+                             (if longp
+                                 (let ((mlen (aref bt-ml 0)))
+                                   (declare (type fixnum mlen))
+                                   ;; StoreRangeH10(pos+1,
+                                   ;; min(pos+mlen, store_end))
+                                   (let ((beg (1+ i))
+                                         (end (min (+ i mlen) (- n 127))))
+                                     (declare (type fixnum beg end))
+                                     (let ((ii beg) (jj beg))
+                                       (declare (type fixnum ii jj))
+                                       (when (<= (+ beg 63) end)
+                                         (setf ii (- end 63)))
+                                       (when (<= (+ beg 512) ii)
+                                         (loop while (< jj ii) do
+                                           (bt-do jj nil)
+                                           (incf jj 8)))
+                                       (loop while (< ii end) do
+                                         (bt-do ii nil)
+                                         (incf ii))))
+                                   (incf i (1- mlen)))
+                                 (incf i)))))
+                     ;; Convert to a simple array for the DP passes.
+                     (setf z-flat (make-array total :element-type 'fixnum
+                                                    :initial-contents
+                                                    z-flat-adj))))
+                   (z-iterate-hq ()
+                     "C BrotliCreateHqZopfliBackwardReferences (q11): one
+match-collection pass, then the DP twice - analytic costs, then exact
+costs from the first iteration's commands
+\(ZopfliCostModelSetFromCommands)."
+                     (z-prepass)
+                     (let ((base dict-used))
+                       (declare (type fixnum base))
+                       (let ((first-pass (z-iterate t)))
+                         (setf dict-used base)
+                         (zopfli-set-from-commands zmodel data n first-pass)
+                         (z-iterate t))))
                    (find-match (pos h)
                      (declare (type fixnum pos h))
                      (let ((cand (aref head h)) (best-len 0) (best-dist 0))
@@ -1949,7 +2164,9 @@ score rather than length.  Returns (values len dist score)."
                              zq-push z-minlen bt-hash z-update-node
                              z-shortcut z-eval))
             (if bt
-                (z-iterate)
+                (if (>= bt 64)
+                    (z-iterate-hq)
+                    (z-iterate nil))
                 (progn
                   (loop while (<= p last) do
               (let* ((ph (hash p)))

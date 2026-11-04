@@ -1168,3 +1168,54 @@ Validation for this rev: 150/150 tests, repro-split clean, q0-q9
 bit-identical to r111 (35/35 sweep cells), ramp q5 = 352, html
 prefix roundtrips at every size 1K..1M, every measurement script
 re-run after each change.
+
+## Rev 113: q11 exact-cost second iteration (C ZopfliCostModelSetFromCommands) — ratio 9/10
+
+Wires the missing half of C's HQ path (BrotliCreateHqZopfliBackward
+References): for q11 (bt >= 64) the matches are now collected ONCE by a
+pre-pass (Z-PREPASS: FindAllMatches equivalent + long-copy StoreRangeH10
+skip, recorded into a packed flat array (dist<<25)|(dict<<24)|len with
+Z-NM[i] counts), dictionary candidates included at C's minlen = max(4,
+best_len+1)), then the DP runs TWICE over that storage:
+
+  iteration 0: analytic model (unchanged) -> command list L0
+  zopfli-set-from-commands: replay L0 (ring-accurate repeat/short/regular
+    distance symbols, exactly plan-commands' logic) into literal(256)/
+    command(704)/distance(64) histograms, SetCost = Shannon costs with
+    C's missing-symbol rule (now via fast-log2 like C's FastLog2),
+    min_cost_cmd = min(cost_cmd), literal prefix = plain prefix of
+    cost_literal[data[i]] (C's carry dance resets every step).
+  iteration 1: same DP with the refined model -> final commands.
+
+q10 keeps the interleaved single pass (C-faithful; splitting it would
+collect matches at positions C's UpdateNodes skips).
+
+**Gates after (1 MiB vs C 1.0.9 core):**
+  ratio <= 1.10: 9/10 PASS (was 7/10) - html 1.019/1.004, json
+  1.021/1.018, source 1.037/1.027, text 1.083/1.076, binary q11 1.106
+  -> 1.067.  Only binary q10 (1.106, -0.6% needed) still fails; note
+  our own score path reached 1.076 there, so the DP is leaving matches
+  on the table - differential vs C's FindAllMatches is the next step
+  for that cell.
+  speed >= 1.0x: 1/10 (was 3/10) - binary q10 1.71x; binary q11 0.96,
+  html 0.72/0.54, json 0.72/0.53, source 0.82/0.65, text 0.76/0.36.
+  The second iteration costs ~1.6-1.8x q11 time (html q11 0.97 -> 0.54),
+  which is the same structural cost C pays (C q10 2.3 -> q11 0.9 = 2.5x)
+  but our per-phase cost is ~2-4x C's (sb-sprof: z-iterate self 70% on
+  html q11; on text q11 estimate+model ~20%, bt-do ~19%, fills+alloc
+  ~9% on top of the two DP passes).
+
+**Where the speed gap lives (both q10 and q11):** z-iterate self (the
+short-candidate + match + minlen loops, ~49% at q10) and bt-do (30%),
+i.e. the same C-mandated work at ~2x gcc's per-op cost; q11 doubles the
+DP and text's fixed costs (estimate ~13ms, fills, array allocation)
+dominate its small skip-heavy runtime.  No structural inefficiency
+remains in the port itself - set-from-commands is 0.4%, the storage
+load loop is minor - so closing the gate means constant factors:
+tighter inner loops, fewer float conversions (%SINGLE-FLOAT 3.9% at q11),
+cheaper estimate/fills, or reducing per-position work where ratio margin
+allows (e.g. z-cands 5 -> 3 at q11 costs ~1% ratio on text).
+
+Validation: 150/150 tests, repro-split clean, q0-q9 byte-identical
+(35/35), ramp 352, html prefix roundtrips 1K..1M, q11 sizes: html
+132765 (C 132230), json 144842, source 81801, text 10443, binary 268132.
