@@ -573,9 +573,13 @@ Two findings in one pass:
    text -0.62%, binary -0.33%), q5/q7 byte-identical, q6 speed
    -9..-15% (ratio-first trade).  150/150 + repro clean.
 
-** MILESTONE: after r104 no swept cell (5 corpora x q0,1,2,5,6,7,9,
-and previously q10,11) exceeds the 1.10 cap.  Worst cells now: html q5
-1.095, source/binary q2 ~1.09. **
+MILESTONE (CORRECTED — the r104 commit message overclaimed): after
+r104 no cell at **q0-q9** exceeds the 1.10 cap (5 corpora swept at
+q0,1,2,5,6,7,9; worst html q5 1.095, source/binary q2 ~1.09).  q10/q11
+STILL have 7 violations — html10 1.108 / html11 1.142, json10 1.124 /
+json11 1.183, text10 1.148 / text11 1.182, binary11 1.135 (source
+1.074/1.095 and binary10 1.097 are under) — the recorded zopfli +
+HQ-clustered-splitter feature gap, NOT tuning-fixable.
 
 Optional follow-up (not taken — in cap and speed is scarce): q5 chain
 6 -> ~10 for headroom on html q5's thin 1.095 margin.
