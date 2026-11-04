@@ -104,6 +104,10 @@ visible, and MODE is loop-invariant between block switches."
 (defstruct (outbuf (:constructor make-outbuf (data)))
   (data nil :type (simple-array (unsigned-byte 8) (*)))
   (pos 0 :type fixnum)
+  ;; Stream-relative origin: POS - ORIGIN is the number of bytes this stream
+  ;; has produced.  DECOMPRESS-INTO starts POS at a nonzero buffer offset;
+  ;; distance classification (regular vs dictionary) must not see it.
+  (origin 0 :type fixnum)
   ;; Absolute output ceiling for DECOMPRESS-INTO; NIL means growable.  When
   ;; set, DATA is caller-owned and must never be replaced.
   (limit nil :type (or null fixnum)))
@@ -574,10 +578,14 @@ distance ring buffer (persists across the stream)."
                      ;; references do NOT update the ring.
                      (when (and (/= dcode 0)
                                 (<= distance
-                                    (min window (outbuf-pos out))))
+                                    (min window
+                                         (- (outbuf-pos out)
+                                            (outbuf-origin out)))))
                        (setf (aref rb (logand idx 3)) distance
                              (aref rb 4) (1+ idx))))))
-             (let ((max-dist (min window (outbuf-pos out))))
+             (let ((max-dist (min window
+                                   (- (outbuf-pos out)
+                                      (outbuf-origin out)))))
                (declare (type fixnum max-dist))
                (when (<= distance 0)
                  (berr "invalid distance ~d" distance))

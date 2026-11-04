@@ -9,6 +9,7 @@
     d))
 
 (defvar *dict* nil)
+(declaim (inline load-dict))
 (defun load-dict ()
   (or *dict*
       (setf *dict*

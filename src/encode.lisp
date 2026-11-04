@@ -434,18 +434,29 @@ LENGTH-CODE was ~20% of low-quality compression time."
 (defparameter +ins-lc+ (make-length-code-table +ins-base+ +ins-bits+ 4096))
 (defparameter +cpy-lc+ (make-length-code-table +cpy-base+ +cpy-bits+ 4096))
 
+(defparameter +ins-code+ (first +ins-lc+))
+(defparameter +ins-xval+ (second +ins-lc+))
+(defparameter +ins-xbits+ (third +ins-lc+))
+(defparameter +cpy-code+ (first +cpy-lc+))
+(defparameter +cpy-xval+ (second +cpy-lc+))
+(defparameter +cpy-xbits+ (third +cpy-lc+))
+(declaim (type (simple-array fixnum (*))
+               +ins-code+ +ins-xval+ +ins-xbits+
+               +cpy-code+ +cpy-xval+ +cpy-xbits+))
 (declaim (inline length-code))
-(defun length-code (len tables base bits)
+(defun length-code (len code xval xbits base bits)
   "Largest code C with BASE[C] <= LEN; returns (values C extra-val extra-bits).
-Common lengths use the precomputed TABLES; longer ones fall back to the
-canonical search."
-  (let ((code (first tables)) (xval (second tables)) (xbits (third tables)))
-    (declare (type (simple-array fixnum (*)) code xval xbits))
-    (if (< len (length code))
-        (values (aref code len) (aref xval len) (aref xbits len))
-        (loop for c from (1- (length base)) downto 0
-              when (>= len (aref base c))
-                do (return (values c (- len (aref base c)) (aref bits c)))))))
+Common lengths use the precomputed CODE/XVAL/XBITS; longer ones fall back to
+the canonical search."
+  (declare (type (simple-array fixnum (*)) code xval xbits)
+           (type simple-vector base bits)
+           (type fixnum len)
+           (optimize (speed 3) (safety 0)))
+  (if (< len (length code))
+      (values (aref code len) (aref xval len) (aref xbits len))
+      (loop for c from (1- (length base)) downto 0
+            when (>= len (aref base c))
+              do (return (values c (- len (aref base c)) (aref bits c))))))
 
 (defparameter +cmd-symbol-table+
   (let ((v (make-array (* 24 24) :element-type 'fixnum :initial-element 0)))
@@ -500,6 +511,7 @@ RB is the 4-slot ring plus a write index in slot 4."
 
 ;;; ---- static dictionary index (base words, no transforms) ---------------
 
+(declaim (inline dict-index))
 (defvar *dict-index* nil)
 
 (declaim (inline dict-key4))
@@ -510,19 +522,26 @@ RB is the 4-slot ring plus a write index in slot 4."
   (logior (aref vec pos) (ash (aref vec (1+ pos)) 8)
           (ash (aref vec (+ pos 2)) 16) (ash (aref vec (+ pos 3)) 24)))
 
+(declaim (inline dict-bucket))
+(defun dict-bucket (key)
+  "2^16 bucket of KEY (C dictionary->buckets[Hash15(..)] style).  Bucket
+collisions are safe: dict-match-at verifies the full word against input."
+  (declare (type fixnum key) (optimize (speed 3) (safety 0)))
+  (logand (logxor key (ash key -16)) #xFFFF))
+
 (defun dict-index ()
-  "Hash first four bytes -> list of (length . word-index) base dictionary words."
+  "First four bytes -> bucket of (length . word-index) base dictionary words."
   (or *dict-index*
-      (let ((h (make-hash-table :test #'eql))
+      (let ((v (make-array #x10000 :initial-element nil))
             (dict (load-dict)))
         (loop for len from 4 to 24 do
           (let ((nw (nwords len))
                 (base (aref +doffset+ len)))
             (dotimes (idx nw)
               (let* ((off (+ base (* idx len)))
-                     (key (dict-key4 dict off)))
-                (push (cons len idx) (gethash key h))))))
-        (setf *dict-index* h))))
+                     (b (dict-bucket (dict-key4 dict off))))
+                (push (cons len idx) (aref v b))))))
+        (setf *dict-index* v))))
 
 (defparameter +dict-transforms+
   (loop for tid from 0 below (length +transforms+)
@@ -599,23 +618,55 @@ KIND (0 identity, 1 upper-first, 2 upper-all).  No temporary vectors."
                                           (logxor (aref dict (+ off i 2)) 5))))
                          (incf i 3)))))))))
 
-(defun dict-match-at (data p n)
-  "Longest dictionary word starting at DATA[P], as
-\(values length index transform-id).  Only length-preserving transforms are
-considered so command copy lengths remain the base-word lengths."
-  (let ((cands (gethash (dict-key4 data p) (dict-index)))
+(defun dict-match-at (data p n min-len)
+  "Longest dictionary word starting at DATA[P] with length >= MIN-CLOP,
+as \(values length index transform-id).  Only length-preserving transforms
+are considered so command copy lengths remain the base-word lengths."
+  (declare (type fixnum p n min-len))
+  (let ((cands (aref (the (simple-array t (65536)) (dict-index))
+                     (dict-bucket (dict-key4 data p))))
         (best-len 0) (best-idx nil) (best-tid 0)
         (dict (load-dict)))
     (dolist (cand cands)
       (let* ((len (car cand))
              (idx (cdr cand)))
-        (when (and (<= len (- n p)) (> len best-len))
+        (when (and (<= len (- n p)) (>= len min-len) (> len best-len))
           (let ((off (+ (aref +doffset+ len) (* idx len))))
             (dolist (tk +dict-transform-kinds+)
               (when (%dict-word-match-p data p dict off len (cdr tk))
                 (setf best-len len best-idx idx best-tid (car tk))
                 (return)))))))
     (values best-len best-idx best-tid)))
+
+(defun dict-matches-at (data p n min-len dist-base dists)
+  "C BrotliFindAllStaticDictionaryMatches (length-preserving transforms
+only): for every dictionary word of length LEN in [MIN-LEN, 24] that
+matches DATA[P..), set DISTS[LEN] to its backward distance and return the
+number of lengths filled.  DIST-BASE = min(window, position), so every
+distance lands just above the decoder's max-distance and is therefore read
+as a dictionary reference."
+  (declare (type (simple-array (unsigned-byte 8) (*)) data)
+           (type fixnum p n min-len dist-base)
+           (type (simple-array fixnum (25)) dists)
+           (optimize (speed 3) (safety 0)))
+  (let ((cands (aref (the (simple-array t (65536)) (dict-index))
+                     (dict-bucket (dict-key4 data p))))
+        (dict (load-dict))
+        (count 0))
+    (declare (type fixnum count))
+    (dolist (cand cands count)
+      (let* ((len (car cand))
+             (idx (cdr cand)))
+        (declare (type fixnum len idx))
+        (when (and (<= len (- n p)) (>= len min-len)
+                   (zerop (aref dists len)))
+          (let ((off (+ (aref +doffset+ len) (* idx len))))
+            (dolist (tk +dict-transform-kinds+)
+              (when (%dict-word-match-p data p dict off len (cdr tk))
+                (setf (aref dists len)
+                      (+ dist-base 1 idx (* (car tk) (nwords len))))
+                (incf count)
+                (return)))))))))
 
 (defun text-like-data-p (data)
   "T when DATA is mostly printable ASCII/whitespace, where the static
@@ -632,6 +683,396 @@ dictionary is worth consulting."
           (incf text))))
     (> text (/ (* 9 (max 1 sample)) 10))))
 
+
+;;; ---- Zopfli cost-model DP (q10/11; C backward_references_hq + literal_cost)
+
+
+(defparameter +zdc-index+
+  (make-array 16 :element-type 'fixnum
+                  :initial-contents '(0 1 2 3 0 0 0 0 0 0 1 1 1 1 1 1))
+  "C kDistanceCacheIndex: short-distance cache slot per short code 0..15.")
+(declaim (type (simple-array fixnum (16)) +zdc-index+))
+(defparameter +zdc-offset+
+  (make-array 16 :element-type 'fixnum
+                  :initial-contents '(0 0 0 0 -1 1 -2 2 -3 3 -1 1 -2 2 -3 3))
+  "C kDistanceCacheOffset.")
+(declaim (type (simple-array fixnum (16)) +zdc-offset+))
+(defconstant +z-infinity+ (float 1.7d38 1.0f0))
+
+;;; ZopfliNode as parallel arrays: cost (single-float), and packed
+;;; fixnums mirroring C's bitfields.
+;;;   ZLEN[i]  = copy-len | ((copy-len + 9 - len-code) << 25)
+;;;   ZINS[i]  = (short-code << 27) | insert-len
+;;;   ZDICT[i] = 1 when the copy is a static-dictionary reference (C
+;;;              derives this from the distance at command creation; our
+;;;              emission re-derives shorts from the ring, so we keep the
+;;;              flag explicitly).
+(defstruct (zmodel (:constructor make-zmodel (cost-cmd cost-dist lit-prefix
+                                              min-cost-cmd)))
+  (cost-cmd nil :type (simple-array single-float (*)))
+  (cost-dist nil :type (simple-array single-float (*)))
+  (lit-prefix nil :type (simple-array single-float (*)))
+  (min-cost-cmd 1.0f0 :type single-float))
+
+;;; StartPosQueue: 8-slot ring kept sorted by costdiff (C's PosData queue).
+(defstruct (zpq (:constructor make-zpq ()))
+  (pos (make-array 8 :element-type 'fixnum :initial-element 0)
+       :type (simple-array fixnum (8)))
+  (cost (make-array 8 :element-type 'single-float
+                       :initial-element +z-infinity+)
+        :type (simple-array single-float (8)))
+  (costdiff (make-array 8 :element-type 'single-float
+                          :initial-element +z-infinity+)
+            :type (simple-array single-float (8)))
+  ;; 4 distances per slot, flattened slot-major
+  (dc (make-array 32 :element-type 'fixnum :initial-element 0)
+      :type (simple-array fixnum (32)))
+  (idx 0 :type fixnum))
+
+(declaim (inline zq-size))
+(defun zq-size (q)
+  (declare (type zpq q) (optimize (speed 3) (safety 0)))
+  (min (the fixnum (zpq-idx q)) 8))
+
+(defun zq-push (q pos cost costdiff dc0 dc1 dc2 dc3)
+  "C StartPosQueuePush: insert at the ring offset and bubble into sorted
+costdiff order."
+  (declare (type zpq q) (type fixnum pos dc0 dc1 dc2 dc3)
+           (type single-float cost costdiff)
+           (optimize (speed 3) (safety 0)))
+  (let* ((old-idx (zpq-idx q))
+         ;; C: offset = ~(self->idx_++) & 7 -- uses the OLD index.
+         (offset (logand (lognot old-idx) 7))
+         (_u1 (setf (zpq-idx q) (1+ old-idx)))
+         (len (zq-size q))
+         (pos-a (zpq-pos q)) (cost-a (zpq-cost q))
+         (cd-a (zpq-costdiff q)) (dc (zpq-dc q)))
+    (declare (type fixnum offset len old-idx) (ignore _u1))
+    (setf (aref pos-a offset) pos
+          (aref cost-a offset) cost
+          (aref cd-a offset) costdiff)
+    (let ((base (* 4 offset)))
+      (declare (type fixnum base))
+      (setf (aref dc base) dc0
+            (aref dc (+ base 1)) dc1
+            (aref dc (+ base 2)) dc2
+            (aref dc (+ base 3)) dc3))
+    (loop for i of-type fixnum from 1 below len do
+      (let ((a offset) (b (logand (1+ offset) 7)))
+        (declare (type fixnum a b))
+        (when (> (aref cd-a a) (aref cd-a b))
+          (rotatef (aref pos-a a) (aref pos-a b))
+          (rotatef (aref cost-a a) (aref cost-a b))
+          (rotatef (aref cd-a a) (aref cd-a b))
+          (loop for k of-type fixnum from 0 below 4 do
+            (rotatef (aref dc (+ (* 4 a) k)) (aref dc (+ (* 4 b) k)))))
+        (setf offset b)))))
+
+(declaim (inline zq-at))
+(defun zq-at (q k)
+  "C StartPosQueueAt: k-th smallest-costdiff entry (k=0 is the best)."
+  (declare (type zpq q) (type fixnum k) (optimize (speed 3) (safety 0)))
+  (logand (- k (zpq-idx q)) 7))
+
+;;; ---- literal bit-cost estimator (C literal_cost.c) --------------------
+
+(declaim (inline utf8-position parse-as-utf8))
+(defun parse-as-utf8 (in start end)
+  "C BrotliParseAsUTF8: returns (values codepoint bytes-consumed);
+codepoint is -1 for invalid sequences (which count as one byte)."
+  (declare (type (simple-array (unsigned-byte 8) (*)) in)
+           (type fixnum start end) (optimize (speed 3) (safety 0)))
+  (let ((b0 (aref in start)))
+    (cond
+      ((< b0 128) (values b0 1))
+      ((< b0 192) (values #x110000 1))
+      ((< b0 224)
+       (if (and (< (1+ start) end)
+                (<= 128 (aref in (1+ start)) 191))
+           (values (logior (ash (logand b0 31) 6)
+                           (logand (aref in (1+ start)) 63))
+                   2)
+           (values #x110000 1)))
+      ((< b0 240)
+       (if (and (<= (+ start 2) end)
+                (<= 128 (aref in (1+ start)) 191)
+                (<= 128 (aref in (+ start 2)) 191))
+           (let ((cp (logior (ash (logand b0 15) 12)
+                             (ash (logand (aref in (1+ start)) 63) 6)
+                             (logand (aref in (+ start 2)) 63))))
+             (if (and (>= cp #x800) (not (<= #xD800 cp #xDFFF)))
+                 (values cp 3)
+                 (values #x110000 1)))
+           (values #x110000 1)))
+      ((< b0 245)
+       (if (and (<= (+ start 3) end)
+                (<= 128 (aref in (1+ start)) 191)
+                (<= 128 (aref in (+ start 2)) 191)
+                (<= 128 (aref in (+ start 3)) 191))
+           (let ((cp (logior (ash (logand b0 7) 18)
+                             (ash (logand (aref in (1+ start)) 63) 12)
+                             (ash (logand (aref in (+ start 2)) 63) 6)
+                             (logand (aref in (+ start 3)) 63))))
+             (if (and (>= cp #x10000) (<= cp #x10FFFF))
+                 (values cp 4)
+                 (values #x110000 1)))
+           (values #x110000 1)))
+      (t (values #x110000 1)))))
+
+(defparameter +fast-log2-table+
+  (let ((v (make-array 256 :element-type 'double-float
+                            :initial-element 0.0d0)))
+    (dotimes (i 256 v)
+      (unless (zerop i)
+        (setf (aref v i) (log (float i 1.0d0) 2.0d0)))))
+  "C kBrotliLog2Table: log2 of small integers (log2(0) = 0).")
+(declaim (type (simple-array double-float (256)) +fast-log2-table+)
+         (inline fast-log2))
+(defun fast-log2 (v)
+  "C FastLog2: table lookup below 256, libm log2 above."
+  (declare (type fixnum v) (optimize (speed 3) (safety 0)))
+  (if (< v 256)
+      (aref +fast-log2-table+ v)
+      (log (float v 1.0d0) 2.0d0)))
+
+(defun mostly-utf8-p (data start end)
+  "C BrotliIsMostlyUTF8 with kMinUTF8Ratio = 0.75."
+  (declare (type (simple-array (unsigned-byte 8) (*)) data)
+           (type fixnum start end) (optimize (speed 3) (safety 0)))
+  (let ((size-utf8 0) (i start))
+    (declare (type fixnum size-utf8 i))
+    (loop while (< i end) do
+      (multiple-value-bind (cp bytes) (parse-as-utf8 data i end)
+        (when (< cp #x110000) (incf size-utf8 bytes))
+        (incf i bytes)))
+    (> (/ (float size-utf8 1.0d0) (- end start)) 0.75d0)))
+
+(defun utf8-position (last c clamp)
+  "C UTF8Position."
+  (declare (type fixnum last c clamp))
+  (cond ((< c 128) 0)
+        ((>= c 192) (min 1 clamp))
+        (t (if (< last #xE0) 0 (min 2 clamp)))))
+
+(defun estimate-literal-costs (data start end costs)
+  "C BrotliEstimateBitCostsForLiterals -> COSTS (single-float vector of
+END-START entries), split into C's paths: plain ASCII (window 2000, no
+bump), mostly-UTF8 with sparse multibyte stats (window 495, single
+histogram row, prologue bump), and the general 3x256 position-histogram
+UTF8 path.  The single-row case is a fast path, not an approximation:
+UTF8Position(.., clamp=0) is identically 0, so the general loop without
+position classification computes exactly the same values."
+  (declare (type (simple-array (unsigned-byte 8) (*)) data)
+           (type fixnum start end)
+           (type (simple-array single-float (*)) costs)
+           (optimize (speed 3) (safety 0)))
+  (let* ((len (- end start))
+         (mostly (mostly-utf8-p data start end))
+         (max-utf8
+           (if mostly
+               (let ((c1 0) (c2 0) (last 0))
+                 (declare (type fixnum c1 c2 last))
+                 (loop for i of-type fixnum from start below end do
+                   (let ((c (aref data i)))
+                     (cond ((< c 128) nil)
+                           ((>= c 192) (incf c1))
+                           (t (when (>= last #xE0) (incf c2))))
+                     (setf last c)))
+                 ;; C keeps max_utf8 at 1 even with >=500 three-byte stats
+                 ;; ("should be 2, but 1 compresses better"); only the
+                 ;; sparse-multibyte case drops to 0.
+                 (if (and (< c2 500) (< (+ c1 c2) 25)) 0 1))
+               0)))
+    (declare (type fixnum len max-utf8))
+    (cond
+      ((not mostly)
+       ;; C's plain path: window 2000, one histogram, no prologue bump.
+       (let* ((window 2000)
+              (in-window (min window len))
+              (hist (make-array 256 :element-type 'fixnum
+                                     :initial-element 0)))
+         (declare (type fixnum window in-window))
+         (loop for i of-type fixnum from start below (+ start in-window)
+               do (incf (aref hist (aref data i))))
+         (loop for i of-type fixnum from 0 below len do
+           (let ((p (+ start i)))
+             (declare (type fixnum p))
+             (when (>= i window)
+               (decf (aref hist (aref data (- p window))))
+               (decf in-window))
+             (when (< (+ i window) len)
+               (incf (aref hist (aref data (+ p window))))
+               (incf in-window))
+             (let* ((h (max 1 (aref hist (aref data p))))
+                    (cost (+ (- (fast-log2 in-window)
+                                (fast-log2 h))
+                             0.029d0)))
+               (declare (type double-float cost))
+               (when (< cost 1.0d0)
+                 (setf cost (+ (* 0.5d0 cost) 0.5d0)))
+               (setf (aref costs i) (float cost 1.0f0)))))))
+      ((zerop max-utf8)
+       ;; Single-row fast path (window 495 + prologue bump): byte-identical
+       ;; to the general UTF8 loop because UTF8Position(.., 0) == 0 always.
+       (let* ((window 495)
+              (in-window (min window len))
+              (hist (make-array 256 :element-type 'fixnum
+                                     :initial-element 0)))
+         (declare (type fixnum window in-window))
+         (loop for i of-type fixnum from start below (+ start in-window)
+               do (incf (aref hist (aref data i))))
+         (loop for i of-type fixnum from 0 below len do
+           (let ((p (+ start i)))
+             (declare (type fixnum p))
+             (when (>= i window)
+               (decf (aref hist (aref data (- p window))))
+               (decf in-window))
+             (when (< (+ i window) len)
+               (incf (aref hist (aref data (+ p window))))
+               (incf in-window))
+             (let* ((h (max 1 (aref hist (aref data p))))
+                    (cost (+ (- (fast-log2 in-window)
+                                (fast-log2 h))
+                             0.029d0)))
+               (declare (type double-float cost))
+               (when (< cost 1.0d0)
+                 (setf cost (+ (* 0.5d0 cost) 0.5d0)))
+               (when (< i 2000)
+                 (incf cost (+ 0.35d0 (* 0.000175d0 i))))
+               (setf (aref costs i) (float cost 1.0f0)))))))
+      (t
+       ;; General UTF8 path: 3x256 position histograms, window 495.
+       (let* ((window 495)
+              (in-window (min window len))
+              (hist (make-array (* 3 256) :element-type 'fixnum
+                                          :initial-element 0))
+              (in-u (make-array 3 :element-type 'fixnum
+                                    :initial-element 0)))
+         (declare (type fixnum window in-window))
+         (let ((last 0) (upos 0))
+           (declare (type fixnum last upos))
+           (loop for i of-type fixnum from start below (+ start in-window) do
+             (let ((c (aref data i)))
+               (incf (aref hist (+ (* 256 upos) c)))
+               (incf (aref in-u upos))
+               (setf upos (utf8-position last c max-utf8)
+                     last c))))
+         (loop for i of-type fixnum from 0 below len do
+           (let ((p (+ start i)))
+             (declare (type fixnum p))
+             (when (>= i window)
+               (let* ((c (if (< i (1+ window)) 0
+                             (aref data (- p window 1))))
+                      (lc (if (< i (+ window 2)) 0
+                              (aref data (- p window 2))))
+                      (upos (utf8-position lc c max-utf8)))
+                 (declare (type fixnum c lc upos))
+                 (decf (aref hist (+ (* 256 upos)
+                                     (aref data (- p window)))))
+                 (decf (aref in-u upos))))
+             (when (< (+ i window) len)
+               (let* ((c (aref data (+ p window -1)))
+                      (lc (aref data (+ p window -2)))
+                      (upos (utf8-position lc c max-utf8)))
+                 (declare (type fixnum c lc upos))
+                 (incf (aref hist (+ (* 256 upos)
+                                     (aref data (+ p window)))))
+                 (incf (aref in-u upos))))
+             (let* ((c (if (< i 1) 0 (aref data (1- p))))
+                    (lc (if (< i 2) 0 (aref data (- p 2))))
+                    (upos (utf8-position lc c max-utf8))
+                    (h (max 1 (aref hist (+ (* 256 upos) (aref data p)))))
+                    (cost (+ (- (fast-log2 (aref in-u upos))
+                                (fast-log2 h))
+                             0.029d0)))
+               (declare (type fixnum upos) (type double-float cost))
+               (when (< cost 1.0d0)
+                 (setf cost (+ (* 0.5d0 cost) 0.5d0)))
+               (when (< i 2000)
+                 (incf cost (+ 0.35d0 (* 0.000175d0 i))))
+               (setf (aref costs i) (float cost 1.0f0))))))))
+    costs))
+
+(defun zopfli-analytic-model (data n)
+  "C ZopfliCostModelSetFromLiteralCosts: estimated literal costs as a
+prefix sum + analytic command/distance costs (log2(11+i)/log2(20+i))."
+  (declare (type (simple-array (unsigned-byte 8) (*)) data)
+           (type fixnum n) (optimize (speed 3) (safety 0)))
+  (let* ((raw (make-array (max 1 n) :element-type 'single-float
+                                    :initial-element 0.0f0))
+         (prefix (make-array (+ n 2) :element-type 'single-float
+                                     :initial-element 0.0f0))
+         (cc (make-array 704 :element-type 'single-float
+                             :initial-element 0.0f0))
+         (cd (make-array 64 :element-type 'single-float
+                            :initial-element 0.0f0)))
+    (declare (type (simple-array single-float (*)) raw prefix cc cd))
+    (when (plusp n) (estimate-literal-costs data 0 n raw))
+    ;; C's literal_costs prefix sum (its carry dance reduces to this).
+    (dotimes (i n)
+      (setf (aref prefix (1+ i)) (+ (aref prefix i) (aref raw i))))
+    (dotimes (i 704)
+      (setf (aref cc i) (float (log (float (+ 11 i) 1.0d0) 2.0d0) 1.0f0)))
+    (dotimes (i 64)
+      (setf (aref cd i) (float (log (float (+ 20 i) 1.0d0) 2.0d0) 1.0f0)))
+    (make-zmodel cc cd prefix (float (log 11.0d0 2.0d0) 1.0f0))))
+
+(declaim (inline encode-postfix postfix-extra))
+(defun encode-postfix (d np nd)
+  "Distance D (>=1) -> distance code under NPOSTFIX=NP NDIRECT=ND; inverse
+of decompress.lisp's decode branches (RFC 7932 sect. 4).  For (0, 0) this
+is byte-for-byte ENCODE-DISTANCE."
+  (declare (type fixnum d np nd))
+  (if (<= d nd)
+      (+ d 15)
+      (let* ((x (- d nd 1))
+             (mask (1- (ash 1 np)))
+             (lcode (logand x mask))
+             (y (ash x (- np)))
+             (n (if (= y 0) 1 (- (integer-length (+ y 4)) 2)))
+             (b (if (>= y (- (* 3 (ash 1 n)) 4)) 1 0)))
+        (declare (type fixnum x mask lcode y n b))
+        (+ 16 nd (ash (+ (* 2 (1- n)) b) np) lcode))))
+
+(defun postfix-extra (d np nd)
+  "Number of extra distance bits for D under (NP, ND)."
+  (declare (type fixnum d np nd))
+  (if (<= d nd)
+      0
+      (let* ((x (- d nd 1))
+             (y (ash x (- np))))
+        (declare (type fixnum x y))
+        (if (= y 0) 1 (- (integer-length (+ y 4)) 2)))))
+
+(defun zopfli-set-cost (histo size literal-p costs)
+  "C SetCost: Shannon costs from a histogram; zero-count symbols get
+log2(sum+missing)+2 (missing-symbol accounting only for non-literal
+histograms)."
+  (declare (type (simple-array fixnum (*)) histo)
+           (type (simple-array single-float (*)) costs)
+           (type fixnum size) (type boolean literal-p)
+           (optimize (speed 3) (safety 0)))
+  (let ((sum 0))
+    (declare (type fixnum sum))
+    (dotimes (i size) (incf sum (aref histo i)))
+    (let* ((log2sum (if (plusp sum) (log (float sum 1.0d0) 2.0d0) 0.0d0))
+           (missing sum)
+           (mcost 0.0d0))
+      (declare (type double-float log2sum mcost)
+               (type fixnum missing))
+      (unless literal-p
+        (dotimes (i size) (when (zerop (aref histo i)) (incf missing))))
+      (setf mcost (+ (log (float missing 1.0d0) 2.0d0) 2.0d0))
+      (dotimes (i size)
+        (let ((h (aref histo i)))
+          (setf (aref costs i)
+                (if (zerop h)
+                    (float mcost 1.0f0)
+                    (float (max 1.0d0 (- log2sum
+                                         (log (float h 1.0d0) 2.0d0)))
+                           1.0f0))))))
+    costs))
+
 (defun %lz77 (data sap window use-dict dict-limit base-pos max-chain lazy
               skip-match insert-interior &optional (score-p nil) (checks 1)
               (bt nil))
@@ -645,7 +1086,12 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
            (optimize (speed 3) (safety 0)))
   #+sbcl (declare (type sb-sys:system-area-pointer sap))
   #-sbcl (declare (ignore sap))
-  (let* ((n (length data)) (min-match 4))
+  (let* ((n (length data)) (min-match 4)
+         ;; Zopfli DP node arrays are whole-input sized (~52 bytes/byte of
+         ;; input): cap BT/DP activation so 16 MiB chunks fall back to the
+         ;; score path (C runs the DP per ~128 KiB metablock; per-chunk DP
+         ;; partitioning is future work).
+         (bt (if (and bt (<= n #.(ash 1 23))) bt nil)))
     (if (< n min-match)
         (if (zerop n) '() (list (list n 0 0 0 nil)))
         (let* ((hbits 17) (hmask (1- (ash 1 hbits)))
@@ -664,6 +1110,25 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                (bt-next 0) (bt-cnt 0) (bt-cpos -1) (bt-cbest 0)
                (bt-md (and bt (make-array 128 :element-type 'fixnum)))
                (bt-ml (and bt (make-array 128 :element-type 'fixnum)))
+               ;; Zopfli DP state (only when BT is active)
+               (zmodel (and bt (zopfli-analytic-model data n)))
+               (zcostf (and bt (make-array (1+ n)
+                                :element-type 'single-float)))
+               ;; No :initial-element on the big arrays: z-iterate FILLs
+               ;; them before any read (the initial-element form consed a
+               ;; second full-array fill per compress).
+               (zlen (and bt (make-array (1+ n) :element-type 'fixnum)))
+               (zdist (and bt (make-array (1+ n) :element-type 'fixnum)))
+               (zins (and bt (make-array (1+ n) :element-type 'fixnum)))
+               (zsc (and bt (make-array (1+ n) :element-type 'fixnum)))
+               (znext (and bt (make-array (1+ n) :element-type 'fixnum)))
+               (zdict (and bt (make-array (1+ n) :element-type 'fixnum)))
+               (zq (and bt (make-zpq)))
+               (z-sdc #(4 11 15 16))
+               (z-dc (make-array 4 :element-type 'fixnum))
+               (z-dmatch (and bt (make-array 25 :element-type 'fixnum)))
+               (z-cands (if (and bt (>= bt 64)) 5 1))
+               (z-maxlen (if (and bt (>= bt 64)) 325 150))
                (head (make-array (ash 1 hbits)
                                  :element-type '(unsigned-byte 32)
                                  :initial-element #xFFFFFFFF))
@@ -698,6 +1163,18 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                          bt-buckets bt-forest)
                    (type (or null (simple-array fixnum (128))) bt-md bt-ml)
                    (type fixnum bt-short bt-next bt-cnt bt-cpos bt-cbest)
+                   ;; Plain (non-null) types: the z-state is only ever
+                   ;; touched from the z-labels, which run iff BT is active;
+                   ;; the (or null ...) form forced a hairy type check on
+                   ;; every aref.
+                   (type zmodel zmodel)
+                   (type (simple-array single-float (*)) zcostf)
+                   (type (simple-array fixnum (*))
+                         zlen zdist zins zsc znext zdict)
+                   (type (simple-array fixnum (25)) z-dmatch)
+                   (type zpq zq)
+                   (type (simple-array fixnum (4)) z-dc)
+                   (type fixnum z-cands z-maxlen)
                    (type (or null (simple-array fixnum (*))) dc)
                    (type fixnum p lit-start last skip dict-used last-dist
                             shift min-cop))
@@ -880,7 +1357,7 @@ returns the cached result."
                                                ;; POS+MAX-LEN = C's
                                                ;; max_length - cur_len limit
                                                ;; (128 for store scans).
-                                               (mlen2 (+ prev clen)
+(mlen2 (+ prev clen)
                                                       (+ pos clen)
                                                       (+ pos max-len)))))
                                   (declare (type fixnum clen len))
@@ -952,6 +1429,360 @@ chain walk uses."
                                  (setf best-score score
                                        best-len ml best-dist d))))))
                        (values best-len best-dist best-score)))
+                   ;; ---- Zopfli DP core (C backward_references_hq) --------
+                   (z-cache (pos)
+                     "C ComputeDistanceCache: the four last distances at POS
+following the shortcut chain, then the stream-starting cache."
+                     (declare (type fixnum pos))
+                     (let ((idx 0) (p (aref zsc pos)))
+                       (declare (type fixnum idx p))
+                       (loop while (and (< idx 4) (> p 0)) do
+                         (let* ((ins (logand (aref zins p) #x7FFFFFF))
+                                (clen (logand (aref zlen p) #x1FFFFFF)))
+                           (declare (type fixnum ins clen))
+                           (setf (aref z-dc idx) (aref zdist p))
+                           (incf idx)
+                           (setf p (aref zsc (- p clen ins)))))
+                       (loop for i of-type fixnum from idx below 4 do
+                         (setf (aref z-dc i) (aref z-sdc i))))
+                     z-dc)
+                   (z-shortcut (pos)
+                     "C ComputeDistanceShortcut: POS when its command pushes
+the ring (non-dictionary, not short code 1), else the predecessor's
+shortcut."
+                     (declare (type fixnum pos))
+                     (if (zerop pos)
+                         0
+                         (let* ((clen (logand (aref zlen pos) #x1FFFFFF))
+                                (ins (logand (aref zins pos) #x7FFFFFF))
+                                (short (ash (aref zins pos) -27)))
+                           (declare (type fixnum clen ins short))
+                           (if (and (zerop short) (zerop (aref zdict pos)))
+                               pos
+                               (aref zsc (- pos clen ins))))))
+                   (z-update-node (pos start len len-code dist short dictp cost)
+                     "C UpdateZopfliNode plus our explicit dictionary flag."
+                     (declare (type fixnum pos start len len-code dist short
+                                   dictp)
+                              (type single-float cost)
+                              (optimize (speed 3) (safety 0)))
+                     (let ((q (+ pos len)))
+                       (declare (type fixnum q))
+                       (setf (aref zlen q)
+                             (logior len (ash (+ len 9 (- len-code)) 25))
+                             (aref zdist q) dist
+                             (aref zins q) (logior (ash short 27)
+                                                   (- pos start))
+                             (aref zdict q) dictp
+                             (aref zcostf q) cost)))
+                   (z-eval (pos)
+                     "C EvaluateNode: record the shortcut, and queue POS
+when the command path is cheaper than pure literals."
+                     (declare (type fixnum pos))
+                     (let ((cost (aref zcostf pos))
+                           (prefix (zmodel-lit-prefix zmodel)))
+                       (declare (type single-float cost)
+                                (type (simple-array single-float (*)) prefix))
+                       (setf (aref zsc pos) (z-shortcut pos))
+                       (when (<= cost (aref prefix pos))
+                         (z-cache pos)
+                         (zq-push zq pos cost (- cost (aref prefix pos))
+                                  (aref z-dc 0) (aref z-dc 1)
+                                  (aref z-dc 2) (aref z-dc 3)))))
+                   (z-minlen (start-cost pos)
+                     "C ComputeMinimumCopyLength."
+                     (declare (type fixnum pos) (type single-float start-cost))
+                     (let ((min-cost start-cost) (len 2)
+                           (bucket 4) (offset 10))
+                       (declare (type single-float min-cost)
+                                (type fixnum len bucket offset))
+                       (loop while (and (<= (+ pos len) n)
+                                        (<= (aref zcostf (+ pos len)) min-cost))
+                             do
+                         (incf len)
+                         (when (= len offset)
+                           (incf min-cost 1.0f0)
+                           (incf offset bucket)
+                           (setf bucket (* 2 bucket))))
+                       len))
+                   (z-update (pos dict-p)
+                     "C UpdateNodes: evaluate POS, then try short-code,
+match, and (when DICT-P) dictionary candidates from every queued start
+position.  Returns the longest newly-reached copy length."
+                     (declare (type fixnum pos) (type boolean dict-p))
+                     (let ((max-len (- n pos)) (result 0))
+                       (declare (type fixnum max-len result))
+                       (z-eval pos)
+                       (let* ((k0 (zq-at zq 0))
+                              (prefix (zmodel-lit-prefix zmodel))
+                              (min-cost
+                                (+ (aref (zpq-cost zq) k0)
+                                   (zmodel-min-cost-cmd zmodel)
+                                   (- (aref prefix pos)
+                                      (aref prefix (aref (zpq-pos zq) k0)))))
+                              (min-len (z-minlen min-cost pos)))
+                         (declare (type fixnum k0 min-len)
+                                  (type (simple-array single-float (*)) prefix)
+                                  (type single-float min-cost))
+                         (loop for k of-type fixnum
+                                 below (min z-cands (zq-size zq)) do
+                           (let* ((ki (zq-at zq k))
+                                  (start (aref (zpq-pos zq) ki)))
+                             (declare (type fixnum ki start))
+                             (multiple-value-bind (icode ixv ixb)
+                                 (length-code (- pos start) +ins-code+ +ins-xval+ +ins-xbits+
+                                              +ins-base+ +ins-bits+)
+                               (declare (ignore ixv))
+                               (let ((base (+ (aref (zpq-costdiff zq) ki)
+                                              (float ixb 1.0f0)
+                                              (aref prefix pos))))
+                                 (declare (type fixnum icode)
+                                          (type single-float base))
+                                 ;; --- 16 short-distance candidates ---
+                                 (let ((best (1- min-len)) (j 0))
+                                   (declare (type fixnum best j))
+                                   (loop while (and (< j 16) (< best max-len))
+                                         do
+                                     (let* ((slot (aref +zdc-index+ j))
+                                            (back (+ (aref (zpq-dc zq)
+                                                           (+ (* 4 ki) slot))
+                                                     (aref +zdc-offset+ j))))
+                                       (declare (type fixnum slot back))
+                                       (incf j)
+                                       ;; C: max_distance = min(pos, window),
+                                       ;; prev_ix >= cur_ix => continue, and
+                                       ;; the continuation-byte prefilter.
+                                       (when (and (>= back 1) (<= back pos)
+                                                  (<= back window)
+                                                  (< (+ pos best) n)
+                                                  (= (aref data (+ pos best))
+                                                     (aref data (+ (- pos back) best))))
+                                         (let ((len (mlen (- pos back) pos)))
+                                           (declare (type fixnum len))
+                                           (when (> len best)
+                                             (let ((l (1+ best))
+                                                   (dist-add
+                                                     (aref (zmodel-cost-dist
+                                                            zmodel) (1- j))))
+                                               (declare (type fixnum l)
+                                                        (type single-float
+                                                               dist-add))
+                                               (loop while (<= l len) do
+                                                 (progn
+                                                 (multiple-value-bind (cc cxv cxb)
+                                                     (length-code l +cpy-code+ +cpy-xval+ +cpy-xbits+
+                                                                  +cpy-base+
+                                                                  +cpy-bits+)
+                                                   (declare (ignore cxv cxb))
+                                                   (let* ((cmdc
+                                                            (if (and (= j 1)
+                                                                     (< icode 8)
+                                                                     (< cc 16))
+                                                                (cmd-symbol-dist0 icode cc)
+                                                                (cmd-symbol icode cc)))
+                                                     (cost
+                                                       (+ (if (< cmdc 128)
+                                                              base
+                                                              (+ base dist-add))
+                                                          (float cxb 1.0f0)
+                                                          (aref (zmodel-cost-cmd zmodel) cmdc))))
+                                                     (declare (type fixnum cmdc)
+                                                              (type single-float cost))
+                                                     (when (< cost (aref zcostf (+ pos l)))
+                                                       (z-update-node pos start l l back j 0 cost)
+                                                       (when (> l result)
+                                                         (setf result l)))))
+                                             (setf best l)
+                                             (incf l))))))))))
+                                 ;; --- BT + dictionary match candidates ---
+                                 ;; C keeps `len` across the match loop: each
+                                 ;; copy length is tried with the first match
+                                 ;; that reaches it (O(total lengths), not
+                                 ;; O(matches x lengths)), and computes the
+                                 ;; distance cost once per match.
+                                 (unless (>= k 2)
+                                   ;; C's matches[] = BT matches followed by
+                                   ;; one dictionary match per length (the
+                                   ;; dict matches carry their own length),
+                                   ;; with `len` carried across the loop.
+                                   (let ((mi 0) (dl 4) (len min-len))
+                                     (declare (type fixnum mi dl len))
+                                     (loop
+                                       (let ((dist 0) (max-m 0) (isdict 0))
+                                         (declare (type fixnum dist max-m isdict))
+                                         (cond
+                                           ((< mi bt-cnt)
+                                            (setf dist (aref bt-md mi)
+                                                  max-m (aref bt-ml mi))
+                                            (incf mi))
+                                           ((and dict-p (<= dl 24))
+                                            (loop while (and (<= dl 24)
+                                                             (zerop (aref z-dmatch dl)))
+                                                  do (incf dl))
+                                            (when (> dl 24)
+                                              (return))
+                                            (setf dist (aref z-dmatch dl)
+                                                  max-m dl
+                                                  isdict 1)
+                                            (incf dl))
+                                           (t (return)))
+                                         (when (and (< len max-m)
+                                                    (or (plusp isdict)
+                                                        (> max-m z-maxlen)))
+                                           (setf len max-m))
+                                         (multiple-value-bind (dcode dxv)
+                                             (encode-postfix dist 0 0)
+                                           (declare (ignore dxv))
+                                           (let ((dist-cost
+                                                   (+ base
+                                                      (float (postfix-extra
+                                                              dist 0 0) 1.0f0)
+                                                      (aref (zmodel-cost-dist
+                                                            zmodel) dcode))))
+                                             (declare (type fixnum dcode)
+                                                      (type single-float
+                                                             dist-cost))
+                                             (loop while (<= len max-m) do
+                                               (multiple-value-bind (cc cxv cxb)
+                                                   (length-code len +cpy-code+ +cpy-xval+ +cpy-xbits+
+                                                                +cpy-base+
+                                                                +cpy-bits+)
+                                                 (declare (ignore cxv cxb))
+                                                 (let* ((cmdc (cmd-symbol icode cc))
+                                                        (cost (+ dist-cost
+                                                                 (float cxb 1.0f0)
+                                                                 (aref (zmodel-cost-cmd
+                                                                        zmodel)
+                                                                       cmdc))))
+                                                   (declare (type fixnum cmdc)
+                                                            (type single-float
+                                                                   cost))
+                                                   (when (< cost (aref zcostf (+ pos len)))
+                                                     (z-update-node pos start len len dist 0 isdict cost)
+                                                     (when (> len result)
+                                                       (setf result len)))))
+                                               (incf len))))))))))))
+                       result)))
+                   (z-iterate ()
+                     "C BrotliZopfliComputeShortestPath: per position BT+dict
+candidates into the DP (analytic cost model), long-copy skip logic, then
+the shortest path becomes our command list."
+                     (fill zcostf +z-infinity+)
+                     (fill zlen 1)
+                     (fill zdist 0)
+                     (fill zins 0)
+                     ;; zsc/znext need no fill: z-eval writes zsc[pos]
+                     ;; before anything reads it (the shortcut chain only
+                     ;; looks at earlier positions) and the backward walk
+                     ;; writes znext before the forward walk reads it.
+                     (fill zdict 0)
+                     (setf (aref zlen 0) 0
+                           (aref zcostf 0) 0.0f0)
+                     (let ((i 0))
+                       (declare (type fixnum i))
+                       (loop while (< (+ i 3) n) do
+                         (let* ((cnt (progn (bt-do i t) bt-cnt))
+                                (dok nil))
+                           (declare (type fixnum cnt) (type boolean dok))
+                           ;; C FindAllMatches consults the dictionary for
+                           ;; every word length >= max(4, best_len + 1); with
+                           ;; best >= 24 no word can contribute, so skip the
+                           ;; probe entirely.  Each length gets its own
+                           ;; candidate (C appends one match per length).
+                           (when (and use-dict
+                                      (< (if (plusp cnt) bt-cbest 0) 24)
+                                      (or (null dict-limit)
+                                          (< dict-used dict-limit)))
+                             (fill z-dmatch 0)
+                             (dict-matches-at data i n
+                                              (max 4 (1+
+                                                      (if (plusp cnt)
+                                                          bt-cbest 0)))
+                                              (min window (+ base-pos i))
+                                              z-dmatch)
+                             (setf dok t))
+                           ;; C: only the longest match survives when it
+                           ;; exceeds MaxZopfliLen.
+                           (when (and (> cnt 0)
+                                      (> (aref bt-ml (1- cnt)) z-maxlen))
+                             (setf (aref bt-md 0) (aref bt-md (1- cnt))
+                                   (aref bt-ml 0) (aref bt-ml (1- cnt))
+                                   cnt 1))
+                           (let ((skip (z-update i dok)))
+                             (declare (type fixnum skip))
+                             (when (< skip 16384) (setf skip 0))
+                             (when (and (= cnt 1)
+                                        (> (aref bt-ml 0) z-maxlen))
+                               (setf skip (max (aref bt-ml 0) skip)))
+                             (when (> skip 1)
+                               (let ((beg (1+ i))
+                                     (end (min (+ i skip) (- n 127))))
+                                 (declare (type fixnum beg end))
+                                 ;; C StoreRangeH10 for the copy tail (both
+                                 ;; q10 and q11: the q11 pre-pass also skips
+                                 ;; long-copy interiors with StoreRange): the
+                                 ;; bulk at stride 8, the last 63 positions
+                                 ;; individually, and the 64..574 window's
+                                 ;; bulk is skipped.
+                                 (let ((ii beg) (jj beg))
+                                   (declare (type fixnum ii jj))
+                                   (when (<= (+ beg 63) end)
+                                     (setf ii (- end 63)))
+                                   (when (<= (+ beg 512) ii)
+                                     (loop while (< jj ii) do
+                                       (bt-do jj nil)
+                                       (incf jj 8)))
+                                   (loop while (< ii end) do
+                                     (bt-do ii nil)
+                                     (incf ii))))
+                               (decf skip)
+                               (loop while (plusp skip) do
+                                 (incf i)
+                                 (when (>= (+ i 3) n) (return))
+                                 (z-eval i)
+                                 (decf skip)))
+                             (incf i)))))
+                     ;; C ComputeShortestPathFromNodes -> backward links
+                     (let ((index n))
+                       (declare (type fixnum index))
+                       (loop while (and (zerop (logand (aref zins index) #x7FFFFFF))
+                                        (= (aref zlen index) 1))
+                             do (decf index))
+                       (setf (aref znext index) -1)
+                       (loop while (/= index 0) do
+                         (let ((len (+ (logand (aref zlen index) #x1FFFFFF)
+                                       (logand (aref zins index) #x7FFFFFF))))
+                           (declare (type fixnum len))
+                           (decf index len)
+                           (setf (aref znext index) len))))
+                     ;; C BrotliZopfliCreateCommands -> our command list
+                     (let ((pos 0) (off (aref znext 0)) (out cmds))
+                       (declare (type fixnum pos off) (type list out))
+                       (loop while (/= off -1) do
+                         (let* ((q (+ pos off))
+                                (cpy (logand (aref zlen q) #x1FFFFFF))
+                                (ins (logand (aref zins q) #x7FFFFFF))
+                                (dist (aref zdist q))
+                                (dictp (aref zdict q))
+                                (lit-start pos))
+                           (declare (type fixnum q cpy ins dist dictp
+                                          lit-start))
+                           (incf pos ins)
+                           (when (plusp dictp) (incf dict-used))
+                           ;; DICTP must be a boolean: downstream consumers
+                           ;; (plan-commands ring push, split-command-at)
+                           ;; test it with (or dictp ...) where 0 is truthy.
+                           (push (list ins lit-start cpy dist
+                                       (and (plusp dictp) t))
+                                 out)
+                           ;; C: offset = next->u.next = the node's own slot.
+                           (setf off (aref znext q))
+                           (incf pos cpy)))
+                       (let ((trail (- n pos)))
+                         (declare (type fixnum trail))
+                         (when (plusp trail)
+                           (push (list trail pos 0 0 nil) out)))
+                       (nreverse out)))
                    (find-match (pos h)
                      (declare (type fixnum pos h))
                      (let ((cand (aref head h)) (best-len 0) (best-dist 0))
@@ -1114,8 +1945,13 @@ score rather than length.  Returns (values len dist score)."
                                (incf p step)
                                (incf skip))
                              (incf p)))))
-            (declare (inline hash ins mlen mlen2 probe-ok penalty))
-            (loop while (<= p last) do
+            (declare (inline hash ins mlen mlen2 probe-ok penalty
+                             zq-push z-minlen bt-hash z-update-node
+                             z-shortcut z-eval))
+            (if bt
+                (z-iterate)
+                (progn
+                  (loop while (<= p last) do
               (let* ((ph (hash p)))
                 (multiple-value-bind (best-len best-dist best-score)
                     (cond (bt (if score-p (bt-score p) (bt-longest p)))
@@ -1127,7 +1963,10 @@ score rather than length.  Returns (values len dist score)."
                     (when (and use-dict
                                (or (null dict-limit) (< dict-used dict-limit)))
                       (multiple-value-bind (dict-len dict-idx dict-tid)
-                          (dict-match-at data p n)
+                          ;; min-len = best-len + 1 reproduces the outer
+                          ;; (> dict-len best-len) guard while pruning the
+                          ;; candidate scan (C: minlen = max(4, best_len+1)).
+                          (dict-match-at data p n (1+ best-len))
                         (when (and (>= dict-len 9) (> dict-len best-len))
                           (setf dict-p t)
                           (let ((dist (+ (min window (+ base-pos p)) 1 dict-idx
@@ -1202,9 +2041,9 @@ score rather than length.  Returns (values len dist score)."
                                      (progn
                                        (setf done t)
                                        (emit-normal bl bd t ph)))))))))))))
-            (when (< lit-start n)
-              (push (list (- n lit-start) lit-start 0 0 nil) cmds))
-            (nreverse cmds))))))
+                  (when (< lit-start n)
+                    (push (list (- n lit-start) lit-start 0 0 nil) cmds))
+                  (nreverse cmds))))))))
 
 ;;; ---- C Brotli's q0/q1 fast-fragment entropy coding --------------------
 
@@ -1712,11 +2551,11 @@ compression ratio for encoder throughput."
         (loop for i from lit-start below (+ lit-start ins)
               do (incf (aref litf (aref data i))))
         (multiple-value-bind (icode ixv ixb)
-            (length-code ins +ins-lc+ +ins-base+ +ins-bits+)
+            (length-code ins +ins-code+ +ins-xval+ +ins-xbits+ +ins-base+ +ins-bits+)
           (declare (ignore ixv ixb))
           (multiple-value-bind (ccode cxv cxb)
               (if (plusp cpy)
-                  (length-code cpy +cpy-lc+ +cpy-base+ +cpy-bits+)
+                  (length-code cpy +cpy-code+ +cpy-xval+ +cpy-xbits+ +cpy-base+ +cpy-bits+)
                   (values 0 0 0))
             (declare (ignore cxv cxb))
             (let* ((ring-pos (aref probe-rb 4))
@@ -1782,10 +2621,10 @@ compression ratio for encoder throughput."
               (b:w-ensure w (+ slack cost)))
             (decf slack cost))
           (multiple-value-bind (icode ixv ixb)
-              (length-code ins +ins-lc+ +ins-base+ +ins-bits+)
+              (length-code ins +ins-code+ +ins-xval+ +ins-xbits+ +ins-base+ +ins-bits+)
             (multiple-value-bind (ccode cxv cxb)
                 (if (plusp cpy)
-                    (length-code cpy +cpy-lc+ +cpy-base+ +cpy-bits+)
+                    (length-code cpy +cpy-code+ +cpy-xval+ +cpy-xbits+ +cpy-base+ +cpy-bits+)
                     (values 0 0 0))
               (let* ((ring-pos (aref rb 4))
                      (repeat (and (plusp cpy) (not dictp)
@@ -1979,12 +2818,12 @@ per command."
              (ring-pos (aref rb 4)))
         (declare (type fixnum ins lit-start cpy dist ring-pos))
         (multiple-value-bind (icode ixv ixb)
-            (length-code ins +ins-lc+ +ins-base+ +ins-bits+)
+            (length-code ins +ins-code+ +ins-xval+ +ins-xbits+ +ins-base+ +ins-bits+)
           (declare (type fixnum icode ixv ixb))
           (let ((copyp (plusp cpy)))
             (multiple-value-bind (ccode cxv cxb)
                 (if copyp
-                    (length-code cpy +cpy-lc+ +cpy-base+ +cpy-bits+)
+                    (length-code cpy +cpy-code+ +cpy-xval+ +cpy-xbits+ +cpy-base+ +cpy-bits+)
                     (values 0 0 0))
               (declare (type fixnum ccode cxv cxb))
               (let* ((repeat (and copyp (not dictp)

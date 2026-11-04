@@ -148,7 +148,9 @@ ignored, as in DECOMPRESS."
       (let ((r (b:make-brd data istart iend)))
         (setf (b:brd-sap r) (sb-sys:vector-sap data))
         (let ((out (make-outbuf output)))
-          (setf (outbuf-pos out) start (outbuf-limit out) end)
+          (setf (outbuf-pos out) start
+                (outbuf-origin out) start
+                (outbuf-limit out) end)
           (%decode-stream r out)
           (outbuf-pos out))))
     #-(and sbcl little-endian)

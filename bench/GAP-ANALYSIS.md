@@ -1052,3 +1052,119 @@ relevant to this campaign.
 
 Validation: 150/150 tests, repro-split clean, q0-q9 bit-identical to
 r108, roundtrip-checked every measurement script.
+
+## Rev 112: q10/11 zopfli cost-model DP (C backward_references_hq port) — ratio 7/10, speed 3/10
+
+The score matcher (r111) could not close the remaining ratio cells
+(json/text/html-q11/binary-q11): its fixed linear score cannot see
+insert/copy entropy.  This session ports C's zopfli DP wholesale:
+
+**Architecture (now in %lz77, active iff BT):**
+- Cost model: `zopfli-analytic-model` = C SetFromLiteralCosts —
+  `estimate-literal-costs` (C literal_cost.c: mostly-utf8 gate,
+  DecideMultiByteStatsLevel, sliding window 495 (utf8) / 2000 (plain),
+  prologue bump) prefix-summed, plus analytic cmd/dist costs
+  log2(11+i)/log2(20+i).  `fast-log2` mirrors C's FastLog2 (256-entry
+  table below 256, libm above).
+- Node state as packed fixnum arrays (zlen/zins/zdist/zsc/znext/zdict/
+  zcostf), StartPosQueue as `zpq` (8-slot costdiff-sorted ring + per-slot
+  4-distance cache), `z-update` = C UpdateNodes (queue entry k, 16
+  short-code candidates with continuation prefilter, match candidates
+  with C's `len` carry-across-matches, dict candidates), `z-eval` =
+  EvaluateNode, `z-minlen` = ComputeMinimumCopyLength, skip/long-copy
+  logic = C's BROTLI_LONG_COPY_QUICK_STEP + StoreRangeH10 emulation,
+  backward/forward walks = ComputeShortestPathFromNodes/CreateCommands.
+  Parameters verified against quality.h: q10 = MaxZopfliLen 150 /
+  MaxZopfliCandidates 1, q11 = 325 / 5 (bt 16/64 map onto these).
+- Dictionary: `dict-matches-at` mirrors C FindAllStaticDictionaryMatches
+  for our length-preserving transform set — one candidate PER WORD
+  LENGTH >= max(4, best_len+1) (C appends one match per length; the old
+  code only ever tried the single longest word, and only at len >= 9).
+  Index rebuilt as a 2^16 direct-mapped bucket array (C
+  dictionary->buckets[Hash15] style) replacing the EQL hash-table.
+
+**Root causes found while debugging (all measured):**
+1. **Content corruption (n>=64K, both decoders wrong)**: `z-iterate`
+   pushed DICTP as integer 0/1 but `plan-commands`/`split-command-at`
+   test `(or dictp ...)` — 0 is truthy in Lisp, so the distance ring was
+   NEVER pushed; short codes decoded against the stale initial ring
+   {16,15,11,4}.  Symptom: every command individually consistent (DCMD
+   probe 0 hits) yet streams decoded to wrong bytes at n>=65536, and
+   "dictionary copy length 2 out of range" at 1 MiB (dist>pos against a
+   decoder whose ring had real distances).  Fix: push `(and (plusp
+   dictp) t)`.
+2. **All-literals DP (ramp 722609 vs 352)**: zq-push used `~(incf idx)`
+   where C uses `~(idx++)` — push and zq-at disagreed by one slot, rank-0
+   read an empty slot with cost=inf, min-len blew up, no candidate ever
+   qualified.
+3. **Heap death / unbounded command walk**: forward walk read
+   `znext[pos]` (post-insert) instead of C's `next->u.next` =
+   `znext[node-slot]`; lit-start had to be the pre-insert position.
+4. **Infinite loop** in the short-candidate l-loop (C's `++l` had no
+   port) and a missing structural `i++` per outer iteration.
+5. **Index OOB** (`bt-md 9743`): bt-do returns the best LENGTH, not the
+   match COUNT — cnt must come from `bt-cnt`.
+6. **Encoding OOB** (index 6167 = raw 256x24): z-update passed the raw
+   insert length as the command symbol's icode instead of the
+   length-code from `length-code`.
+7. **`decompress-into` with a nonzero output offset decoded dictionary
+   references as regular copies** (new q11 streams exposed it; INTO-API
+   test): outbuf-pos included the buffer offset, so max-dist did too and
+   dist=logical+1 fell below the shifted threshold.  Fix: `outbuf-origin`
+   slot; max-dist and the ring-push guard are now stream-relative
+   (POS-ORIGIN).  Plain decompress/offset-0 paths are unchanged.
+
+**Speed work (sb-sprof guided; html q10 went 0.32x -> 0.73x C core):**
+- C StoreRangeH10 fidelity: long-copy tails stored at stride 8 with the
+  last 63 individually (both q10 and q11 — the q11 pre-pass also skips
+  interiors), not every position: text q11 5.8 -> 10.0 MiB/s.
+- `%match-len-sap` VOP was never declared INLINE — every mlen/mlen2 was
+  a full call (5.25M/Run on text); declaim added in vops.lisp.
+- `estimate-literal-costs` single-row fast path (UTF8Position(..,0) == 0
+  identically, so the 3x256 loop degenerates without it) + fast-log2
+  table + inline utf8-position/parse-as-utf8: text q10 12.5 -> 16.7.
+- Hoisted encode-postfix/postfix-extra/dist-cost out of the per-length
+  loops; length-code now takes the three tables directly (was a list =
+  2 CARs per call across 30M+ calls/Run); plain (non-or-null) type
+  declarations for the z-state; dropped provably-unneeded zsc/znext
+  fills; inline z-eval/zq-push/z-minlen/z-shortcut/z-update-node/
+  bt-hash/load-dict/dict-index; typed dict bucket AREF.
+
+**Final gates (1 MiB, median-of-3, vs C 1.0.9 core):**
+  ratio <= 1.10: 7/10 PASS (was 4/10) — html 1.019/1.061, json
+  1.021/1.079, source 1.037/1.055, text q10 1.083.  Failing: binary
+  1.106/1.106 (both), text q11 1.111 - all within 1.1% of parity.
+  speed >= 1.0x: 3/10 PASS — binary 1.74x/1.78x, source q11 1.11x.
+  Failing: html 0.73/0.97, json 0.72/0.98, source q10 0.85, text
+  0.79/0.52.  q0-q9 byte-identical (35/35), 150/150 tests,
+  repro-split clean.
+
+**Why speed regressed vs r111 (10/10 -> 3/10):** r111 ran the cheap
+score path at q10/11 (2.7-11.2x C); the DP replaces it everywhere.  The
+DP does C-mandated work (16 short candidates + full BT walk per
+position: 12.5M walk nodes and 29M loop iterations per 1 MiB on html)
+at ~2x C's per-op cost.  html/json q11 are at 0.97-0.98x (one push from
+parity); text q11 is worst because the second (exact-cost) iteration is
+NOT yet wired - C's q11 runs ZopfliIterate twice (analytic then
+SetFromCommands), which is both its q11 ratio edge (C text q11 -2.9% vs
+q10) and its speed cost.  Wiring it C-faithfully requires pre-collected
+matches (one FindAllMatches pass + two DP passes over the same
+matches[]), otherwise a second bt-do pass would sink q11 speed further.
+
+**Next steps, in order:**
+1. Wire C's q11 second iteration with pre-collected matches (flat
+   num_matches[]/matches[] like BrotliCreateHqZopfliBackwardReferences):
+   targets text q11 ratio 1.111 -> ~1.08 and likely binary q11 as well.
+2. Close binary q10 (1.106): differential our DP command stream vs C's
+   on the binary corpus - our own score path reached 1.076 there, so the
+   DP is leaving matches on the table (candidate/queue divergence to be
+   found by diffing node costs).
+3. Speed: the remaining gap is concentrated in %lz77 self (49%) and
+   BT-DO (30%) - per-node/per-iteration constant factors vs gcc.  Big
+   rocks left: none algorithmic (structure is C-faithful); expect
+   micro-gains only unless the short-candidate loop is restructured.
+
+Validation for this rev: 150/150 tests, repro-split clean, q0-q9
+bit-identical to r111 (35/35 sweep cells), ramp q5 = 352, html
+prefix roundtrips at every size 1K..1M, every measurement script
+re-run after each change.

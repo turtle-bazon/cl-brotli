@@ -19,6 +19,10 @@
       (sb-sys:system-area-pointer fixnum fixnum fixnum)
       fixnum ()
       :overwrite-fndb-silently t)
+  ;; Without INLINE, every mlen/mlen2 is a full static-fn call; with it the
+  ;; template above open-codes at each call site (this was ~40% of the q10/11
+  ;; BT walk on text).
+  (declaim (inline cl-brotli.lisp::%match-len-sap))
   (sb-ext:without-package-locks
     (define-vop (cl-brotli-match-len-sap)
       (:policy :fast-safe)
