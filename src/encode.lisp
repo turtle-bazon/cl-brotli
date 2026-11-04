@@ -1811,27 +1811,183 @@ Returns (values K CMAP) with K in {1,2,3}."
              (b:wbits w k 3)
              (b:wbits w (- n (1+ (ash 1 k))) k)))))
 
-(defun write-lit-context-map (w cmap k)
-  "Write the64-static-context -> K-tree map in READ-CONTEXT-MAP's format
-with RLEMAX=0 and the IMTF bit clear."
-  (declare (type b:bwr w) (type fixnum k))
+(defun write-context-map (w cmap size k)
+  "Write SIZE context-map entries mapping onto K trees in READ-CONTEXT-MAP's
+format with RLEMAX=0 and the IMTF bit clear."
+  (declare (type b:bwr w) (type fixnum size k))
   (b:wbits w 0 1)                             ; RLEMAX = 0
   (let* ((freqs (make-array k :element-type 'fixnum :initial-element 1))
          (et (build-etree freqs k 15)))
     (write-etree w et k)
-    (dotimes (cid 64)
+    (dotimes (cid size)
       (declare (type fixnum cid))
       (etree-emit w et (aref cmap cid))))
   (b:wbits w 0 1))                            ; no IMTF
 
-(defun lit-slice (litf k)
-  "The K-th256-symbol histogram of a K*256 flat literal frequency array."
-  (declare (type (simple-array fixnum (*)) litf) (type fixnum k))
-  (let ((f (make-array 256 :element-type 'fixnum :initial-element 0)))
+(defun blen-sym (len)
+  "The block-length prefix symbol for LEN.  +blen-base+ ranges are
+contiguous, so the largest base <= LEN is the correct symbol."
+  (declare (type fixnum len))
+  (loop for s of-type fixnum from 25 downto 0
+        when (<= (aref +blen-base+ s) len) return s))
+
+(defun write-blen (w tree len)
+  "Write block length LEN through the block-length prefix code TREE."
+  (declare (type b:bwr w) (type fixnum len))
+  (let ((s (blen-sym len)))
+    (declare (type fixnum s))
+    (etree-emit w tree s)
+    (b:wbits w (- len (aref +blen-base+ s)) (aref +blen-bits+ s))))
+
+(defun histo-slice (flat k size)
+  "The K-th SIZE-symbol histogram of a flat K*SIZE frequency array."
+  (declare (type (simple-array fixnum (*)) flat) (type fixnum k size))
+  (let ((f (make-array size :element-type 'fixnum :initial-element 0)))
     (declare (type (simple-array fixnum (*)) f))
-    (dotimes (j 256 f)
+    (dotimes (j size f)
       (declare (type fixnum j))
-      (setf (aref f j) (aref litf (+ (* k 256) j))))))
+      (setf (aref f j) (aref flat (+ (* k size) j))))))
+
+(defun split-block (syms n alphabet min-block threshold)
+  "C's greedy BlockSplitter (v1.0.9 metablock_inc.h) for one category.
+SYMS is the symbol stream - for distances, only distance-bearing entries.
+Collects MIN-BLOCK symbols per decision and merges/emits by the
+entropy-difference thresholds.  Returns (values TYPES LENGTHS NBLOCKS
+NTYPES); LENGTHS are in symbol units and may overshoot N at the tail
+(harmless: the decoder only reads a switch when a count reaches zero)."
+  (declare (type (simple-array (unsigned-byte 16) (*)) syms)
+           (type fixnum n alphabet min-block)
+           (type double-float threshold)
+           (optimize (speed 3) (safety 0)))
+  (let* ((max-blocks (max 1 (1+ (floor n min-block))))
+         (max-types (min max-blocks 257))
+         (types (make-array max-blocks :element-type '(unsigned-byte 8)
+                                     :initial-element 0))
+         (lengths (make-array max-blocks :element-type 'fixnum
+                                        :initial-element 0))
+         ;; one spare histogram beyond MAX-TYPES (C's "one more" comment)
+         (histos (let ((v (make-array (1+ max-types))))
+                   (dotimes (i (1+ max-types) v)
+                     (setf (aref v i)
+                           (make-array alphabet :element-type 'fixnum
+                                                :initial-element 0)))))
+         (scratch0 (make-array alphabet :element-type 'fixnum
+                                       :initial-element 0))
+         (scratch1 (make-array alphabet :element-type 'fixnum
+                                       :initial-element 0))
+         (nblocks 0) (ntypes 0) (curr-ix 0)
+         (target min-block) (bsize 0)
+         (last-ix0 0) (last-ix1 0)
+         (last-ent0 0.0d0) (last-ent1 0.0d0)
+         (merge-count 0))
+    (declare (type (simple-array (unsigned-byte 8) (*)) types)
+             (type (simple-array fixnum (*)) lengths scratch0 scratch1)
+             (type fixnum nblocks ntypes curr-ix target bsize
+                   last-ix0 last-ix1 merge-count)
+             (type double-float last-ent0 last-ent1))
+    (labels ((clear-histo (ix)
+               (declare (type fixnum ix))
+               (let ((h (aref histos ix)))
+                 (declare (type (simple-array fixnum (*)) h))
+                 (dotimes (j alphabet)
+                   (declare (type fixnum j))
+                   (setf (aref h j) 0))))
+             (entropy (ix)
+               (declare (type fixnum ix))
+               (estimate-entropy (aref histos ix) 0 alphabet))
+             (finish (final)
+               (declare (type boolean final))
+               (when (< bsize min-block) (setf bsize min-block))
+               (cond
+                 ((zerop nblocks)
+                  ;; first block
+                  (setf (aref lengths 0) bsize
+                        (aref types 0) 0
+                        last-ent0 (entropy 0)
+                        last-ent1 last-ent0)
+                  (incf nblocks) (incf ntypes)
+                  (incf curr-ix)
+                  (when (< curr-ix (1+ max-types)) (clear-histo curr-ix))
+                  (setf bsize 0))
+                 ((plusp bsize)
+                  (let ((ent (entropy curr-ix))
+                        (ce0 0.0d0) (ce1 0.0d0)
+                        (d0 0.0d0) (d1 0.0d0))
+                    (declare (type double-float ent ce0 ce1 d0 d1))
+                    (dotimes (j 2)
+                      (declare (type fixnum j))
+                      (let ((dst (if (zerop j) scratch0 scratch1))
+                            (src (aref histos (if (zerop j) last-ix0
+                                                  last-ix1)))
+                            (cur (aref histos curr-ix)))
+                        (declare (type (simple-array fixnum (*)) dst src cur))
+                        (dotimes (a alphabet)
+                          (declare (type fixnum a))
+                          (setf (aref dst a) (+ (aref cur a) (aref src a))))
+                        (let ((e (estimate-entropy dst 0 alphabet)))
+                          (declare (type double-float e))
+                          (if (zerop j)
+                              (setf ce0 e d0 (- e ent last-ent0))
+                              (setf ce1 e d1 (- e ent last-ent1))))))
+                    (cond
+                      ((and (< ntypes 256)
+                            (> d0 threshold) (> d1 threshold))
+                       ;; new block type
+                       (setf (aref lengths nblocks) bsize
+                             (aref types nblocks) ntypes
+                             last-ix1 last-ix0
+                             last-ix0 ntypes
+                             last-ent1 last-ent0
+                             last-ent0 ent)
+                       (incf nblocks) (incf ntypes)
+                       (incf curr-ix)
+                       (when (< curr-ix (1+ max-types))
+                         (clear-histo curr-ix))
+                       (setf bsize 0 merge-count 0 target min-block))
+                      ((< d1 (- d0 20.0d0))
+                       ;; block with the second-last type
+                       (setf (aref lengths nblocks) bsize
+                             (aref types nblocks) (aref types (- nblocks 2)))
+                       (rotatef last-ix0 last-ix1)
+                       (replace (aref histos last-ix0) scratch1)
+                       (setf last-ent1 last-ent0
+                             last-ent0 ce1)
+                       (incf nblocks)
+                       (setf bsize 0)
+                       (clear-histo curr-ix)
+                       (setf merge-count 0 target min-block))
+                      (t
+                       ;; merge with the last block
+                       (incf (aref lengths (1- nblocks)) bsize)
+                       (replace (aref histos last-ix0) scratch0)
+                       (setf last-ent0 ce0)
+                       (when (= ntypes 1) (setf last-ent1 last-ent0))
+                       (setf bsize 0)
+                       (clear-histo curr-ix)
+                       (incf merge-count)
+                       (when (> merge-count 1)
+                         (incf target min-block)))))))
+               )
+             (add (sym)
+               (declare (type fixnum sym))
+               (incf (aref (aref histos curr-ix) sym))
+               (incf bsize)
+               (when (= bsize target)
+                 (finish nil))))
+      (declare (inline clear-histo entropy))
+      (dotimes (i n)
+        (declare (type fixnum i))
+        (add (aref syms i)))
+      (finish t))
+    (values types lengths nblocks ntypes)))
+
+(defun write-blk-header (w first-len type-tree tsize len-tree)
+  "The optional block-type/length prefix codes + first count - the inverse
+of the decoder's READ-BLK-HEADER - for a category with >= 2 block types."
+  (declare (type b:bwr w) (type fixnum first-len tsize))
+  (write-etree w type-tree tsize)
+  (write-etree w len-tree 26)
+  (write-blen w len-tree first-len))
 
 (defun write-compressed-block-body (w data base-pos window use-dict dict-limit rb
                                     &key (max-chain 128) (lazy t) (short-dist t)
@@ -1842,7 +1998,9 @@ with RLEMAX=0 and the IMTF bit clear."
   "Write the NBLTYPES/trees/commands part of a compressed meta-block.  The
 MLEN header must already have been written.  RB is the stream-wide distance
 ring shared with the decoder.  CMDS, when supplied, is a precomputed command
-list covering exactly this block."
+list covering exactly this block.  Command and distance streams are split
+into block types with C's greedy BlockSplitter (v1.0.9); when the splitter
+finds no split the header degrades to the single-type form byte-for-byte."
   (declare (type b:bwr w)
            (type (simple-array (unsigned-byte 8) (*)) data)
            (type fixnum base-pos window)
@@ -1859,119 +2017,311 @@ list covering exactly this block."
                             :insert-interior insert-interior
                             :score-p score-p :checks checks))
          rb :short-dist short-dist :quality quality)
-      (declare (type (simple-array fixnum (*)) recs litf cmdf distf)
-               (type fixnum ncmd lit-k)
-               (type (or null simple-vector) lit-cmap))
-      (let* ((cmd (build-etree cmdf 704 15))
-             (dist (build-etree distf 64 15))
-             (lit (when (= lit-k 1) (build-etree litf 256 15)))
-             (lits (when (>= lit-k 2)
-                     (let ((v (make-array lit-k)))
-                       (dotimes (k lit-k v)
-                         (setf (aref v k)
-                               (build-etree (lit-slice litf k) 256 15)))))))
-        (b:wbits w 0 1) (b:wbits w 0 1) (b:wbits w 0 1)   ; NBLTYPES L/I/D = 1
-        (b:wbits w 0 2)                                   ; NPOSTFIX=0
-        (b:wbits w 0 4)                                   ; NDIRECT=0
-        (if (= lit-k 1)
-            (b:wbits w 0 2)                               ; context mode (unused)
-            (b:wbits w 2 2))                              ; context mode 2 = UTF8
-        (if (= lit-k 1)
-            (b:wbits w 0 1)                               ; NTREESL=1
-            (write-nbltypes w lit-k))
-        (when (>= lit-k 2)
-          (write-lit-context-map w lit-cmap lit-k))       ; before NTREESD
-        (b:wbits w 0 1)                                   ; NTREESD=1
-        (if (= lit-k 1)
-            (write-etree w lit 256)
-            (dotimes (k lit-k)
-              (write-etree w (aref lits k) 256)))
-        (write-etree w cmd 704)
-        (write-etree w dist 64)
-        ;; Hoist the per-tree slot reads and the "single symbol" tests out of
-        ;; the per-command loop.  Literal-heavy blocks otherwise re-read four
-        ;; slots and re-test a branch for every literal.
-        (let ((cmd-single (etree-single cmd))
-              (lit-single (and lit (etree-single lit)))
-              (dist-single (etree-single dist))
-              (cmd-rc (or (etree-rcodes cmd) +empty-fixnums+))
-              (cmd-ln (or (etree-lengths cmd) +empty-fixnums+))
-              (lit-rc (or (and lit (etree-rcodes lit)) +empty-fixnums+))
-              (lit-ln (or (and lit (etree-lengths lit)) +empty-fixnums+))
-              (lit-rcl (when (>= lit-k 2)
+    (declare (type (simple-array fixnum (*)) recs litf cmdf distf)
+             (type fixnum ncmd lit-k)
+             (type (or null simple-vector) lit-cmap)
+             (ignorable cmdf distf))
+    ;; ---- splitter inputs: command symbols and distance symbols ----------
+    (let* ((cmd-syms (make-array ncmd :element-type '(unsigned-byte 16)))
+           (nd (loop for k of-type fixnum below ncmd
+                     count (>= (aref recs (+ (* k +cmd-stride+) 7)) 0)))
+           (dist-syms (make-array nd :element-type '(unsigned-byte 16))))
+      (declare (type fixnum nd))
+      (dotimes (k ncmd)
+        (declare (type fixnum k))
+        (setf (aref cmd-syms k) (aref recs (+ (* k +cmd-stride+) 2))))
+      (let ((j 0))
+        (declare (type fixnum j))
+        (dotimes (k ncmd)
+          (declare (type fixnum k))
+          (let ((d (aref recs (+ (* k +cmd-stride+) 7))))
+            (declare (type fixnum d))
+            (when (>= d 0)
+              (setf (aref dist-syms j) d)
+              (incf j)))))
+      (multiple-value-bind (itypes ilens niblocks nitypes)
+          (split-block cmd-syms ncmd 704 1024 500.0d0)
+        (declare (type fixnum niblocks nitypes))
+        (multiple-value-bind (dtypes dlens ndblocks ndtypes)
+            (split-block dist-syms nd 64 512 100.0d0)
+          (declare (type fixnum ndblocks ndtypes))
+          ;; ---- per-type histograms, trees, switch trees ----------------
+          (let* ((cmd-histo (make-array (* nitypes 704)
+                                        :element-type 'fixnum
+                                        :initial-element 0))
+                 (dist-histo (make-array (* ndtypes 64)
+                                         :element-type 'fixnum
+                                         :initial-element 0)))
+            (declare (type (simple-array fixnum (*)) cmd-histo dist-histo))
+            ;; tally per block type
+            (let ((k0 0))
+              (declare (type fixnum k0))
+              (dotimes (bi niblocks)
+                (declare (type fixnum bi))
+                (let ((tt (aref itypes bi)) (ln (aref ilens bi)))
+                  (declare (type fixnum tt ln))
+                  (loop for k of-type fixnum from k0 below (min ncmd (+ k0 ln))
+                        do (incf (aref cmd-histo
+                                       (+ (* tt 704)
+                                          (aref recs (+ (* k +cmd-stride+) 2))))))
+                  (incf k0 ln))))
+            (let ((j0 0))
+              (declare (type fixnum j0))
+              (dotimes (bi ndblocks)
+                (declare (type fixnum bi))
+                (let ((tt (aref dtypes bi)) (ln (aref dlens bi)))
+                  (declare (type fixnum tt ln))
+                  (loop for j of-type fixnum from j0 below (min nd (+ j0 ln))
+                        do (incf (aref dist-histo (+ (* tt 64) (aref dist-syms j)))))
+                  (incf j0 ln))))
+            (let* ((cmd-ets (let ((v (make-array nitypes)))
+                            (dotimes (t0 nitypes v)
+                              (declare (type fixnum t0))
+                              (setf (aref v t0)
+                                    (build-etree (histo-slice cmd-histo t0 704)
+                                                 704 15)))))
+                 (dist-ets (let ((v (make-array ndtypes)))
+                             (dotimes (t0 ndtypes v)
+                               (declare (type fixnum t0))
+                               (setf (aref v t0)
+                                     (build-etree (histo-slice dist-histo t0 64)
+                                                  64 15)))))
+                 (lit (when (= lit-k 1) (build-etree litf 256 15)))
+                 (lits (when (>= lit-k 2)
                          (let ((v (make-array lit-k)))
                            (dotimes (k lit-k v)
                              (setf (aref v k)
-                                   (or (etree-rcodes (aref lits k))
-                                       +empty-fixnums+))))))
-              (lit-lnl (when (>= lit-k 2)
-                         (let ((v (make-array lit-k)))
-                           (dotimes (k lit-k v)
-                             (setf (aref v k)
-                                   (or (etree-lengths (aref lits k))
-                                       +empty-fixnums+))))))
-              (lit-sng (when (>= lit-k 2)
-                         (let ((v (make-array lit-k :initial-element nil)))
-                           (dotimes (k lit-k v)
-                             (setf (aref v k)
-                                   (etree-single (aref lits k)))))))
-              (dist-rc (or (etree-rcodes dist) +empty-fixnums+))
-              (dist-ln (or (etree-lengths dist) +empty-fixnums+))
-              (slack 0))
-          (declare (type (simple-array fixnum (*))
-                         cmd-rc cmd-ln lit-rc lit-ln dist-rc dist-ln)
-                   (type fixnum slack))
-          (dotimes (k ncmd)
-            (let ((b (* k +cmd-stride+)))
-              (declare (type fixnum b))
-              (let ((ins (aref recs b))
-                    (ls (aref recs (+ b 1))))
-                (declare (type fixnum ins ls))
-                ;; One capacity check covers every bit this command can emit:
-                ;; at most ~13 bytes of command/distance overhead plus two
-                ;; bytes per literal (code lengths are <= 15 bits), plus the
-                ;; eight-byte slack the raw writer needs for its final store.
-                ;; Reserve 64 KiB at a time instead of checking per command.
-                (let ((cost (+ 24 (* 2 ins))))
-                  (declare (type fixnum cost))
-                  (when (> cost slack)
-                    (setf slack 65536)
-                    (b:w-ensure w (+ slack cost)))
-                  (decf slack cost))
-                (unless cmd-single
-                  (b:%wbits-raw w (aref cmd-rc (aref recs (+ b 2)))
-                                (aref cmd-ln (aref recs (+ b 2)))))
-                (b:%wbits-raw-pm w (aref recs (+ b 3)) (aref recs (+ b 4)))
-                (b:%wbits-raw-pm w (aref recs (+ b 5)) (aref recs (+ b 6)))
-                (if (>= lit-k 2)
-                    (loop for i of-type fixnum from ls below (+ ls ins)
-                          do (let* ((sym (aref data i))
-                                    (p1 (if (plusp i) (aref data (1- i)) 0))
-                                    (p2 (if (> i 1) (aref data (- i 2)) 0))
-                                    (cid (aref lit-cmap
-                                               (logior (aref +lut0+ p1)
-                                                       (aref +lut1+ p2)))))
-                               (declare (type fixnum sym p1 p2 cid))
-                               (unless (aref lit-sng cid)
-                                 (b:%wbits-raw w (aref (aref lit-rcl cid) sym)
-                                               (aref (aref lit-lnl cid) sym)))))
-                    (unless lit-single
-                      ;; Long runs amortize the pin/state setup of the run
-                      ;; writer; short runs are cheaper inline.
-                      (if (>= ins 16)
-                          (b:w-emit-run w data ls (+ ls ins) lit-rc lit-ln)
-                          (loop for i from ls below (+ ls ins)
-                                do (let ((sym (aref data i)))
-                                     (b:%wbits-raw w (aref lit-rc sym)
-                                                   (aref lit-ln sym)))))))
-                (let ((dcode (aref recs (+ b 7))))
-                  (declare (type fixnum dcode))
-                  (when (>= dcode 0)
-                    (unless dist-single
-                      (b:%wbits-raw w (aref dist-rc dcode)
-                                    (aref dist-ln dcode)))
-                    (b:%wbits-raw-pm w (aref recs (+ b 8))
-                                     (aref recs (+ b 9))))))))))))
+                                   (build-etree (histo-slice litf k 256)
+                                                256 15)))))))
+            ;; ---- block-type / block-length switch codes ----------------
+            (let* ((i-type-tree
+                    (when (> nitypes 1)
+                      (let ((tf (make-array (+ nitypes 2)
+                                            :element-type 'fixnum
+                                            :initial-element 0)))
+                        (declare (type (simple-array fixnum (*)) tf))
+                        (loop for b of-type fixnum from 1 below niblocks
+                              do (incf (aref tf (+ (aref itypes b) 2))))
+                        (build-etree tf (+ nitypes 2) 15))))
+                   (i-len-tree
+                    (when (> nitypes 1)
+                      (let ((lf (make-array 26 :element-type 'fixnum
+                                               :initial-element 0)))
+                        (declare (type (simple-array fixnum (*)) lf))
+                        (dotimes (b niblocks)
+                          (declare (type fixnum b))
+                          (incf (aref lf (blen-sym (aref ilens b)))))
+                        (build-etree lf 26 15))))
+                   (d-type-tree
+                    (when (> ndtypes 1)
+                      (let ((tf (make-array (+ ndtypes 2)
+                                            :element-type 'fixnum
+                                            :initial-element 0)))
+                        (declare (type (simple-array fixnum (*)) tf))
+                        (loop for b of-type fixnum from 1 below ndblocks
+                              do (incf (aref tf (+ (aref dtypes b) 2))))
+                        (build-etree tf (+ ndtypes 2) 15))))
+                   (d-len-tree
+                    (when (> ndtypes 1)
+                      (let ((lf (make-array 26 :element-type 'fixnum
+                                               :initial-element 0)))
+                        (declare (type (simple-array fixnum (*)) lf))
+                        (dotimes (b ndblocks)
+                          (declare (type fixnum b))
+                          (incf (aref lf (blen-sym (aref dlens b)))))
+                        (build-etree lf 26 15)))))
+              ;; ---- header --------------------------------------------
+              (b:wbits w 0 1)                ; NBLTYPES L = 1 (contexts carry
+                                             ; the literals, as in C's q5+)
+              (write-nbltypes w nitypes)
+              (when (> nitypes 1)
+                (write-blk-header w (aref ilens 0) i-type-tree (+ nitypes 2)
+                                  i-len-tree))
+              (write-nbltypes w ndtypes)
+              (when (> ndtypes 1)
+                (write-blk-header w (aref dlens 0) d-type-tree (+ ndtypes 2)
+                                  d-len-tree))
+              (b:wbits w 0 2)                ; NPOSTFIX=0
+              (b:wbits w 0 4)                ; NDIRECT=0
+              (if (= lit-k 1)
+                  (b:wbits w 0 2)            ; context mode (unused)
+                  (b:wbits w 2 2))           ; context mode 2 = UTF8
+              (if (= lit-k 1)
+                  (b:wbits w 0 1)            ; NTREESL=1
+                  (write-nbltypes w lit-k))
+              (when (>= lit-k 2)
+                (write-context-map w lit-cmap 64 lit-k))
+              (if (= ndtypes 1)
+                  (b:wbits w 0 1)            ; NTREESD=1
+                  (progn
+                    (write-nbltypes w ndtypes)
+                    ;; identity distance context map: all 4 copy-length
+                    ;; contexts of type t select tree t
+                    (let ((dm (make-array (* 4 ndtypes)
+                                          :element-type 'fixnum
+                                          :initial-element 0)))
+                      (declare (type (simple-array fixnum (*)) dm))
+                      (dotimes (t0 ndtypes)
+                        (declare (type fixnum t0))
+                        (dotimes (c 4)
+                          (declare (type fixnum c))
+                          (setf (aref dm (+ (* 4 t0) c)) t0)))
+                      (write-context-map w dm (* 4 ndtypes) ndtypes))))
+              (if (= lit-k 1)
+                  (write-etree w lit 256)
+                  (dotimes (k lit-k)
+                    (declare (type fixnum k))
+                    (write-etree w (aref lits k) 256)))
+              (dotimes (t0 nitypes)
+                (declare (type fixnum t0))
+                (write-etree w (aref cmd-ets t0) 704))
+              (dotimes (t0 ndtypes)
+                (declare (type fixnum t0))
+                (write-etree w (aref dist-ets t0) 64))
+              ;; ---- emit loop ------------------------------------------
+              (let ((lit-single (and lit (etree-single lit)))
+                    (lit-rc (or (and lit (etree-rcodes lit)) +empty-fixnums+))
+                    (lit-ln (or (and lit (etree-lengths lit)) +empty-fixnums+))
+                    (lit-rcl (when (>= lit-k 2)
+                               (let ((v (make-array lit-k)))
+                                 (dotimes (k lit-k v)
+                                   (setf (aref v k)
+                                         (or (etree-rcodes (aref lits k))
+                                             +empty-fixnums+))))))
+                    (lit-lnl (when (>= lit-k 2)
+                               (let ((v (make-array lit-k)))
+                                 (dotimes (k lit-k v)
+                                   (setf (aref v k)
+                                         (or (etree-lengths (aref lits k))
+                                             +empty-fixnums+))))))
+                    (lit-sng (when (>= lit-k 2)
+                               (let ((v (make-array lit-k :initial-element nil)))
+                                 (dotimes (k lit-k v)
+                                   (setf (aref v k)
+                                         (etree-single (aref lits k)))))))
+                    (cmd-rcs (let ((v (make-array nitypes)))
+                               (dotimes (t0 nitypes v)
+                                 (setf (aref v t0)
+                                       (or (etree-rcodes (aref cmd-ets t0))
+                                           +empty-fixnums+)))))
+                    (cmd-lns (let ((v (make-array nitypes)))
+                               (dotimes (t0 nitypes v)
+                                 (setf (aref v t0)
+                                       (or (etree-lengths (aref cmd-ets t0))
+                                           +empty-fixnums+)))))
+                    (cmd-sngs (let ((v (make-array nitypes :initial-element nil)))
+                                (dotimes (t0 nitypes v)
+                                  (setf (aref v t0)
+                                        (etree-single (aref cmd-ets t0))))))
+                    (dist-rcs (let ((v (make-array ndtypes)))
+                                (dotimes (t0 ndtypes v)
+                                  (setf (aref v t0)
+                                        (or (etree-rcodes (aref dist-ets t0))
+                                            +empty-fixnums+)))))
+                    (dist-lns (let ((v (make-array ndtypes)))
+                                (dotimes (t0 ndtypes v)
+                                  (setf (aref v t0)
+                                        (or (etree-lengths (aref dist-ets t0))
+                                            +empty-fixnums+)))))
+                    (dist-sngs (let ((v (make-array ndtypes :initial-element nil)))
+                                 (dotimes (t0 ndtypes v)
+                                   (setf (aref v t0)
+                                         (etree-single (aref dist-ets t0))))))
+                    (itype 0) (iblk 0) (ileft (aref ilens 0))
+                    (dtype 0) (dblk 0) (dleft (aref dlens 0))
+                    (slack 0))
+                (declare (type simple-vector lit-rcl lit-lnl lit-sng
+                                       cmd-rcs cmd-lns cmd-sngs
+                                       dist-rcs dist-lns dist-sngs)
+                         (type (simple-array fixnum (*)) lit-rc lit-ln)
+                         (type fixnum itype iblk ileft dtype dblk dleft slack))
+                (dotimes (k ncmd)
+                  (declare (type fixnum k))
+                  (let ((b (* k +cmd-stride+)))
+                    (declare (type fixnum b))
+                    ;; I-block switch: the decoder reads it before the
+                    ;; command when the previous block's count is exhausted.
+                    (when (> nitypes 1)
+                      (when (zerop ileft)
+                        (incf iblk)
+                        (let ((nt (aref itypes iblk)) (nl (aref ilens iblk)))
+                          (declare (type fixnum nt nl))
+                          (etree-emit w i-type-tree (+ nt 2))
+                          (write-blen w i-len-tree nl)
+                          (setf itype nt ileft nl)))
+                      (decf ileft))
+                    (let ((ins (aref recs b))
+                          (ls (aref recs (+ b 1))))
+                      (declare (type fixnum ins ls))
+                      ;; One capacity check covers every bit this command can
+                      ;; emit: at most ~13 bytes of command/distance overhead
+                      ;; plus two bytes per literal (code lengths <= 15 bits),
+                      ;; plus the eight-byte slack the raw writer needs.
+                      (let ((cost (+ 24 (* 2 ins))))
+                        (declare (type fixnum cost))
+                        (when (> cost slack)
+                          (setf slack 65536)
+                          (b:w-ensure w (+ slack cost)))
+                        (decf slack cost))
+                      (let ((crc (aref cmd-rcs itype))
+                            (cln (aref cmd-lns itype))
+                            (csng (aref cmd-sngs itype)))
+                        (unless csng
+                          (b:%wbits-raw w (aref crc (aref recs (+ b 2)))
+                                        (aref cln (aref recs (+ b 2))))))
+                      (b:%wbits-raw-pm w (aref recs (+ b 3))
+                                       (aref recs (+ b 4)))
+                      (b:%wbits-raw-pm w (aref recs (+ b 5))
+                                       (aref recs (+ b 6)))
+                      (if (>= lit-k 2)
+                          (loop for i of-type fixnum from ls below (+ ls ins)
+                                do (let* ((sym (aref data i))
+                                          (p1 (if (plusp i)
+                                                  (aref data (1- i)) 0))
+                                          (p2 (if (> i 1)
+                                                  (aref data (- i 2)) 0))
+                                          (cid (aref lit-cmap
+                                                     (logior (aref +lut0+ p1)
+                                                             (aref +lut1+ p2)))))
+                                     (declare (type fixnum sym p1 p2 cid))
+                                     (unless (aref lit-sng cid)
+                                       (b:%wbits-raw
+                                        w (aref (aref lit-rcl cid) sym)
+                                        (aref (aref lit-lnl cid) sym)))))
+                          (unless lit-single
+                            ;; Long runs amortize the pin/state setup of the
+                            ;; run writer; short runs are cheaper inline.
+                            (if (>= ins 16)
+                                (b:w-emit-run w data ls (+ ls ins)
+                                              lit-rc lit-ln)
+                                (loop for i from ls below (+ ls ins)
+                                      do (let ((sym (aref data i)))
+                                           (b:%wbits-raw w (aref lit-rc sym)
+                                                         (aref lit-ln sym)))))))
+                      (let ((dcode (aref recs (+ b 7))))
+                        (declare (type fixnum dcode))
+                        (when (>= dcode 0)
+                          ;; D-block switch: read by the decoder only for
+                          ;; commands that carry a distance symbol.
+                          (when (> ndtypes 1)
+                            (when (zerop dleft)
+                              (incf dblk)
+                              (let ((nt (aref dtypes dblk))
+                                    (nl (aref dlens dblk)))
+                                (declare (type fixnum nt nl))
+                                (etree-emit w d-type-tree (+ nt 2))
+                                (write-blen w d-len-tree nl)
+                                (setf dtype nt dleft nl)))
+                            (decf dleft))
+                          (let ((drc (aref dist-rcs dtype))
+                                (dln (aref dist-lns dtype))
+                                (dsng (aref dist-sngs dtype)))
+                            (unless dsng
+                              (b:%wbits-raw w (aref drc dcode)
+                                            (aref dln dcode))))
+                          (b:%wbits-raw-pm w (aref recs (+ b 8))
+                                           (aref recs (+ b 9)))))))))))))))))
+
 
 (defun command-output-length (cmd)
   (+ (first cmd) (third cmd)))
