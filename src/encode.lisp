@@ -540,11 +540,20 @@ RB is the 4-slot ring plus a write index in slot 4."
 
 ;;; ---- static dictionary index (base words, no transforms) ---------------
 
-(declaim (inline dict-index))
-;; Typed so the bucket AREF in dict-matches-at open-codes (NIL before
-;; the first build; the (or ...) result is narrowed by THE at the use).
-(declaim (type (or null (simple-array t (65536))) *dict-index*))
-(defvar *dict-index* nil)
+;; Flat dictionary index (counting-sort, like C's contiguous
+;; dict_words): one packed fixnum per base word - (len << 10) |
+;; word-index - in a single array, with bucket start offsets.  The old
+;; cons-per-word hash buckets made every probe chase scattered cons
+;; cells (~8% of html q10 in sb-sprof).
+(declaim (type (or null (simple-array fixnum (*))) *dict-flat*)
+         (type (or null (simple-array fixnum (65537))) *dict-bstart*)
+         (type (or null sb-sys:system-area-pointer) *dict-sap*))
+(defvar *dict-flat* nil)
+(defvar *dict-bstart* nil)
+;; SAP of the dictionary vector, set inside LZ77's pinned region (the
+;; dictionary is loaded before the pin when use-dict, so the pointer is
+;; stable for the whole match search).
+(defvar *dict-sap* nil)
 
 (declaim (inline dict-key4))
 (defun dict-key4 (vec pos)
@@ -562,18 +571,51 @@ collisions are safe: dict-match-at verifies the full word against input."
   (logand (logxor key (ash key -16)) #xFFFF))
 
 (defun dict-index ()
-  "First four bytes -> bucket of (length . word-index) base dictionary words."
-  (or *dict-index*
-      (let ((v (make-array #x10000 :initial-element nil))
-            (dict (load-dict)))
-        (loop for len from 4 to 24 do
-          (let ((nw (nwords len))
-                (base (aref +doffset+ len)))
-            (dotimes (idx nw)
-              (let* ((off (+ base (* idx len)))
-                     (b (dict-bucket (dict-key4 dict off))))
-                (push (cons len idx) (aref v b))))))
-        (setf *dict-index* v))))
+  "Ensure the flat dictionary index is built; returns the packed word
+array.  Words are scattered in (len, idx) ascending order - the old
+builder's push order - and each bucket range is read back reversed, so
+first-match-wins picks stay identical to the cons-list version."
+  (or *dict-flat*
+      (let* ((dict (load-dict))
+             (counts (make-array 65537 :element-type 'fixnum
+                                            :initial-element 0))
+             (total 0))
+        (declare (type (simple-array fixnum (65537)) counts)
+                 (type fixnum total))
+        (loop for len of-type fixnum from 4 to 24 do
+          (let ((nw (nwords len)) (base (aref +doffset+ len)))
+            (declare (type fixnum nw base))
+            (loop for idx of-type fixnum below nw do
+              (incf (aref counts (dict-bucket
+                                  (dict-key4 dict (+ base (* idx len))))))
+              (incf total))))
+        ;; exclusive prefix: counts[b] = start of bucket b;
+        ;; counts[65536] = total (end sentinel, bucket keys are 0..65535)
+        (let ((acc 0))
+          (declare (type fixnum acc))
+          (dotimes (b 65537)
+            (let ((c (aref counts b)))
+              (declare (type fixnum c))
+              (setf (aref counts b) acc)
+              (incf acc c))))
+        (let ((flat (make-array total :element-type 'fixnum))
+              (cur (make-array 65537 :element-type 'fixnum)))
+          (declare (type (simple-array fixnum (*)) flat)
+                   (type (simple-array fixnum (65537)) cur))
+          (replace cur counts)
+          (loop for len of-type fixnum from 4 to 24 do
+            (let ((nw (nwords len)) (base (aref +doffset+ len)))
+              (declare (type fixnum nw base))
+              (loop for idx of-type fixnum below nw do
+                (let* ((b (dict-bucket (dict-key4 dict
+                                                   (+ base (* idx len)))))
+                       (at (aref cur b)))
+                  (declare (type fixnum b at))
+                  (setf (aref flat at) (logior (ash len 10) idx)
+                        (aref cur b) (1+ at))))))
+          (setf *dict-flat* flat
+                *dict-bstart* counts)
+          flat))))
 
 (defparameter +dict-transforms+
   (loop for tid from 0 below (length +transforms+)
@@ -584,6 +626,20 @@ collisions are safe: dict-match-at verifies the full word against input."
           collect tid)
   "Dictionary transforms that preserve word length (identity and uppercase).")
 
+(defparameter +dict-tid0+
+  (or (car (rassoc 0 (loop for tid in +dict-transforms+
+                           for tr = (aref +transforms+ tid)
+                           when (and (zerop (length (first tr)))
+                                     (member (second tr)
+                                             '(:identity :upper-first :upper-all))
+                                     (zerop (length (third tr))))
+                             collect (cons tid (case (second tr)
+                                                 (:identity 0)
+                                                 (:upper-first 1)
+                                                 (t 2))))
+                       :test #'=))
+      0)
+  "Transform id of KIND 0 (identity).")
 (defparameter +dict-transform-kinds+
   (loop for tid in +dict-transforms+
         for tr = (aref +transforms+ tid)
@@ -657,24 +713,57 @@ beyond the bytes that transform can change.  No temporary vectors."
                                           (logxor (aref dict (+ off i 2)) 5))))
                          (incf i 3)))))))))
 
+#+(and sbcl x86-64 64-bit little-endian)
+(defun %dict-match0-sap (data-sap dict-sap p off len)
+  "Word-at-a-time identity compare of DATA[P..P+LEN) against
+DICT[OFF..OFF+LEN) across the two pinned arrays; returns the first
+mismatching byte position (LEN when they are equal).  Same TZCNT trick
+as %MATCH-LEN-SAP, but across two different arrays."
+  (declare (type sb-sys:system-area-pointer data-sap dict-sap)
+           (type fixnum p off len)
+           (optimize (speed 3) (safety 0)))
+  (let ((i 0))
+    (declare (type fixnum i))
+    (loop while (<= (+ i 8) len) do
+      (let ((x (logxor (sb-sys:sap-ref-64 data-sap (+ p i))
+                       (sb-sys:sap-ref-64 dict-sap (+ off i)))))
+        (declare (type (unsigned-byte 64) x))
+        (unless (zerop x)
+          (return-from %dict-match0-sap
+            (+ i (ash (%trailing-zeros x) -3)))))
+      (incf i 8))
+    (loop while (and (< i len)
+                     (= (sb-sys:sap-ref-8 data-sap (+ p i))
+                        (sb-sys:sap-ref-8 dict-sap (+ off i))))
+          do (incf i))
+    i))
+
 (defun dict-match-at (data p n min-len)
   "Longest dictionary word starting at DATA[P] with length >= MIN-CLOP,
 as \(values length index transform-id).  Only length-preserving transforms
 are considered so command copy lengths remain the base-word lengths."
   (declare (type fixnum p n min-len))
-  (let ((cands (aref (the (simple-array t (65536)) (dict-index))
-                     (dict-bucket (dict-key4 data p))))
-        (best-len 0) (best-idx nil) (best-tid 0)
-        (dict (load-dict)))
-    (dolist (cand cands)
-      (let* ((len (car cand))
-             (idx (cdr cand)))
-        (when (and (<= len (- n p)) (>= len min-len) (> len best-len))
-          (let ((off (+ (aref +doffset+ len) (* idx len))))
-            (dolist (tk +dict-transform-kinds+)
-              (when (%dict-word-match-p data p dict off len (cdr tk))
-                (setf best-len len best-idx idx best-tid (car tk))
-                (return)))))))
+  (let* ((bucket (dict-bucket (dict-key4 data p)))
+         (flat (dict-index))
+         (starts *dict-bstart*)
+         (best-len 0) (best-idx nil) (best-tid 0)
+         (dict (load-dict)))
+    (declare (type (simple-array fixnum (*)) flat)
+             (type (simple-array fixnum (65537)) starts))
+    (loop for k of-type fixnum
+          from (1- (aref starts (1+ bucket)))
+          downto (aref starts bucket)
+          do (let* ((e (aref flat k))
+                    (len (ash e -10))
+                    (idx (logand e #x3FF)))
+               (declare (type fixnum e len idx))
+               (when (and (<= len (- n p)) (>= len min-len)
+                          (> len best-len))
+                 (let ((off (+ (aref +doffset+ len) (* idx len))))
+                   (dolist (tk +dict-transform-kinds+)
+                     (when (%dict-word-match-p data p dict off len (cdr tk))
+                       (setf best-len len best-idx idx best-tid (car tk))
+                       (return)))))))
     (values best-len best-idx best-tid)))
 
 (defun dict-matches-at (sap data p n min-len dist-base dists)
@@ -693,45 +782,65 @@ as a dictionary reference."
                   (sb-sys:sap-ref-32 sap p)
                   (dict-key4 data p)))
          (bucket (dict-bucket key))
-         ;; DICT-INDEX never returns NIL (it builds on first use), so the
-         ;; local types and the bucket AREF open-code (the direct
-         ;; (THE ... (DICT-INDEX)) form stayed a hairy dispatch).
-         (idx (dict-index))
+         (flat (dict-index))
+         (starts *dict-bstart*)
+         (dsap *dict-sap*)
          (dict (load-dict))
          (count 0))
-    (declare (type (simple-array t (65536)) idx))
-    (declare (type fixnum count))
-    (dolist (cand (aref idx bucket) count)
-      (let* ((len (car cand))
-             (idx (cdr cand)))
-        (declare (type fixnum len idx))
+    (declare (type (simple-array fixnum (*)) flat)
+             (type (simple-array fixnum (65537)) starts)
+             (type (or null sb-sys:system-area-pointer) dsap)
+             (type fixnum count))
+    (loop for k of-type fixnum
+          from (1- (aref starts (1+ bucket)))
+          downto (aref starts bucket)
+          do (let* ((e (aref flat k))
+                    (len (ash e -10))
+                    (idx (logand e #x3FF)))
+        (declare (type fixnum e len idx))
         (when (and (<= len (- n p)) (>= len min-len)
                    (zerop (aref dists len)))
           (let ((off (+ (aref +doffset+ len) (* idx len)))
                 (skip1 nil))
             (declare (type boolean skip1))
-            (dolist (tk +dict-transform-kinds+)
-              (let ((kd (cdr tk)))
-                (declare (type fixnum kd))
-                (unless (and skip1 (= kd 1))
-                  (multiple-value-bind (ok fpos)
-                      (%dict-word-match-p data p dict off len kd)
-                    (cond
-                      (ok
-                       (setf (aref dists len)
-                             (+ dist-base 1 idx
-                                (* (the fixnum (car tk))
-                                   (the fixnum (nwords len)))))
-                       (incf count)
-                       (return))
-                      ;; KIND 1 (upper-first) only changes the first UTF-8
-                      ;; character: if identity failed at or beyond that
-                      ;; character's width, KIND 1 fails at the same byte.
-                      ((and (= kd 0)
-                            (>= fpos (let ((c (aref dict off)))
-                                       (if (< c 192) 1
-                                           (if (< c 224) 2 3)))))
-                       (setf skip1 t)))))))))))))
+            ;; KIND 0 (identity): word-at-a-time compare across the two
+            ;; pinned arrays - it covers the common exact-match case and
+            ;; yields the failure position for the kind-1 skip.
+            (let ((fpos (if (and dsap
+                                 #+(and sbcl x86-64 64-bit little-endian) t)
+                            (%dict-match0-sap sap dsap p off len)
+                            (nth-value 1
+                                       (%dict-word-match-p data p dict
+                                                            off len 0)))))
+              (declare (type fixnum fpos))
+              (cond
+                ((>= fpos len)
+                 (setf (aref dists len)
+                       (+ dist-base 1 idx
+                          (* (the fixnum +dict-tid0+)
+                             (the fixnum (nwords len)))))
+                 (incf count))
+                (t
+                 ;; KIND 1 (upper-first) only changes the first UTF-8
+                 ;; character: if identity failed at or beyond that
+                 ;; character's width, KIND 1 fails at the same byte.
+                 (when (>= fpos (let ((c (aref dict off)))
+                                  (if (< c 192) 1
+                                      (if (< c 224) 2 3))))
+                   (setf skip1 t))
+                 (dolist (tk +dict-transform-kinds+)
+                   (let ((kd (cdr tk)))
+                     (declare (type fixnum kd))
+                     (when (and (/= kd 0)
+                                (not (and skip1 (= kd 1))))
+                       (when (%dict-word-match-p data p dict off len kd)
+                         (setf (aref dists len)
+                               (+ dist-base 1 idx
+                                  (* (the fixnum (car tk))
+                                     (the fixnum (nwords len)))))
+                         (incf count)
+                         (return))))))))))))
+        count))
 
 (defun text-like-data-p (data)
   "T when DATA is mostly printable ASCII/whitespace, where the static
@@ -2876,7 +2985,11 @@ produced before DATA; it is needed to encode dictionary distances correctly
 when DATA is one chunk of a multi-meta-block stream.  MAX-CHAIN and LAZY trade
 compression ratio for encoder throughput."
   #+sbcl
-  (sb-sys:with-pinned-objects (data)
+  (sb-sys:with-pinned-objects (data (if use-dict (load-dict) data))
+    ;; Stable SAP for the word-at-a-time dictionary compare; refreshed
+    ;; on every call (and cleared for dictionary-less runs).
+    (setf *dict-sap*
+          (and use-dict (sb-sys:vector-sap (load-dict))))
     #+(and sbcl x86-64 64-bit little-endian)
     (if (and skip-match (not lazy) (not use-dict) (<= max-chain 2))
         (%lz77-fragment data (sb-sys:vector-sap data) window

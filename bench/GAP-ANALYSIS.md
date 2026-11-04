@@ -1435,3 +1435,36 @@ that these cells need a different algorithmic trade.
   json q10 0.78, text q11 0.56.
   BOTH gates: **5 cells** (binary x2, html q11, json q11, source q11).
   q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean.
+
+## Rev 120: flat dictionary index + SAP word compare (semantics verified)
+
+The dictionary probe (~8-10% of html q10) was attacked twice:
+
+1. **Flat index**: the cons-per-word hash buckets became a
+   counting-sort build - one packed fixnum ((len << 10) | word-index)
+   per base word in a contiguous array with65537 bucket start offsets,
+   read back in reverse range order (the old push order), so
+   first-match-wins picks stay constructionally identical.  Kills all
+   per-probe cons-cell chasing and the index build's consing (the flat
+   arrays are 108 KB + 512 KB, built once).
+2. **Word-at-a-time identity compare**: %dict-match0-sap xors8 bytes
+   of data against the dictionary through two SAPs (dictionary pinned
+   next to the input in LZ77, *dict-sap* refreshed per call) with a
+   TZCNT mismatch split - the same trick as %MATCH-LEN-SAP but across
+   arrays.  Its failure position feeds the kind-1 skip.  Verified
+   equivalent to the byte loop: 200,000 random (position, word, length)
+   trials, 0 mismatches.
+
+Measured: speed-neutral on this machine (html q10 1.88-1.89 MiB/s,
+dict share unchanged within noise - the byte loop's early exit was
+already cheap; the win is GC-friendliness and C-like layout).  Sizes
+moved slightly from an unisolated ordering effect (text q10 +58 B ->
+1.089, binary +13 B -> 1.096, source +58 B): all still inside the
+gate, roundtrip + 150/150 + q0-q9 35/35 verified.  Recorded honestly:
+the shift's root cause was not pinned down (kind0 equivalence proven,
+bucket ranges verified by construction).
+
+**Gates:** ratio 10/10 (worst binary q10 1.096, text 1.089/1.089);
+speed 5/10 - binary 1.69/2.09, html q11 1.07, json q11 1.07,
+source q11 1.25; near: source q10 0.97, text q10 0.97; behind:
+html q10 0.79, json q10 0.78, text q11 0.56.
