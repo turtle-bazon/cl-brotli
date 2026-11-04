@@ -880,3 +880,52 @@ source 87.8, binary 72.6%) with no separating signal — shipped
 always-one-pass, no decider.  q0 speed remains 0.31-0.33x of C core on
 html/json/binary: the known per-position SBCL-vs-GCC gap, unchanged by
 this work.
+
+## Rev 93: q10/11 gap decomposition (structure dumps + chain sweep + entropy ceilings)
+
+C's q10/q11 machinery (quality.h): hasher type 10 = to_binary_tree,
+ZOPFLIFICATION_QUALITY=10 / HQ_ZOPFLIFICATION_QUALITY=11 (MaxZopfliLen
+150/325, MaxZopfliCandidates 1/5), MIN_QUALITY_FOR_HQ_BLOCK_SPLITTING=10,
+MIN_QUALITY_FOR_HQ_CONTEXT_MODELING=7, nonzero distance params from q4
+(C actually uses them only at q10+: json/binary q10 = NPOSTFIX 3,
+NDIRECT 32).
+
+**Header structure dumps (first metablock, both streams, q9/10/11 x five
+corpora).**  Our q10/q11 structure is byte-for-byte the same shape as our
+q9 (NBLTYPES-L=1, TL=13, cmapL=64, NP/ND=0/0) - there is NO HQ
+transition in our encoder; the quality params only deepen the chain.
+C at q10+: NBLTYPES-L 2-23 (literal block splits everywhere), cmapL =
+64 x NBLTYPES-L clustered into TL=4-71 trees, CM=3 on binary (we emit 0),
+HQ insert splitting (I-ranges 30-3525 vs our single range), and sometimes
+NPOSTFIX/NDIRECT != 0.  At q9 C and we already match shape (TL=13,
+cmapL=64 on html/json) - that is why q9 passes.
+
+**E1 chain-depth sweep (q10/11, all corpora, roundtrip-checked).**  Chain
+256->2048: html q10 153572->148653 (lisp/C 1.108->1.072, 7.8->2.6 MiB/s,
+still 1.14x C core); saturates by 8192 (148488).  html q11 151068->
+148653 (1.142->1.124, still failing).  json barely moves (1.124->1.114 /
+1.183->1.178), text and binary are completely insensitive (text 11463 at
+every depth; binary 285263->285441, slightly WORSE).  Distance ring
+depth is not json/text/binary's problem.
+
+**E2 entropy ceilings (fixed parse, optimal-Huffman costs, q10).**
+Literal stream under splitting+clustering vs current (1 block, 64->K
+cmap): html -2.9%, json -3.0%, text -15.3%, binary -9.3% (split4,
+64 independent trees per segment).  64 unclustered single-block alone:
+1.7/1.3/10.1/6.3%.  Distance params (3,32)/(3,8)/(0,32) vs (0,0):
+html -250 bits, json -1527, text -112, binary -3526 - i.e. ~0%: the
+"nonzero distance params" item from earlier records is measured and
+DROPPED.  Also notable: at q10 with dict the parse reaches ~95-96%
+coverage on html/json, so literals are only ~21-34 KB of the stream and
+cmd+dist bits dominate; on binary K=0... K=1 and NO contexts at all
+(CM=0 vs C's CM=3, TL=1 vs C's TL=29-71) and literals are 156 KB of
+285 KB - hence the 14.5 KB ceiling.
+
+**Cell-by-cell budget to parity (<=1.10 of C), after E1 chain 2048 + E2
+literal splitting:** binary q11 fixed by splitting alone (285258 - 14476
+= 270782 <= 276514, tree-description overhead fits); text q10/11 nearly
+fixed (~0.3-0.5 KB residual); html q10 already passes; html q11 residual
+-2.4 KB, json q10 -1.4 KB, json q11 -10.4 KB = PARSE (C's binary-tree +
+zopfli chain expansion).  Build order: (1) literal block splitting +
+per-block 64-context clustering at q10/11 (entropy-side, precedented by
+r98/r100), (2) HQ parse (binary-tree/zopfli) for the residual.
