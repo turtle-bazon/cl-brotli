@@ -812,3 +812,71 @@ MiB/s.  Sizes are bit-identical.  The lesson generalizes: the emit path's
 remaining cost is per-instruction ARithmetic, not struct traffic, so
 "fewer ops" measurably beats "more inlined state" at the same boundary.
 
+
+## Rev 92: q0 one-pass (C BrotliCompressFragmentFast port) — parity gate passed
+
+Goal per the revised rule (parity ratio vs C, never slower): make q0
+one-pass without giving up ratio parity.  Three findings, one ship.
+
+**Port verification.**  The one-pass fragment (`%lz77-fragment &optional w`)
+builds trees before the scan and emits commands directly into the writer.
+Checked against `compress_fragment.c`: `+q0-seed-cmd+`+`+q0-seed-dist+`
+byte-equal `kCmdHistoSeed[128]` (programmatic diff); `%hashf-sap` equals
+C's `(load64(p) << 24) * 0x1E35A7BD >> (64-table_bits)` (the 40-bit mask
+is exactly the mod-2^64 truncation); `prefix-match` is C's `IsMatch`
+(4+1 bytes for k=5); the q0-insert/copy/distance symbol formulas match
+EmitInsertLen/EmitCopyLen/EmitDistance/EmitCopyLenLastDistance case by
+case.
+
+**Attempt 1 — single block, maxbits 8 (rejected, then rescued).**  The
+first port built the sampled literal tree with `build-etree ... 8`,
+believed to mirror C's `BrotliBuildAndStoreHuffmanTreeFast(..., max_bits=8)`.
+Result: html 316559 (1.126 of C), json 277425 (1.121) — parity FAILED,
+speed only +2.7% over two-pass.
+
+**Attempt 2 — C-style chunking (96 KiB first, then 64 KiB, per-block
+sampled literal trees) — measured, reverted.**  Hypothesis: C's edge was
+local literal trees.  Result REFUTED: ratio slightly worse (316559 ->
+317885 html) and speed collapsed: html 167 -> 129 MiB/s (-21%), text
+1314 -> 380 MiB/s (-72%).  Cause measured in isolation:
+`build-etree(lit,256)` costs ~96 us, sample+etree+write-etree per block
+~144 us x 16 blocks ~= 2.3 ms, which is exactly the regression.
+Bugs found and fixed while building it (all reverted with the chunk
+loop): (a) the block loop never advanced `bstart` -> infinite
+re-compression, 512 MB heap exhaustion on the first 1 MiB bench; (b) the
+cand2 match-length site still capped at `n` instead of `mcap` -> copies
+crossing the block end, "meta-block produced 65567, expected 65536"
+(+31 bytes on a 64 KiB block); (c) `%sample-lit-histogram` arity; (d)
+`:one-pass t` passed where the writer `w` was expected -> struct access
+on T, memory fault at 0x51f9 in %LZ77-FRAGMENT.
+
+**Ground truth via hdr-parse (both streams dumped).**  C compresses the
+ENTIRE 1 MiB input as ONE metablock (MLEN=1048576, NBLTYPES 1/1/1,
+NPOSTFIX/NDIRECT 0/0, seed command tree, one dist tree): ShouldMergeBlock
+merges until 1 MB.  Its literal tree is the first-96 KiB raw sample;
+command stats accumulate but are never re-emitted.  Header cost is
+~80-94 bytes on both sides — the whole +35 KB gap was the body.
+
+**The real bug — `max_bits = 8` is not a depth cap.**  Reading
+`BrotliBuildAndStoreHuffmanTreeFast`: the parameter is only the symbol
+field width of the <=4-symbol simple-code path; the general path builds
+unconstrained Huffman.  C's html literal tree reaches depth 12 and its
+cost on the identical histogram equals our `build-etree(hist, 256, 15)`
+EXACTLY (3.1578 KiB both, avg depth 10.93 both), while the depth-8 build
+costs 4.49 KiB on the same histogram: +42% literal coding cost (+53% on
+1 MiB scope ~= +46 KB — the entire gap and then some).  Two-pass had it
+right all along (maxbits 15).
+
+**Ship — single block + maxbits 15.**  q0 lisp/C: html 1.074 (302058),
+json 1.020 (252577), text 0.382 (15478), source 0.455 (128604), binary
+1.049 (371875) — every cell <= 1.10.  q1-q9 byte-identical to the
+previous run; q0 speed within noise of the one-pass baseline (html 0.33x,
+json 0.31x, binary 0.32x of C core; text 6.7x and source 1.37x FASTER
+than C).  150/150 tests, repro-split 0 failures, levels 10/11 unchanged
+(the zopfli/HQ ratio gap remains open, q10 1.11-1.12, q11 1.14-1.18 at
+3.4-6.6x C speed).  Coverage study for a per-input one-pass/two-pass
+decider: match coverage is uniform (html 90.2, json 90.0, text 89.5,
+source 87.8, binary 72.6%) with no separating signal — shipped
+always-one-pass, no decider.  q0 speed remains 0.31-0.33x of C core on
+html/json/binary: the known per-position SBCL-vs-GCC gap, unchanged by
+this work.

@@ -1132,7 +1132,33 @@ the new last-distance.  Mirrors WRITE-FAST-BLOCK-BODY's emission decisions."
 ;;; immediately.  See c/enc/compress_fragment.c and
 ;;; compress_fragment_two_pass.c.
 #+(and sbcl x86-64 64-bit little-endian)
-(defun %lz77-fragment (data sap window table-bits)
+(defun %sample-lit-histogram (data n)
+  "C BuildAndStoreLiteralPrefixCode's histogram over the RAW input (one-pass
+builds the literal tree before LZ77 runs, so C approximates the literal
+stream): exact below 32 KiB with C's weight-3 adjustment of the first 11
+samples, stride-29 sampling plus one-count smoothing above."
+  (declare (type (simple-array (unsigned-byte 8) (*)) data)
+           (type fixnum n)
+           (optimize (speed 3) (safety 0)))
+  (let ((f (make-array 256 :element-type 'fixnum :initial-element 0)))
+    (declare (type (simple-array fixnum (256)) f))
+    (if (< n #x8000)
+        (progn
+          (dotimes (i n)
+            (declare (type fixnum i))
+            (incf (aref f (aref data i))))
+          (dotimes (i 256)
+            (declare (type fixnum i))
+            (incf (aref f i) (* 2 (min (aref f i) 11)))))
+        (progn
+          (loop for i of-type fixnum from 0 below n by 29
+                do (incf (aref f (aref data i))))
+          (dotimes (i 256)
+            (declare (type fixnum i))
+            (incf (aref f i) (+ 1 (* 2 (min (aref f i) 11)))))))
+    f))
+
+(defun %lz77-fragment (data sap window table-bits &optional w)
   (declare (type (simple-array (unsigned-byte 8) (*)) data)
            (type sb-sys:system-area-pointer sap)
            (type fixnum window table-bits)
@@ -1147,18 +1173,63 @@ the new last-distance.  Mirrors WRITE-FAST-BLOCK-BODY's emission decisions."
          (cv (make-array (* 4 (max 4096 (ash n -5)))
                          :element-type '(unsigned-byte 32)))
          (nc 0)
-         (litf (make-array 256 :element-type 'fixnum :initial-element 0))
+         (litf (if w (%sample-lit-histogram data n)
+                      (make-array 256 :element-type 'fixnum
+                                     :initial-element 0)))
          (cmdf (make-array 64 :element-type 'fixnum :initial-element 0))
          (distf (make-array 64 :element-type 'fixnum :initial-element 0))
          (lit-start 0) (p 1) (limit (- n k))
          (last-dist -1) (back (if (= k 5) 3 5))
-         (shift (the fixnum (- table-bits 64))))
+         (shift (the fixnum (- table-bits 64)))
+         (slack 0)
+         (lit-1p nil) (cmd-1p nil) (dist-1p nil)
+         (lit-rc-1p +empty-fixnums+) (lit-ln-1p +empty-fixnums+)
+         (lit-1p-single nil)
+         (cmd-rc-1p +empty-fixnums+) (cmd-ln-1p +empty-fixnums+)
+         (cmd-1p-single nil)
+         (dist-rc-1p +empty-fixnums+) (dist-ln-1p +empty-fixnums+)
+         (dist-1p-single nil))
     (declare (type fixnum k min-match p lit-start limit last-dist back nc shift)
              (type (simple-array (unsigned-byte 32) (*)) table cv)
              (type (simple-array fixnum (256)) litf)
-             (type (simple-array fixnum (64)) cmdf distf))
+             (type (simple-array fixnum (64)) cmdf distf)
+             (type fixnum slack)
+             (type (or null etree) lit-1p cmd-1p dist-1p)
+             (type (or null fixnum) lit-1p-single cmd-1p-single
+                                     dist-1p-single)
+             (type (simple-array fixnum (*))
+                   lit-rc-1p lit-ln-1p cmd-rc-1p cmd-ln-1p
+                   dist-rc-1p dist-ln-1p))
     (replace cmdf +q0-seed-cmd+)
     (replace distf +q0-seed-dist+)
+    ;; One-pass mode (C BrotliCompressFragmentFast): trees come from what C
+    ;; fixes up front - the sampled RAW-INPUT literal histogram (maxbits 8,
+    ;; like C's BuildAndStoreHuffmanTreeFast) and the fixed seed command and
+    ;; distance codes - and the header is written before the scan; the scan
+    ;; then emits directly into W.  Two-pass mode leaves all of it untouched.
+    (when w
+      (setf lit-1p (build-etree litf 256 15)
+            cmd-1p (fast-cmd-etree (build-etree cmdf 64 15))
+            dist-1p (build-etree distf 64 14))
+      (setf lit-rc-1p (or (etree-rcodes lit-1p) +empty-fixnums+)
+            lit-ln-1p (or (etree-lengths lit-1p) +empty-fixnums+)
+            lit-1p-single (etree-single lit-1p)
+            cmd-rc-1p (or (etree-rcodes cmd-1p) +empty-fixnums+)
+            cmd-ln-1p (or (etree-lengths cmd-1p) +empty-fixnums+)
+            cmd-1p-single (etree-single cmd-1p)
+            dist-rc-1p (or (etree-rcodes dist-1p) +empty-fixnums+)
+            dist-ln-1p (or (etree-lengths dist-1p) +empty-fixnums+)
+            dist-1p-single (etree-single dist-1p))
+      ;; header: NBLTYPES 1/1/1, NPOSTFIX, NDIRECT, mode, NTREESL, NTREESD
+      ;; + literal, command, distance codes (write-fast-block-body's shape)
+      (b:wbits w 0 1) (b:wbits w 0 1) (b:wbits w 0 1)
+      (b:wbits w 0 2)
+      (b:wbits w 0 4)
+      (b:wbits w 0 2)
+      (b:wbits w 0 1) (b:wbits w 0 1)
+      (write-etree w lit-1p 256)
+      (write-etree w cmd-1p 704)
+      (write-etree w dist-1p 64))
     (labels ((hash (i)
                ;; The 8-byte load in %HASHF-SAP reads i..i+7; within 3 bytes
                ;; of the end that crosses the vector boundary (C's matcher
@@ -1176,6 +1247,74 @@ the new last-distance.  Mirrors WRITE-FAST-BLOCK-BODY's emission decisions."
                         (= (sb-sys:sap-ref-16 sap (+ a 4))
                            (sb-sys:sap-ref-16 sap (+ b 4))))))
              (mlen (a b) (%match-len-sap sap a b n))
+             (emit-one (insert lit-start cpy dist last-dist)
+               "Write one fast-path command into W (C's one-pass emit) and
+return the updated last-distance.  Mirrors WRITE-FAST-BLOCK-BODY's
+decisions; used only when W is non-nil."
+               (declare (type fixnum insert lit-start cpy dist last-dist)
+                        (optimize (speed 3) (safety 0)))
+               (let ((cost (+ 32 (* 2 insert))))
+                 (declare (type fixnum cost))
+                 (when (> cost slack)
+                   (setf slack 65536)
+                   (b:w-ensure w (+ slack cost)))
+                 (decf slack cost))
+               (flet ((cmd-bits (cc)
+                        (unless cmd-1p-single
+                          (b:%wbits-raw-pm w (aref cmd-rc-1p (aref +q0-cmd-map+ cc))
+                                           (aref cmd-ln-1p (aref +q0-cmd-map+ cc)))))
+                      (dist0-bits ()
+                        (unless dist-1p-single
+                          (b:%wbits-raw w (aref dist-rc-1p 0)
+                                        (aref dist-ln-1p 0))))
+                      (lits ()
+                        (unless lit-1p-single
+                          (if (>= insert 8)
+                              (b:w-emit-run w data lit-start (+ lit-start insert)
+                                            lit-rc-1p lit-ln-1p)
+                              (loop for i of-type fixnum
+                                      from lit-start below (+ lit-start insert)
+                                    do (let ((sym (aref data i)))
+                                         (b:%wbits-raw-pm
+                                          w (aref lit-rc-1p sym)
+                                          (aref lit-ln-1p sym))))))))
+                 (cond
+                   ((and (plusp insert) (plusp cpy))
+                    (multiple-value-bind (cc e nb) (q0-insert-len insert)
+                      (cmd-bits cc)
+                      (when (plusp nb) (b:%wbits-raw w e nb)))
+                    (lits)
+                    (if (= dist last-dist)
+                        (dist0-bits)
+                        (progn
+                          (multiple-value-bind (cc e nb) (q0-distance dist)
+                            (unless dist-1p-single
+                              (b:%wbits-raw w (aref dist-rc-1p (- cc 64))
+                                            (aref dist-ln-1p (- cc 64)))
+                              (when (plusp nb) (b:%wbits-raw w e nb))))
+                          (setf last-dist dist)))
+                    (multiple-value-bind (cc e nb) (q0-copy-last-len cpy)
+                      (cmd-bits cc)
+                      (when (plusp nb) (b:%wbits-raw w e nb))
+                      (when (>= (aref +q0-cmd-map+ cc) 128)
+                        (dist0-bits))))
+                   ((plusp cpy)
+                    (multiple-value-bind (cc e nb) (q0-copy-len cpy)
+                      (cmd-bits cc)
+                      (when (plusp nb) (b:%wbits-raw w e nb)))
+                    (lits)
+                    (multiple-value-bind (cc e nb) (q0-distance dist)
+                      (unless dist-1p-single
+                        (b:%wbits-raw w (aref dist-rc-1p (- cc 64))
+                                      (aref dist-ln-1p (- cc 64)))
+                        (when (plusp nb) (b:%wbits-raw w e nb))))
+                    (setf last-dist dist))
+                   (t
+                    (multiple-value-bind (cc e nb) (q0-insert-len insert)
+                      (cmd-bits cc)
+                      (when (plusp nb) (b:%wbits-raw w e nb)))
+                    (lits))))
+               last-dist)
              (push-cmd (ins ls cpy dist)
                (when (>= (* 4 nc) (length cv))
                  (let ((new (make-array (* 2 (length cv))
@@ -1229,10 +1368,15 @@ the new last-distance.  Mirrors WRITE-FAST-BLOCK-BODY's emission decisions."
                        (distance (- base cand))
                        (insert (- base lit-start)))
                   (declare (type fixnum matched distance insert))
-                  (push-cmd insert lit-start matched distance)
-                  (setf last-dist
-                        (note-fast-command data litf cmdf distf last-dist
-                                           insert lit-start matched distance))
+                  (if w
+                      (setf last-dist
+                            (emit-one insert lit-start matched distance last-dist))
+                      (progn
+                        (push-cmd insert lit-start matched distance)
+                        (setf last-dist
+                              (note-fast-command data litf cmdf distf last-dist
+                                                 insert lit-start matched
+                                                 distance))))
                   (incf p matched)
                   (setf lit-start p))
                 (when (>= p limit) (return-from scan nil))
@@ -1256,10 +1400,14 @@ the new last-distance.  Mirrors WRITE-FAST-BLOCK-BODY's emission decisions."
                                             sap (+ cand2 k) (+ p k) n)))
                                (distance (- base cand2)))
                           (declare (type fixnum matched distance))
-                          (push-cmd 0 p matched distance)
-                          (setf last-dist
-                                (note-fast-command data litf cmdf distf
-                                                   last-dist 0 p matched distance))
+                          (if w
+                              (setf last-dist
+                                    (emit-one 0 p matched distance last-dist))
+                              (progn
+                                (push-cmd 0 p matched distance)
+                                (setf last-dist
+                                      (note-fast-command data litf cmdf distf
+                                         last-dist 0 p matched distance))))
                           (incf p matched)
                           (setf lit-start p))
                         (when (>= p limit) (return-from scan nil))
@@ -1274,16 +1422,19 @@ the new last-distance.  Mirrors WRITE-FAST-BLOCK-BODY's emission decisions."
               (setf next-hash (hash p))))))
       (when (< lit-start n)
         (let ((insert (- n lit-start)))
-          (push-cmd insert lit-start 0 0)
-          (setf last-dist
-                (note-fast-command data litf cmdf distf last-dist
-                                   insert lit-start 0 0))))
+          (if w
+              (setf last-dist (emit-one insert lit-start 0 0 last-dist))
+              (progn
+                (push-cmd insert lit-start 0 0)
+                (setf last-dist
+                      (note-fast-command data litf cmdf distf last-dist
+                                         insert lit-start 0 0))))))
       (values cv nc litf cmdf distf))))
 
 (defun lz77 (data window &key (use-dict (text-like-data-p data)) dict-limit
                               (base-pos 0) (max-chain 128) (lazy t)
                               (skip-match nil) (insert-interior t)
-                              (score-p nil) (checks 1))
+                              (score-p nil) (checks 1) (one-pass nil))
   "Return commands (insert-len lit-start copy-len distance dict-p); copy-len 0
 marks a trailing insert-only command.  BASE-POS is the number of bytes already
 produced before DATA; it is needed to encode dictionary distances correctly
@@ -1294,7 +1445,7 @@ compression ratio for encoder throughput."
     #+(and sbcl x86-64 64-bit little-endian)
     (if (and skip-match (not lazy) (not use-dict) (<= max-chain 2))
         (%lz77-fragment data (sb-sys:vector-sap data) window
-                        (if (<= max-chain 1) 15 17))
+                        (if (<= max-chain 1) 15 17) one-pass)
         (%lz77 data (sb-sys:vector-sap data) window use-dict dict-limit
                base-pos max-chain lazy skip-match insert-interior
                score-p checks)))
@@ -2410,7 +2561,8 @@ whole and moved to the next block when necessary."
                                     (trivial nil)
                                     (max-lit-bits 15)
                                     (score-p nil) (checks 1)
-                                    (quality 5))
+                                    (quality 5)
+                                    (one-pass nil))
   "Entropy-coded brotli stream for INPUT.  Inputs larger than one meta-block
 are split into <= 2^24-byte compressed meta-blocks followed by an empty last
 meta-block."
@@ -2429,11 +2581,18 @@ meta-block."
        (write-mlen-header w n t)
        (cond
          (fast-fragment
-          (multiple-value-bind (cv nc litf cmdf distf)
+          (if one-pass
+              ;; C's BrotliCompressFragmentFast: the scan itself writes the
+              ;; meta-block body (trees were built from the pre-scan
+              ;; histogram inside the fragment).
               (lz77 data window
-                     :max-chain max-chain :lazy nil :skip-match t
-                     :use-dict nil :insert-interior nil)
-            (write-fast-block-body w data cv nc litf cmdf distf)))
+                    :max-chain max-chain :lazy nil :skip-match t
+                    :use-dict nil :insert-interior nil :one-pass w)
+              (multiple-value-bind (cv nc litf cmdf distf)
+                  (lz77 data window
+                        :max-chain max-chain :lazy nil :skip-match t
+                        :use-dict nil :insert-interior nil)
+                (write-fast-block-body w data cv nc litf cmdf distf))))
          (trivial
           (write-trivial-block-body
            w data
@@ -2536,7 +2695,7 @@ dictionary at q10/q11."
     ;; ~30x larger than C q0 on text-like data.  The stored fallback is still
     ;; used whenever entropy coding cannot beat the input size.
     (0 '(:max-chain 1 :lazy nil :use-dict nil :short-dist nil :skip-match t
-          :insert-interior nil :fast-fragment t))
+          :insert-interior nil :fast-fragment t :one-pass t))
     ;; C's q1 (compress_fragment_two_pass) uses a 128K-entry table with a
     ;; 6-byte minimum match; with max-chain 2 the fragment dispatcher selects
     ;; table-bits 17 / min-match 6.  max-chain 1 gave q1 the same 15-bit/5-byte
@@ -2592,6 +2751,7 @@ returning fresh octets.  Shared by COMPRESS and COMPRESS-INTO."
                (score-p (getf params :score-p nil))
                (checks (getf params :checks 1))
                (quality (getf params :quality 5))
+               (one-pass (getf params :one-pass nil))
                (dict-ok (and (getf params :use-dict) (text-like-data-p data)))
                ;; Run the dictionary parse first.  For normal text it is
                ;; equal to or better than the plain parse, and re-running the
@@ -2610,7 +2770,8 @@ returning fresh octets.  Shared by COMPRESS and COMPRESS-INTO."
                                                 :max-lit-bits max-lit-bits
                                                 :score-p score-p
                                                 :checks checks
-                                                :quality quality)
+                                                :quality quality
+                                                :one-pass one-pass)
                          (compress-entropy data :use-dict nil
                                                 :max-chain max-chain
                                                 :lazy lazy
@@ -2622,7 +2783,8 @@ returning fresh octets.  Shared by COMPRESS and COMPRESS-INTO."
                                                 :max-lit-bits max-lit-bits
                                                 :score-p score-p
                                                 :checks checks
-                                                :quality quality))))
+                                                :quality quality
+                                                :one-pass one-pass))))
           (when (and dict-ok (< (length best) 4096))
             (let ((plain (compress-entropy data :use-dict nil
                                                 :max-chain max-chain
@@ -2635,7 +2797,8 @@ returning fresh octets.  Shared by COMPRESS and COMPRESS-INTO."
                                                 :max-lit-bits max-lit-bits
                                                 :score-p score-p
                                                 :checks checks
-                                                :quality quality)))
+                                                :quality quality
+                                                :one-pass one-pass)))
               (when (< (length plain) (length best)) (setf best plain))))
           (when (>= (length best) (+ n 32))
             (let ((stored (compress-stored data)))
