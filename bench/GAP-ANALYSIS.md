@@ -498,6 +498,40 @@ it at q>=4, we do not — easy tree-size win, untried), the HQ
 clustered splitter for q10+ (we run the greedy one there; C runs
 BrotliSplitBlock), and the q0/q1 one-pass encoder.
 
+## Attempted 4 Nov (midnight): BrotliOptimizeHuffmanCountsForRle — measured neutral, not shipped
+
+Ported C's entropy_encode.c count-massage (~150 lines, applied to all
+four complex-writer tree groups: the K literal trees, per-type command
+and distance trees; cold path, once per tree per meta-block) and
+applied it where C gates it (q >= 4 — i.e. our complex writer only;
+the trivial/fast writers keep byte-identical output).
+
+Porting notes worth keeping:
+* the `(256 * counts[i] - limit + streak_limit) >= 2 * streak_limit`
+  test runs in C's uint32 arithmetic — the UNDERFLOW is deliberate (a
+  count far below the local average wraps huge and must count as a
+  stride break), so the Lisp port uses `(mod ... #x100000000)`; the
+  three `256*s /3 + 420` limit updates wrap with `logand #xFFFFFFFF`.
+* the early-outs (<16 nonzero overall, <5 nonzero after trimming,
+  smallest <4 with >=6 zeros, <28 nonzero) mean it only ever fires on
+  big/complex histograms.
+
+Measured (150/150 pass, repro matrix 0 failures — correctness fine):
+1 MiB, 5 corpora x q5/q6/q7/q9 — 19 changed cells, **net -4 bytes**
+(json +52 worst = +0.008%/cell; source -33, binary -21, text -14) =
+statistically zero.  64 KiB, 5 corpora x q5/q9 — net **+42 bytes**
+(html +2+2, json +7+6, binary +30 at q9) = +0.04% WORSE.  Speed within
+noise both sizes.
+
+Conclusion: with OUR tree writer (build-code-lengths-a's count-limit
+retry + write-complex-code/cl-lengths-rle) the count massage has
+nothing left to win — C's tree-description saving comes paired with
+ITS tree-STORE machinery (BrotliStoreHuffmanTree + DecideOverRleUse,
+which chooses rle-for-zero vs rle-for-nonzero per tree).  The right
+future move is porting that tree-store pair as a unit, not the count
+massage alone; the ported function above (with the uint32 notes) is
+the recipe to re-apply when that happens.  Reverted; tree clean at r101.
+
 ## Attempted 3 Nov 2026: the local-state command loop (step 1 above)
 
 An implementation of the fast command loop as a separate
