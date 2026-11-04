@@ -1414,3 +1414,24 @@ dict probe 7.8%, zq-push 3%.  No structural or codegen inefficiency
 remains that we have found - the next lever is either deeper
 per-loop work (unrolling, packed short-distance tables) or accepting
 that these cells need a different algorithmic trade.
+
+## Rev 119: q11 candidate floor (pass 1 = 2) + packed short-distance table — speed 3/10 -> 5/10
+
+- **q11 z-cands 3 -> 2**: the k=2 entry's short candidates never win
+  (sizes moved by -19..+65 bytes, i.e. noise: html 134129 -> 134110,
+  json 144409 -> 144322, text 10489 -> 10493) while pass-1 short-loop
+  work drops a third.  k=0+k=1 still covers C's match-candidate range
+  (C runs matches for k < 2), so this is the floor that keeps C's
+  coverage.  Pass 2 stays at 1.
+- **+zdc-jo+**: kDistanceCacheIndex/kDistanceCacheOffset packed into
+  one byte table ((slot << 4) | (offset + 8)); one table read per
+  short candidate instead of two.
+
+**Gates (1 MiB vs C 1.0.9 core):**
+  ratio <= 1.10: 10/10 (worst text q11 1.082, binary 1.073).
+  speed >= 1.0x: **5/10** (was 3/10) - binary q10 1.69x / q11 2.14x,
+  html q11 1.04x, json q11 1.07x, source q11 1.26x.
+  Near: source q10 0.95, text q10 0.99.  Behind: html q10 0.78,
+  json q10 0.78, text q11 0.56.
+  BOTH gates: **5 cells** (binary x2, html q11, json q11, source q11).
+  q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean.

@@ -752,16 +752,14 @@ dictionary is worth consulting."
 ;;; ---- Zopfli cost-model DP (q10/11; C backward_references_hq + literal_cost)
 
 
-(defparameter +zdc-index+
-  (make-array 16 :element-type 'fixnum
-                  :initial-contents '(0 1 2 3 0 0 0 0 0 0 1 1 1 1 1 1))
-  "C kDistanceCacheIndex: short-distance cache slot per short code 0..15.")
-(declaim (type (simple-array fixnum (16)) +zdc-index+))
-(defparameter +zdc-offset+
-  (make-array 16 :element-type 'fixnum
-                  :initial-contents '(0 0 0 0 -1 1 -2 2 -3 3 -1 1 -2 2 -3 3))
-  "C kDistanceCacheOffset.")
-(declaim (type (simple-array fixnum (16)) +zdc-offset+))
+(defparameter +zdc-jo+
+  ;; C kDistanceCacheIndex/kDistanceCacheOffset packed into one byte:
+  ;; (slot << 4) | (offset + 8), offsets are -3..3.  One table read per
+  ;; short candidate instead of two.
+  (make-array 16 :element-type '(unsigned-byte 8)
+                  :initial-contents '(#x08 #x18 #x28 #x38 #x07 #x09 #x06 #x0A #x05 #x0B #x17 #x19 #x16 #x1A #x15 #x1B))
+  "Packed short-distance cache slot + offset per short code 0..15.")
+(declaim (type (simple-array (unsigned-byte 8) (16)) +zdc-jo+))
 (defconstant +z-infinity+ (float 1.7d38 1.0f0))
 
 ;;; ZopfliNode as parallel arrays: cost (single-float), and packed
@@ -1326,7 +1324,7 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                ;; (4 * n) capacity (measured corpora peak at 3.77/byte).
                (z-flat (and bt (>= bt 64)
                             (make-array (* 4 n) :element-type 'fixnum)))
-               (z-cands (if (and bt (>= bt 64)) 3 1))
+               (z-cands (if (and bt (>= bt 64)) 2 1))
                (z-maxlen (if (and bt (>= bt 64)) 325 150))
                (head (make-array (ash 1 hbits)
                                  :element-type '(unsigned-byte 32)
@@ -1774,11 +1772,12 @@ position.  Returns the longest newly-reached copy length."
                                             (type (unsigned-byte 8) left))
                                    (loop while (and (< j 16) (< best max-len))
                                          do
-                                     (let* ((slot (aref +zdc-index+ j))
+                                     (let* ((jo (aref +zdc-jo+ j))
                                             (back (+ (aref dc-a
-                                                       (+ dc0 slot))
-                                                     (aref +zdc-offset+ j))))
-                                       (declare (type fixnum slot back))
+                                                       (+ dc0 (ash jo -4)))
+                                                     (- (logand jo #xF) 8))))
+                                       (declare (type (unsigned-byte 8) jo)
+                                                (type fixnum back))
                                        (incf j)
                                        ;; C: max_distance = min(pos, window),
                                        ;; prev_ix >= cur_ix => continue, and
