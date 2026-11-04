@@ -597,14 +597,21 @@ without materialising the transformed word.")
 (declaim (inline %dict-word-match-p))
 (defun %dict-word-match-p (data p dict off len kind)
   "Compare DATA[P..P+LEN) with the dictionary word DICT[OFF..OFF+LEN) after
-KIND (0 identity, 1 upper-first, 2 upper-all).  No temporary vectors."
+KIND (0 identity, 1 upper-first, 2 upper-all).  Returns (values MATCH
+FAIL-POS); for KIND 0 FAIL-POS is the first mismatching byte (>= LEN on
+match), which lets the caller skip KIND 1 when identity already failed
+beyond the bytes that transform can change.  No temporary vectors."
   (declare (type (simple-array (unsigned-byte 8) (*)) data dict)
            (type fixnum p off len kind)
            (optimize (speed 3) (safety 0)))
   (case kind
     (0
-     (loop for i below len
-           always (= (aref data (+ p i)) (aref dict (+ off i)))))
+     (let ((i 0))
+       (declare (type fixnum i))
+       (loop while (and (< i len)
+                        (= (aref data (+ p i)) (aref dict (+ off i))))
+             do (incf i))
+       (values (>= i len) i)))
     (1
      ;; %FERMENT-FIRST changes only the first UTF-8 character.
      (let ((c (aref dict off)))
@@ -685,24 +692,46 @@ as a dictionary reference."
   (let* ((key (if (and sap (<= (+ p 4) n))
                   (sb-sys:sap-ref-32 sap p)
                   (dict-key4 data p)))
-         (cands (aref (the (simple-array t (65536)) (dict-index))
-                      (dict-bucket key)))
-        (dict (load-dict))
-        (count 0))
+         (bucket (dict-bucket key))
+         ;; DICT-INDEX never returns NIL (it builds on first use), so the
+         ;; local types and the bucket AREF open-code (the direct
+         ;; (THE ... (DICT-INDEX)) form stayed a hairy dispatch).
+         (idx (dict-index))
+         (dict (load-dict))
+         (count 0))
+    (declare (type (simple-array t (65536)) idx))
     (declare (type fixnum count))
-    (dolist (cand cands count)
+    (dolist (cand (aref idx bucket) count)
       (let* ((len (car cand))
              (idx (cdr cand)))
         (declare (type fixnum len idx))
         (when (and (<= len (- n p)) (>= len min-len)
                    (zerop (aref dists len)))
-          (let ((off (+ (aref +doffset+ len) (* idx len))))
+          (let ((off (+ (aref +doffset+ len) (* idx len)))
+                (skip1 nil))
+            (declare (type boolean skip1))
             (dolist (tk +dict-transform-kinds+)
-              (when (%dict-word-match-p data p dict off len (cdr tk))
-                (setf (aref dists len)
-                      (+ dist-base 1 idx (* (car tk) (nwords len))))
-                (incf count)
-                (return)))))))))
+              (let ((kd (cdr tk)))
+                (declare (type fixnum kd))
+                (unless (and skip1 (= kd 1))
+                  (multiple-value-bind (ok fpos)
+                      (%dict-word-match-p data p dict off len kd)
+                    (cond
+                      (ok
+                       (setf (aref dists len)
+                             (+ dist-base 1 idx
+                                (* (the fixnum (car tk))
+                                   (the fixnum (nwords len)))))
+                       (incf count)
+                       (return))
+                      ;; KIND 1 (upper-first) only changes the first UTF-8
+                      ;; character: if identity failed at or beyond that
+                      ;; character's width, KIND 1 fails at the same byte.
+                      ((and (= kd 0)
+                            (>= fpos (let ((c (aref dict off)))
+                                       (if (< c 192) 1
+                                           (if (< c 224) 2 3)))))
+                       (setf skip1 t)))))))))))))
 
 (defun text-like-data-p (data)
   "T when DATA is mostly printable ASCII/whitespace, where the static
@@ -921,8 +950,10 @@ order)."
         (t (if (< last #xE0) 0 (min 2 clamp)))))
 
 (defun estimate-literal-costs (data start end costs)
-  "C BrotliEstimateBitCostsForLiterals -> COSTS (single-float vector of
-END-START entries), split into C's paths: plain ASCII (window 2000, no
+  "C BrotliEstimateBitCostsForLiterals -> COSTS, C's literal_costs
+convention: raw costs land at indices 1..END-START (index 0 is the
+caller's zero prefix), so COSTS needs END-START+1 entries.  Split into
+C's paths: plain ASCII (window 2000, no
 bump), mostly-UTF8 with sparse multibyte stats (window 495, single
 histogram row, prologue bump), and the general 3x256 position-histogram
 UTF8 path.  The single-row case is a fast path, not an approximation:
@@ -977,7 +1008,7 @@ position classification computes exactly the same values."
                (declare (type double-float cost))
                (when (< cost 1.0d0)
                  (setf cost (+ (* 0.5d0 cost) 0.5d0)))
-               (setf (aref costs i) (float cost 1.0f0)))))))
+               (setf (aref costs (1+ i)) (float cost 1.0f0)))))))
       ((zerop max-utf8)
        ;; Single-row fast path (window 495 + prologue bump): byte-identical
        ;; to the general UTF8 loop because UTF8Position(.., 0) == 0 always.
@@ -1014,7 +1045,7 @@ position classification computes exactly the same values."
                  (setf cost (+ (* 0.5d0 cost) 0.5d0)))
                (when (< i 2000)
                  (incf cost (+ 0.35d0 (* 0.000175d0 i))))
-               (setf (aref costs i) (float cost 1.0f0)))))))
+               (setf (aref costs (1+ i)) (float cost 1.0f0)))))))
       (t
        ;; General UTF8 path: 3x256 position histograms, window 495.
        (let* ((window 495)
@@ -1065,7 +1096,7 @@ position classification computes exactly the same values."
                  (setf cost (+ (* 0.5d0 cost) 0.5d0)))
                (when (< i 2000)
                  (incf cost (+ 0.35d0 (* 0.000175d0 i))))
-               (setf (aref costs i) (float cost 1.0f0))))))))
+               (setf (aref costs (1+ i)) (float cost 1.0f0))))))))
     costs))
 
 (defun zopfli-analytic-model (data n)
@@ -1073,19 +1104,22 @@ position classification computes exactly the same values."
 prefix sum + analytic command/distance costs (log2(11+i)/log2(20+i))."
   (declare (type (simple-array (unsigned-byte 8) (*)) data)
            (type fixnum n) (optimize (speed 3) (safety 0)))
-  (let* ((raw (make-array (max 1 n) :element-type 'single-float
-                                    :initial-element 0.0f0))
-         (prefix (make-array (+ n 2) :element-type 'single-float
+  (let* ((prefix (make-array (+ n 2) :element-type 'single-float
                                      :initial-element 0.0f0))
          (cc (make-array 704 :element-type 'single-float
                              :initial-element 0.0f0))
          (cd (make-array 64 :element-type 'single-float
                             :initial-element 0.0f0)))
-    (declare (type (simple-array single-float (*)) raw prefix cc cd))
-    (when (plusp n) (estimate-literal-costs data 0 n raw))
-    ;; C's literal_costs prefix sum (its carry dance reduces to this).
+    (declare (type (simple-array single-float (*)) prefix cc cd))
+    ;; C writes the raw estimate straight into literal_costs[1..n] and
+    ;; folds the prefix sum in place - no separate raw array (saves a
+    ;; full n-slot alloc + fill per compress).
+    (setf (aref prefix 0) 0.0f0)
+    (when (plusp n) (estimate-literal-costs data 0 n prefix))
     (dotimes (i n)
-      (setf (aref prefix (1+ i)) (+ (aref prefix i) (aref raw i))))
+      (let ((r (aref prefix (1+ i))))
+        (declare (type single-float r))
+        (setf (aref prefix (1+ i)) (+ (aref prefix i) r))))
     (dotimes (i 704)
       (setf (aref cc i) (float (log (float (+ 11 i) 1.0d0) 2.0d0) 1.0f0)))
     (dotimes (i 64)
@@ -1730,13 +1764,19 @@ position.  Returns the longest newly-reached copy length."
                                  (declare (type fixnum icode)
                                           (type single-float base))
                                  ;; --- 16 short-distance candidates ---
-                                 (let ((best (1- min-len)) (j 0))
-                                   (declare (type fixnum best j))
+                                 (let ((best (1- min-len)) (j 0)
+                                       (dc0 (* 4 ki))
+                                       ;; pos+best and its byte are invariant
+                                       ;; across j until a longer match lands
+                                       (pb (+ pos (1- min-len)))
+                                       (left (aref data (+ pos (1- min-len)))))
+                                   (declare (type fixnum best j dc0 pb)
+                                            (type (unsigned-byte 8) left))
                                    (loop while (and (< j 16) (< best max-len))
                                          do
                                      (let* ((slot (aref +zdc-index+ j))
                                             (back (+ (aref dc-a
-                                                           (+ (* 4 ki) slot))
+                                                       (+ dc0 slot))
                                                      (aref +zdc-offset+ j))))
                                        (declare (type fixnum slot back))
                                        (incf j)
@@ -1745,9 +1785,9 @@ position.  Returns the longest newly-reached copy length."
                                        ;; the continuation-byte prefilter.
                                        (when (and (>= back 1) (<= back pos)
                                                   (<= back window)
-                                                  (< (+ pos best) n)
-                                                  (= (aref data (+ pos best))
-                                                     (aref data (+ (- pos back) best))))
+                                                  (< pb n)
+                                                  (= left
+                                                     (aref data (- pb back))))
                                          (let ((len (mlen (- pos back) pos)))
                                            (declare (type fixnum len))
                                            (when (> len best)
@@ -1782,7 +1822,10 @@ position.  Returns the longest newly-reached copy length."
                                                        (when (> l result)
                                                          (setf result l)))))
                                              (setf best l)
-                                             (incf l))))))))))
+                                             (incf l))))
+                                   (setf pb (+ pos best))
+                                   (when (< pb n)
+                                     (setf left (aref data pb)))))))))
                                  ;; --- BT + dictionary match candidates ---
                                  ;; C keeps `len` across the match loop: each
                                  ;; copy length is tried with the first match
@@ -2265,7 +2308,7 @@ score rather than length.  Returns (values len dist score)."
                              (incf p)))))
             (declare (inline hash ins mlen mlen2 probe-ok penalty
                              zq-push z-minlen bt-hash z-update-node
-                             z-shortcut z-eval))
+                             z-shortcut z-eval z-cache))
             (if bt
                 (if (>= bt 64)
                     (z-iterate-hq)

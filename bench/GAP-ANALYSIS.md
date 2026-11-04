@@ -1382,3 +1382,35 @@ ratio margins are >=2.4%).
   text q11 0.54.
   BOTH gates: binary q10/q11, source q11, text q10 (4 cells).
   q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean.
+
+## Rev 118: codegen cleanup batch (hairy aref, generic +, z-cache inline)
+
+- dict-matches-at reads the bucket index through a typed local
+  (`(the (simple-array t (65536)) (dict-index))` alone stayed a hairy
+  dispatch): VECTOR-HAIRY fell 2.0% -> 0.5% of html q10.
+- The dictionary distance fill coerces `(car tk)`/`(nwords len)` with
+  THE so the arithmetic stays fixnum (was GENERIC-+ on the cons cells).
+- z-cache joined the inline list (single call site in z-eval): the
+  frame disappeared from the profile.
+- Earlier in this batch (see sweeps): short-loop address hoisting
+  (pb/left invariant across j), kind-1 transform skip when identity
+  fails beyond the first character's width, and the estimate's raw
+  array eliminated (C writes into literal_costs[1..n] and folds in
+  place - saves an n-slot alloc+fill per compress).  All three are
+  semantics-preserving: sizes byte-identical to r117.
+
+**Gates (1 MiB vs C 1.0.9 core):**
+  ratio <= 1.10: 10/10 unchanged.
+  speed >= 1.0x: 3/10 recorded (binary q10 1.67x, binary q11 1.92x,
+  source q11 1.13x).  The near-miss cluster sits inside this machine's
+  ~+-4% run-to-run noise: html q11 0.96, json q11 0.97, source q10
+  0.93, text q10 0.98 (previous sweep: 0.99/0.98/0.94/0.99).  Behind:
+  html q10 0.77, json q10 0.76, text q11 0.54.
+  q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean.
+
+**Where the remaining gap lives (html q10 profile):** z-iterate self
+49% + bt-do 32% = the C-mandated DP work at ~1.5x gcc's per-op cost;
+dict probe 7.8%, zq-push 3%.  No structural or codegen inefficiency
+remains that we have found - the next lever is either deeper
+per-loop work (unrolling, packed short-distance tables) or accepting
+that these cells need a different algorithmic trade.
