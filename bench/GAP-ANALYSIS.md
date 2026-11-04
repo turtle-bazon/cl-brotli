@@ -1321,3 +1321,42 @@ costs against C's model values (or run C with instrumentation).
 Speed remains the only failing gate (8/10 cells).  See Rev 114 for
 the remaining gap analysis (z-iterate self + bt-do constant factors,
 2-4x C's per-op cost; no structural inefficiency left in the port).
+
+## Rev 116: DP inner-loop speed pass 2 — source/text-q10 within 2-6% of C
+
+sb-sprof call-graph pinned the remaining float cost: %SINGLE-FLOAT
+(3.5% at q11) is the per-length `(float cxb 1.0f0)` in both l-loops.
+Fixes:
+
+1. **length-code-f + float extra-bit tables**: +ins-xbits-f+/
+   +cpy-xbits-f+ hold the extra-bit counts as single-floats, so the
+   short-candidate and match l-loops (25-50M iterations per MiB) get
+   the float directly from the table instead of a fixnum->float
+   conversion per iteration; the canonical fallback converts once.
+   The insert per-k site uses it too.  LENGTH-CODE (fixnum) is
+   untouched for the entropy paths.
+2. **fast-log2 table 256 -> 2048**: every histogram/window count the
+   literal estimator sees is now a table hit - the per-byte estimate
+   loop never calls libm (C only tables below 256 and pays log2 for
+   the rest; our entries agree with libm within an ULP - the same
+   rounding class as C's own float casts).
+3. **log2(in-window) hoisted** out of both single-row estimate loops:
+   it only changes at the window edges (remove+add net to zero in the
+   middle), tracked with an iw-last compare instead of a libm call
+   per byte.
+4. **z-update slot-array hoisting**: the queue (pos/cost/costdiff/dc)
+   and model (cost-cmd/cost-dist) arrays are read once per call into
+   locals instead of a struct slot read per access in the inner loops.
+
+**Gates (1 MiB vs C 1.0.9 core):**
+  ratio <= 1.10: 10/10 unchanged (sizes byte-identical to r115).
+  speed >= 1.0x: 2/10 -> but everything moved: html 0.80/0.79 (was
+  0.70/0.69), json 0.80/0.79, source 0.96/0.94 (was 0.84/0.83), text
+  q10 0.98 (was 0.82), text q11 0.50 (was 0.46), binary 1.71/1.52.
+  text q10 is now 20.8 MiB/s vs C 17.7 in isolation (1.18x).
+  q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean.
+
+Next: text q11 (0.50 - estimate+bt-do+two DP passes dominate),
+html/json 0.79 (z-iterate self + bt-do constant factors), and the
+q11 second-iteration candidate count (z-cands 3 -> 1 for pass 2,
+ratio margins are >=2.4%).

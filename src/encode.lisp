@@ -443,6 +443,34 @@ LENGTH-CODE was ~20% of low-quality compression time."
 (declaim (type (simple-array fixnum (*))
                +ins-code+ +ins-xval+ +ins-xbits+
                +cpy-code+ +cpy-xval+ +cpy-xbits+))
+(defparameter +ins-xbits-f+
+  (let ((v (make-array (length +ins-xbits+) :element-type 'single-float
+                                             :initial-element 0.0f0)))
+    (dotimes (i (length +ins-xbits+) v)
+      (setf (aref v i) (float (aref +ins-xbits+ i) 1.0f0))))
+  "Insert-length extra bits as single-float for the hot DP loops.")
+(defparameter +cpy-xbits-f+
+  (let ((v (make-array (length +cpy-xbits+) :element-type 'single-float
+                                             :initial-element 0.0f0)))
+    (dotimes (i (length +cpy-xbits+) v)
+      (setf (aref v i) (float (aref +cpy-xbits+ i) 1.0f0))))
+  "Copy-length extra bits as single-float for the hot DP loops.")
+(declaim (type (simple-array single-float (*)) +ins-xbits-f+ +cpy-xbits-f+))
+(declaim (inline length-code-f))
+(defun length-code-f (len code xval xbits-f base bits)
+  "Like LENGTH-CODE but returns the extra bit count as a single-float
+(from XBITS-F in the tabled range, converted in the canonical
+fallback); the extra value is not returned."
+  (declare (type (simple-array fixnum (*)) code xval)
+           (type simple-vector base bits)
+           (type (simple-array single-float (*)) xbits-f)
+           (type fixnum len)
+           (optimize (speed 3) (safety 0)))
+  (if (< len (length code))
+      (values (aref code len) (aref xbits-f len))
+      (loop for c from (1- (length base)) downto 0
+            when (>= len (aref base c))
+              do (return (values c (float (aref bits c) 1.0f0))))))
 (declaim (inline length-code))
 (defun length-code (len code xval xbits base bits)
   "Largest code C with BASE[C] <= LEN; returns (values C extra-val extra-bits).
@@ -821,18 +849,22 @@ codepoint is -1 for invalid sequences (which count as one byte)."
       (t (values #x110000 1)))))
 
 (defparameter +fast-log2-table+
-  (let ((v (make-array 256 :element-type 'double-float
-                            :initial-element 0.0d0)))
-    (dotimes (i 256 v)
+  (let ((v (make-array 2048 :element-type 'double-float
+                             :initial-element 0.0d0)))
+    (dotimes (i 2048 v)
       (unless (zerop i)
         (setf (aref v i) (log (float i 1.0d0) 2.0d0)))))
-  "C kBrotliLog2Table: log2 of small integers (log2(0) = 0).")
-(declaim (type (simple-array double-float (256)) +fast-log2-table+)
+  "log2 of small integers (log2(0) = 0). 2048 covers every histogram /
+window count the literal estimator sees, so the per-byte estimate loop
+never calls libm (C's FastLog2 only tables below 256 and pays log2 for
+the rest - our table values agree with libm to within an ULP, the same
+rounding class as C's own float casts).")
+(declaim (type (simple-array double-float (2048)) +fast-log2-table+)
          (inline fast-log2))
 (defun fast-log2 (v)
-  "C FastLog2: table lookup below 256, libm log2 above."
+  "Table lookup below 2048, libm log2 above."
   (declare (type fixnum v) (optimize (speed 3) (safety 0)))
-  (if (< v 256)
+  (if (< v 2048)
       (aref +fast-log2-table+ v)
       (log (float v 1.0d0) 2.0d0)))
 
@@ -910,8 +942,14 @@ position classification computes exactly the same values."
        (let* ((window 2000)
               (in-window (min window len))
               (hist (make-array 256 :element-type 'fixnum
-                                     :initial-element 0)))
-         (declare (type fixnum window in-window))
+                                     :initial-element 0))
+              ;; log2(in-window) hoisted out of the byte loop: it only
+              ;; changes at the window edges (both blocks fire in the
+              ;; middle and net to zero).
+              (iw-last (min window len))
+              (liw (fast-log2 (min window len))))
+         (declare (type fixnum window in-window iw-last)
+                  (type double-float liw))
          (loop for i of-type fixnum from start below (+ start in-window)
                do (incf (aref hist (aref data i))))
          (loop for i of-type fixnum from 0 below len do
@@ -923,9 +961,11 @@ position classification computes exactly the same values."
              (when (< (+ i window) len)
                (incf (aref hist (aref data (+ p window))))
                (incf in-window))
+             (when (/= in-window iw-last)
+               (setf iw-last in-window
+                     liw (fast-log2 in-window)))
              (let* ((h (max 1 (aref hist (aref data p))))
-                    (cost (+ (- (fast-log2 in-window)
-                                (fast-log2 h))
+                    (cost (+ (- liw (fast-log2 h))
                              0.029d0)))
                (declare (type double-float cost))
                (when (< cost 1.0d0)
@@ -937,8 +977,14 @@ position classification computes exactly the same values."
        (let* ((window 495)
               (in-window (min window len))
               (hist (make-array 256 :element-type 'fixnum
-                                     :initial-element 0)))
-         (declare (type fixnum window in-window))
+                                     :initial-element 0))
+              ;; log2(in-window) hoisted out of the byte loop: it only
+              ;; changes at the window edges (both blocks fire in the
+              ;; middle and net to zero).
+              (iw-last (min window len))
+              (liw (fast-log2 (min window len))))
+         (declare (type fixnum window in-window iw-last)
+                  (type double-float liw))
          (loop for i of-type fixnum from start below (+ start in-window)
                do (incf (aref hist (aref data i))))
          (loop for i of-type fixnum from 0 below len do
@@ -950,9 +996,11 @@ position classification computes exactly the same values."
              (when (< (+ i window) len)
                (incf (aref hist (aref data (+ p window))))
                (incf in-window))
+             (when (/= in-window iw-last)
+               (setf iw-last in-window
+                     liw (fast-log2 in-window)))
              (let* ((h (max 1 (aref hist (aref data p))))
-                    (cost (+ (- (fast-log2 in-window)
-                                (fast-log2 h))
+                    (cost (+ (- liw (fast-log2 h))
                              0.029d0)))
                (declare (type double-float cost))
                (when (< cost 1.0d0)
@@ -1644,13 +1692,19 @@ position.  Returns the longest newly-reached copy length."
                      (let ((max-len (- n pos)) (result 0))
                        (declare (type fixnum max-len result))
                        (z-eval pos)
-                       (let* ((k0 (zq-at zq 0))
+                       (let* ((pos-a (zpq-pos zq))
+                              (cost-a (zpq-cost zq))
+                              (cd-a (zpq-costdiff zq))
+                              (dc-a (zpq-dc zq))
+                              (cmd-a (zmodel-cost-cmd zmodel))
+                              (dst-a (zmodel-cost-dist zmodel))
+                              (k0 (zq-at zq 0))
                               (prefix (zmodel-lit-prefix zmodel))
                               (min-cost
-                                (+ (aref (zpq-cost zq) k0)
+                                (+ (aref cost-a k0)
                                    (zmodel-min-cost-cmd zmodel)
                                    (- (aref prefix pos)
-                                      (aref prefix (aref (zpq-pos zq) k0)))))
+                                      (aref prefix (aref pos-a k0)))))
                               (min-len (z-minlen min-cost pos)))
                          (declare (type fixnum k0 min-len)
                                   (type (simple-array single-float (*)) prefix)
@@ -1658,14 +1712,13 @@ position.  Returns the longest newly-reached copy length."
                          (loop for k of-type fixnum
                                  below (min z-cands (zq-size zq)) do
                            (let* ((ki (zq-at zq k))
-                                  (start (aref (zpq-pos zq) ki)))
+                                  (start (aref pos-a ki)))
                              (declare (type fixnum ki start))
-                             (multiple-value-bind (icode ixv ixb)
-                                 (length-code (- pos start) +ins-code+ +ins-xval+ +ins-xbits+
+                             (multiple-value-bind (icode ixbf)
+                                 (length-code-f (- pos start) +ins-code+ +ins-xval+ +ins-xbits-f+
                                               +ins-base+ +ins-bits+)
-                               (declare (ignore ixv))
-                               (let ((base (+ (aref (zpq-costdiff zq) ki)
-                                              (float ixb 1.0f0)
+                               (let ((base (+ (aref cd-a ki)
+                                              ixbf
                                               (aref prefix pos))))
                                  (declare (type fixnum icode)
                                           (type single-float base))
@@ -1675,7 +1728,7 @@ position.  Returns the longest newly-reached copy length."
                                    (loop while (and (< j 16) (< best max-len))
                                          do
                                      (let* ((slot (aref +zdc-index+ j))
-                                            (back (+ (aref (zpq-dc zq)
+                                            (back (+ (aref dc-a
                                                            (+ (* 4 ki) slot))
                                                      (aref +zdc-offset+ j))))
                                        (declare (type fixnum slot back))
@@ -1693,18 +1746,16 @@ position.  Returns the longest newly-reached copy length."
                                            (when (> len best)
                                              (let ((l (1+ best))
                                                    (dist-add
-                                                     (aref (zmodel-cost-dist
-                                                            zmodel) (1- j))))
+                                                     (aref dst-a (1- j))))
                                                (declare (type fixnum l)
                                                         (type single-float
                                                                dist-add))
                                                (loop while (<= l len) do
                                                  (progn
-                                                 (multiple-value-bind (cc cxv cxb)
-                                                     (length-code l +cpy-code+ +cpy-xval+ +cpy-xbits+
-                                                                  +cpy-base+
-                                                                  +cpy-bits+)
-                                                   (declare (ignore cxv cxb))
+                                                 (multiple-value-bind (cc cxbf)
+                                                     (length-code-f l +cpy-code+ +cpy-xval+ +cpy-xbits-f+
+                                                                    +cpy-base+
+                                                                    +cpy-bits+)
                                                    (let* ((cmdc
                                                             (if (and (= j 1)
                                                                      (< icode 8)
@@ -1715,8 +1766,8 @@ position.  Returns the longest newly-reached copy length."
                                                        (+ (if (< cmdc 128)
                                                               base
                                                               (+ base dist-add))
-                                                          (float cxb 1.0f0)
-                                                          (aref (zmodel-cost-cmd zmodel) cmdc))))
+                                                          cxbf
+                                                          (aref cmd-a cmdc))))
                                                      (declare (type fixnum cmdc)
                                                               (type single-float cost))
                                                      (when (< cost (aref zcostf (+ pos l)))
@@ -1768,23 +1819,19 @@ position.  Returns the longest newly-reached copy length."
                                                    (+ base
                                                       (float (postfix-extra
                                                               dist 0 0) 1.0f0)
-                                                      (aref (zmodel-cost-dist
-                                                            zmodel) dcode))))
+                                                      (aref dst-a dcode))))
                                              (declare (type fixnum dcode)
                                                       (type single-float
                                                              dist-cost))
                                              (loop while (<= len max-m) do
-                                               (multiple-value-bind (cc cxv cxb)
-                                                   (length-code len +cpy-code+ +cpy-xval+ +cpy-xbits+
-                                                                +cpy-base+
-                                                                +cpy-bits+)
-                                                 (declare (ignore cxv cxb))
+                                               (multiple-value-bind (cc cxbf)
+                                                   (length-code-f len +cpy-code+ +cpy-xval+ +cpy-xbits-f+
+                                                                  +cpy-base+
+                                                                  +cpy-bits+)
                                                  (let* ((cmdc (cmd-symbol icode cc))
                                                         (cost (+ dist-cost
-                                                                 (float cxb 1.0f0)
-                                                                 (aref (zmodel-cost-cmd
-                                                                        zmodel)
-                                                                       cmdc))))
+                                                                 cxbf
+                                                                 (aref cmd-a cmdc))))
                                                    (declare (type fixnum cmdc)
                                                             (type single-float
                                                                    cost))
