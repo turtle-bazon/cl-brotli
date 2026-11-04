@@ -960,3 +960,95 @@ splitting gives ~-2600); (b) every remaining q10/11 cell (html q11
 -2.4KB, json q10 -1.4KB, json q11 -10.4KB, text -0.5KB, binary q11
 -6.1KB) is a PARSE gap = C's to_binary_tree hasher + zopfli chain
 expansion.  Next campaign item: the HQ matcher.
+
+## Rev 95: q10/11 H10 binary-tree matcher (C hash_to_binary_tree port) - speed gate passed, 4/10 ratio
+
+Shipped an optional binary-tree match source for q10/11 (quality-params
+:bt 16/64 = the short-backward scan size): BT-HASH (C HashBytes: low 32
+bits of load32*kHashMul32 >> 15, 17-bit buckets), BT-DO (C
+FindAllMatches: the short-backward scan then StoreAndFindMatches -
+lexicographic BST re-rooted per position, forest 2 slots/position,
+depth 64, break at len >= min(max-length, 128), insertion watermark so
+each position enters the tree exactly once, result cache for the legacy
+lazy re-dispatch), BT-SCORE (distance-cache candidates via the extracted
+CACHE-SCAN + tree candidates under the same 1920+135*len-30*ilog2 score
+the chain uses).  Dispatch is at the three find-match call sites; the
+chain path is fully inert when BT is off - q0-q9 verified bit-identical
+to r108 across all five corpora.
+
+Bugs found and fixed while validating (each measured):
+
+1. BT-HASH label was missing from the region rewrite - UNDEFINED-FUNCTION
+   at test time (148/150 -> fixed).
+2. The tree walk called MLEN with swapped arguments (current first,
+   candidate second).  %MATCH-LEN-SAP's contract is A < B with bound
+   n-B; the swap made the bound n-prev-clen (over-permissive) AND broke
+   the A+MAXL<N safety precondition (OOB 8-byte reads).  Symptom: ramp
+   decode "meta-block produced 1048577, expected 1048576" (+1 copy byte,
+   first difference one byte in a 352-byte stream).  Fixed by swapping
+   to candidate-first.
+3. Store scans were UNBOUNDED: C's Store/StoreRange pass
+   MAX_TREE_COMP_LENGTH (128) to StoreAndFindMatches, capping both the
+   scan limit and the break; our interior stores scanned up to n-pos per
+   walk level.  On long-repeat data (text/source) with dense interior
+   stores this was a 50x blowup: text/source q10/11 at 0.02-0.06x of C
+   speed, sb-sprof 99.9% self-time in BT-DO.  Fix: max-len = min(128,
+   n-pos) for stores, scan end = pos+max-len via new MLEN2 label (search
+   path keeps the block remainder, like C's FindAllMatches callers).
+   Result: text q10 3.00x / q11 2.40x C core, source 1.60x / 3.91x,
+   sizes unchanged (store scans cannot change found matches - break
+   happens before any capped length could steer the descent).
+4. Selection floor: BT candidates required score-only acceptance, which
+   admitted the short backward scan's 2-3 byte copies; the chain walk
+   requires len >= 4.  Restoring the >=4 floor: html q11 1.147->1.138,
+   text 1.161->1.150, json 1.203->1.192.
+
+**E5 - chain+tree candidate union (measured, reverted).**  Since
+argmax-over-union >= argmax-over-either, the chain was kept active
+alongside BT (ins does both; BT-SCORE over find-match-score then the
+tree).  At chain 256: only source improved (q10 1.070->1.066, q11
+1.095->1.087); html/json/binary sizes IDENTICAL (chain candidates never
+win the score contest) while speed fell 2.81x->1.66x (html).  A deeper
+probe via %compress-bytes (chain 2048/8192 in the union) changed sizes
+by 0-25 bytes anywhere - and dropped html/json BELOW C speed (0.79-0.89x
+C core), violating the never-slower rule.  Conclusion: BT candidates
+dominate the score on this workload; the chain adds cost without
+candidates.  Union reverted; shipped state is BT-only (chain inert at
+q10/11).
+
+**Final gates (5 corpora x q10/11, 1 MiB, median-of-3):**
+  speed: 10/10 PASS (1.57x-11.23x C core; was 3.3-12.8x with chain-only
+  on the passing cells, and the point of the port is the ratio search
+  quality, not speed)
+  ratio <= 1.10: 4/10 PASS - html q10 1.085, source q10 1.066 /
+  q11 1.087, binary q10 1.076 (r110 chain was 3/10: html q10 was 1.108,
+  binary q10 1.097).  Failing: html q11 1.138, json 1.127/1.192,
+  text 1.150/1.183, binary q11 1.114.  json/text moved +0.2..+0.9%
+  vs the chain baseline (all four already failing parity; the current
+  rule is parity-vs-C, not own-ratio, so recorded rather than blocked).
+
+**Why BT alone cannot close the rest:** C's q11 output differs from its
+q10 (html -4.6%) via MaxZopfliLen 325 vs 150 and MaxZopfliCandidates
+5 vs 1; OUR q11 currently produces byte-identical output to q10 on
+html/json/text/binary (only bt-short 64 vs 16 differs, which changes
+nothing here).  The remaining gap (json/text, and all of q11) is C's
+zopfli cost-model DP (ZopfliCostModel/chain expansion in
+backward_references_hq.c), which selects insert/copy splits by actual
+entropy cost instead of the fixed linear score - next workstream.
+
+**References (as suggested):** RFC 7932 section 4 verified our
+hand-inverted NPOSTFIX/NDIRECT formulas verbatim (ndistbits = 1 +
+((dcode-NDIRECT-16) >> (NPOSTFIX+1)), hcode/lcode split, distance =
+((offset+dextra)<<NPOSTFIX)+lcode+NDIRECT+1, direct symbols 16..15+
+NDIRECT = distances 1..NDIRECT, ring {16,15,11,4} not reset at
+metablock boundaries, distance 0 does not push); its context-ID tables
+(sect. 7.1) are the next cross-check target for +lut0/+lut1.
+BrotliHaxe (dominikhlbg) is a deliberately 1:1 hand port whose
+src/encode/backward_references holds readable ZopfliNode /
+ZopfliCostModel / StartPosQueue files - useful for the DP phase - but
+its hash folder only has the longest-match hashers (it predates H10),
+so it cannot cross-check this port; its README benchmark table is not
+relevant to this campaign.
+
+Validation: 150/150 tests, repro-split clean, q0-q9 bit-identical to
+r108, roundtrip-checked every measurement script.

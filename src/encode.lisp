@@ -633,7 +633,8 @@ dictionary is worth consulting."
     (> text (/ (* 9 (max 1 sample)) 10))))
 
 (defun %lz77 (data sap window use-dict dict-limit base-pos max-chain lazy
-              skip-match insert-interior &optional (score-p nil) (checks 1))
+              skip-match insert-interior &optional (score-p nil) (checks 1)
+              (bt nil))
   "Implementation of LZ77.  SAP is a system-area pointer for DATA on SBCL,
 or NIL on other implementations.  With SCORE-P (q5+), match selection uses
 C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
@@ -648,7 +649,21 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
     (if (< n min-match)
         (if (zerop n) '() (list (list n 0 0 0 nil)))
         (let* ((hbits 17) (hmask (1- (ash 1 hbits)))
-               (chained (> max-chain 1))
+               (chained (and (not bt) (> max-chain 1)))
+               ;; H10 binary-tree matcher (q10/11, C hash_to_binary_tree):
+               ;; 17-bit buckets, two forest slots per position, insertion
+               ;; watermark (positions below BT-NEXT are already stored),
+               ;; 128-entry match scratch.  BT is the short-back scan size.
+               (bt-short (if (integerp bt) bt 16))
+               (bt-buckets (and bt (make-array 131072
+                                 :element-type '(unsigned-byte 32)
+                                 :initial-element #xFFFFFFFF)))
+               (bt-forest (and bt (make-array (* 2 (+ n 8))
+                                 :element-type '(unsigned-byte 32)
+                                 :initial-element #xFFFFFFFF)))
+               (bt-next 0) (bt-cnt 0) (bt-cpos -1) (bt-cbest 0)
+               (bt-md (and bt (make-array 128 :element-type 'fixnum)))
+               (bt-ml (and bt (make-array 128 :element-type 'fixnum)))
                (head (make-array (ash 1 hbits)
                                  :element-type '(unsigned-byte 32)
                                  :initial-element #xFFFFFFFF))
@@ -679,7 +694,10 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                ;; start at 2); the length-maximizing path keeps min-match.
                (min-cop (if score-p 2 min-match)))
           (declare (type (simple-array (unsigned-byte 32) (*)) head)
-                   (type (or null (simple-array (unsigned-byte 32) (*))) prev)
+                   (type (or null (simple-array (unsigned-byte 32) (*)))
+                         bt-buckets bt-forest)
+                   (type (or null (simple-array fixnum (128))) bt-md bt-ml)
+                   (type fixnum bt-short bt-next bt-cnt bt-cpos bt-cbest)
                    (type (or null (simple-array fixnum (*))) dc)
                    (type fixnum p lit-start last skip dict-used last-dist
                             shift min-cop))
@@ -696,12 +714,19 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                    (mlen (a b) (%match-len-sap sap a b n))
                    #-(and sbcl x86-64 64-bit little-endian)
                    (mlen (a b) (%match-len data a b n))
+                   #+(and sbcl x86-64 64-bit little-endian)
+                   (mlen2 (a b e) (%match-len-sap sap a b e))
+                   #-(and sbcl x86-64 64-bit little-endian)
+                   (mlen2 (a b e) (%match-len data a b e))
                    (ins (q h)
                      (declare (type fixnum q h))
-                     (let ((old (aref head h)))
-                       (declare (type fixnum old))
-                       (setf (aref head h) q)
-                       (when chained (setf (aref prev q) old))))
+                     (if bt
+                         (when (>= q bt-next)
+                           (bt-do q nil))
+                         (let ((old (aref head h)))
+                           (declare (type fixnum old))
+                           (setf (aref head h) q)
+                           (when chained (setf (aref prev q) old)))))
                    (probe-ok (cand pos best-len)
                      (declare (type fixnum cand pos best-len))
                      #+(and sbcl x86-64 64-bit little-endian)
@@ -723,6 +748,210 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                      (declare (ignore cand pos best-len))
                      #-(and sbcl x86-64 64-bit little-endian)
                      t)
+                   (bt-hash (i)
+                     "C H10 HashBytes: the low 32 bits of load32(I) *
+kHashMul32 shifted down by 15 (17-bit bucket)."
+                     (declare (type fixnum i))
+                     #+(and sbcl x86-64 64-bit little-endian)
+                     (let ((w (if (and sap (<= (+ i 4) n))
+                                  (sb-sys:sap-ref-32 sap i)
+                                  (logior (aref data i)
+                                          (ash (aref data (1+ i)) 8)
+                                          (ash (aref data (+ i 2)) 16)
+                                          (ash (aref data (+ i 3)) 24)))))
+                       (declare (type (unsigned-byte 32) w))
+                       (logand (ash (logand (* w #x1E35A7BD) #xFFFFFFFF) -15)
+                               #x1FFFF))
+                     #-(and sbcl x86-64 64-bit little-endian)
+                     (let ((w (logior (aref data i)
+                                      (ash (aref data (1+ i)) 8)
+                                      (ash (aref data (+ i 2)) 16)
+                                      (ash (aref data (+ i 3)) 24))))
+                       (declare (type (unsigned-byte 32) w))
+                       (logand (ash (logand (* w #x1E35A7BD) #xFFFFFFFF) -15)
+                               #x1FFFF)))
+                   (cache-scan (pos bl bd bs)
+                     "C FindLongestMatch's distance-cache candidate loop
+(the CHECKS-entry cache with PrepareDistanceCache cascade).  Returns the
+improved (values len dist score)."
+                     (declare (type fixnum pos bl bd bs))
+                     (let ((best-len bl) (best-dist bd) (best-score bs)
+                           (i 0))
+                       (declare (type fixnum best-len best-dist best-score i))
+                       (loop while (< i checks) do
+                         (let* ((dist (aref dc i))
+                                (prev (- pos dist)))
+                           (declare (type fixnum dist prev))
+                           (when (and (plusp dist) (<= dist window)
+                                      (>= prev 0)
+                                      ;; C probes the byte at BEST-LEN
+                                      (< best-len (- n pos))
+                                      (< best-len (- n prev))
+                                      (= (aref data (+ pos best-len))
+                                         (aref data (+ prev best-len))))
+                             (let ((ml (mlen prev pos)))
+                               (declare (type fixnum ml))
+                               (when (or (>= ml 3) (and (= ml 2) (< i 2)))
+                                 (let ((score (- (+ 1935 (* 135 ml))
+                                                 (if (plusp i)
+                                                     (penalty i) 0))))
+                                   (declare (type fixnum score))
+                                   (when (> score best-score)
+                                     (setf best-score score
+                                           best-len ml best-dist dist)))))))
+                         (incf i))
+                       (values best-len best-dist best-score)))
+                   ;; ---- H10 binary-tree matcher (q10/11), C
+                   ;; ---- hash_to_binary_tree_inc.h ------------------------
+                   (bt-do (pos collect)
+                     "C FindAllMatches: the short-backward scan (COLLECT
+only) then StoreAndFindMatches, which inserts POS into its bucket's BST.
+Fills BT-MD/BT-ML[0..BT-CNT) with matches of strictly increasing length and
+returns the best length.  Positions below the BT-NEXT watermark are already
+stored; a re-dispatch at the position just searched (the legacy lazy gate)
+returns the cached result."
+                     (declare (type fixnum pos) (type boolean collect))
+                     (cond
+                       ((= pos bt-cpos) bt-cbest)
+                       ((< pos bt-next) 0)
+                       (t
+                        (setf bt-cnt 0 bt-cpos pos)
+                        (setf bt-next (1+ pos))
+                        (let ((best 1) (cnt 0)
+                              ;; C: FindAllMatches scans up to the block
+                              ;; remainder, but Store/StoreRange pass
+                              ;; MAX_TREE_COMP_LENGTH (128) - interior store
+                              ;; scans are capped the same way (unbounded
+                              ;; store scans were the text/source blowup).
+                              (max-len (if collect (- n pos)
+                                           (min 128 (- n pos)))))
+                          (declare (type fixnum best cnt max-len))
+                          (when collect
+                            ;; C's short-backward scan: catches short matches
+                            ;; whose 4-byte hashes differ.
+                            (let ((stop (max 0 (- pos bt-short))))
+                              (declare (type fixnum stop))
+                              (loop for i of-type fixnum
+                                      from (1- pos) downto (1+ stop)
+                                    while (<= best 2) do
+                                (when (> (- pos i) window) (return))
+                                (when (and (= (aref data pos) (aref data i))
+                                           (= (aref data (1+ pos))
+                                              (aref data (1+ i))))
+                                  (let ((len (mlen i pos)))
+                                    (declare (type fixnum len))
+                                    (when (> len best)
+                                      (setf best len)
+                                      (setf (aref bt-md cnt) (- pos i)
+                                            (aref bt-ml cnt) len)
+                                      (incf cnt)))))))
+                          (when (< best max-len)
+                            (let* ((comp (min max-len 128))
+                                   (reroot (>= max-len 128))
+                                   (key (bt-hash pos))
+                                   (prev (aref bt-buckets key))
+                                   (node-left (* 2 pos))
+                                   (node-right (1+ node-left))
+                                   (bl-left 0) (bl-right 0)
+                                   (depth 64))
+                              (declare (type fixnum comp key prev node-left
+                                             node-right bl-left bl-right depth)
+                                       (type boolean reroot))
+                              (when reroot (setf (aref bt-buckets key) pos))
+                              (loop
+                                (let ((backward (- pos prev)))
+                                  (declare (type fixnum backward))
+                                  ;; BACKWARD <= 0 covers PREV = sentinel
+                                  ;; (#xFFFFFFFF) and PREV = POS.
+                                  (when (or (<= backward 0)
+                                            (> backward window)
+                                            (<= depth 0))
+                                    (when reroot
+                                      (setf (aref bt-forest node-left)
+                                            #xFFFFFFFF
+                                            (aref bt-forest node-right)
+                                            #xFFFFFFFF))
+                                    (return)))
+                                (decf depth)
+                                (let* ((clen (min bl-left bl-right))
+                                       (len (+ clen
+                                               ;; A < B contract: candidate
+                                               ;; side first; scan end
+                                               ;; POS+MAX-LEN = C's
+                                               ;; max_length - cur_len limit
+                                               ;; (128 for store scans).
+                                               (mlen2 (+ prev clen)
+                                                      (+ pos clen)
+                                                      (+ pos max-len)))))
+                                  (declare (type fixnum clen len))
+                                  (when (and collect (> len best))
+                                    (setf best len)
+                                    (setf (aref bt-md cnt) (- pos prev)
+                                          (aref bt-ml cnt) len)
+                                    (incf cnt))
+                                  (when (>= len comp)
+                                    (when reroot
+                                      (setf (aref bt-forest node-left)
+                                            (aref bt-forest (* 2 prev))
+                                            (aref bt-forest node-right)
+                                            (aref bt-forest (1+ (* 2 prev)))))
+                                    (return))
+                                  (if (> (aref data (+ pos len))
+                                         (aref data (+ prev len)))
+                                      (progn
+                                        (setf bl-left len)
+                                        (when reroot
+                                          (setf (aref bt-forest node-left)
+                                                prev))
+                                        (setf node-left (1+ (* 2 prev))
+                                              prev (aref bt-forest node-left)))
+                                      (progn
+                                        (setf bl-right len)
+                                        (when reroot
+                                          (setf (aref bt-forest node-right)
+                                                prev))
+                                        (setf node-right (* 2 prev)
+                                              prev (aref bt-forest
+                                                         node-right))))))))
+                          (setf bt-cnt cnt bt-cbest best)
+                          best))))
+                   (bt-longest (pos)
+                     "Longest match at POS from the tree (legacy shape)."
+                     (declare (type fixnum pos))
+                     (let ((best-len 0) (best-dist 0))
+                       (declare (type fixnum best-len best-dist))
+                       (bt-do pos t)
+                       (dotimes (i bt-cnt)
+                         (declare (type fixnum i))
+                         (when (>= (aref bt-ml i) best-len)
+                           (setf best-len (aref bt-ml i)
+                                 best-dist (aref bt-md i))))
+                       (values best-len best-dist 0)))
+                   (bt-score (pos)
+                     "Cache candidates (C FindLongestMatch's first half) plus
+tree candidates scored with the same 1920+135*len-30*ilog2 formula the
+chain walk uses."
+                     (declare (type fixnum pos))
+                     (multiple-value-bind (best-len best-dist best-score)
+                         (cache-scan pos 0 0 2020)
+                       (declare (type fixnum best-len best-dist best-score))
+                       (bt-do pos t)
+                       (dotimes (i bt-cnt)
+                         (declare (type fixnum i))
+                         (let* ((d (aref bt-md i))
+                                (ml (aref bt-ml i)))
+                           (declare (type fixnum d ml))
+                           ;; same >=4 floor as the chain walk: the short
+                           ;; backward scan's 2-3 byte copies lost ratio
+                           ;; where the chain would have offered nothing.
+                           (when (>= ml 4)
+                             (let ((score (+ 1920 (* 135 ml)
+                                             (- (* 30 (1- (integer-length d)))))))
+                               (declare (type fixnum score))
+                               (when (> score best-score)
+                                 (setf best-score score
+                                       best-len ml best-dist d))))))
+                       (values best-len best-dist best-score)))
                    (find-match (pos h)
                      (declare (type fixnum pos h))
                      (let ((cand (aref head h)) (best-len 0) (best-dist 0))
@@ -794,7 +1023,6 @@ score rather than length.  Returns (values len dist score)."
                              (declare (type fixnum dist prev))
                              (when (and (plusp dist) (<= dist window)
                                         (>= prev 0)
-                                        ;; C probes the byte at BEST-LEN
                                         (< best-len (- n pos))
                                         (< best-len (- n prev))
                                         (= (aref data (+ pos best-len))
@@ -864,7 +1092,7 @@ score rather than length.  Returns (values len dist score)."
                                    (aref dc 1) (aref dc 0)
                                    (aref dc 0) best-dist)
                              (prepare-dc))
-                           (when (and chained insert-interior)
+                           (when (or bt (and chained insert-interior))
                              ;; C's StoreRange: for a short distance relative
                              ;; to the match, only store the tail positions to
                              ;; avoid poisoning the chain on RLE-like data.
@@ -876,7 +1104,8 @@ score rather than length.  Returns (values len dist score)."
                                        (max range-start
                                             (- range-end (ash best-dist 2)))))
                                (loop for q from range-start below range-end
-                                     do (ins q (hash q)))))
+                                     do (if bt (bt-do q nil)
+                                            (ins q (hash q))))))
                            (setf skip 32)
                            (incf p best-len)
                            (setf lit-start p))
@@ -885,13 +1114,14 @@ score rather than length.  Returns (values len dist score)."
                                (incf p step)
                                (incf skip))
                              (incf p)))))
-            (declare (inline hash ins mlen probe-ok penalty))
+            (declare (inline hash ins mlen mlen2 probe-ok penalty))
             (loop while (<= p last) do
               (let* ((ph (hash p)))
                 (multiple-value-bind (best-len best-dist best-score)
-                    (if score-p
-                        (find-match-score p ph)
-                        (find-match p ph))
+                    (cond (bt (if score-p (bt-score p) (bt-longest p)))
+                          (score-p (find-match-score p ph))
+                          (t (find-match p ph)))
+
                   (declare (type fixnum best-len best-dist best-score))
                   (let ((dict-p nil))
                     (when (and use-dict
@@ -906,10 +1136,11 @@ score rather than length.  Returns (values len dist score)."
                                   cmds)
                             (incf dict-used)
                             (ins p ph)
-                            (when (and chained insert-interior)
+                            (when (or bt (and chained insert-interior))
                               (loop for q from (1+ p)
                                     below (min (+ p dict-len) (1+ last))
-                                    do (ins q (hash q))))
+                                    do (if bt (bt-do q nil)
+                                           (ins q (hash q)))))
                             (setf skip 32)
                             (incf p dict-len)
                             (setf lit-start p)))))
@@ -922,7 +1153,8 @@ score rather than length.  Returns (values len dist score)."
                               (progn
                                 (ins p ph)
                                 (multiple-value-bind (next-len next-dist)
-                                    (find-match (1+ p) (hash (1+ p)))
+                                    (if bt (bt-longest (1+ p))
+                                        (find-match (1+ p) (hash (1+ p))))
                                   (declare (ignore next-dist))
                                   (if (and (>= next-len min-match)
                                            (> next-len best-len))
@@ -949,7 +1181,8 @@ score rather than length.  Returns (values len dist score)."
                                  (if (< p last)
                                      (let ((h2 (hash (1+ p))))
                                        (multiple-value-bind (nl nd ns)
-                                           (find-match-score (1+ p) h2)
+                                           (if bt (bt-score (1+ p))
+                                               (find-match-score (1+ p) h2))
                                          (declare (type fixnum nl nd ns))
                                          (if (>= ns (+ bs 175))
                                              (progn
@@ -1434,7 +1667,8 @@ decisions; used only when W is non-nil."
 (defun lz77 (data window &key (use-dict (text-like-data-p data)) dict-limit
                               (base-pos 0) (max-chain 128) (lazy t)
                               (skip-match nil) (insert-interior t)
-                              (score-p nil) (checks 1) (one-pass nil))
+                              (score-p nil) (checks 1) (one-pass nil)
+                              (bt nil))
   "Return commands (insert-len lit-start copy-len distance dict-p); copy-len 0
 marks a trailing insert-only command.  BASE-POS is the number of bytes already
 produced before DATA; it is needed to encode dictionary distances correctly
@@ -1448,10 +1682,10 @@ compression ratio for encoder throughput."
                         (if (<= max-chain 1) 15 17) one-pass)
         (%lz77 data (sb-sys:vector-sap data) window use-dict dict-limit
                base-pos max-chain lazy skip-match insert-interior
-               score-p checks)))
+               score-p checks bt)))
   #-sbcl
   (%lz77 data nil window use-dict dict-limit base-pos max-chain lazy
-         skip-match insert-interior score-p checks))
+         skip-match insert-interior score-p checks bt))
 
 ;;; A "trivial" entropy path for q2-q4: one literal/command/distance tree,
 ;;; no context maps, no block splits.  Unlike PLAN-COMMANDS it does not
@@ -2145,6 +2379,7 @@ of the decoder's READ-BLK-HEADER - for a category with >= 2 block types."
                                       (skip-match nil) (insert-interior t)
                                       (score-p nil) (checks 1)
                                       (quality 5)
+                                      (bt nil)
                                       cmds)
   "Write the NBLTYPES/trees/commands part of a compressed meta-block.  The
 MLEN header must already have been written.  RB is the stream-wide distance
@@ -2166,7 +2401,7 @@ finds no split the header degrades to the single-type form byte-for-byte."
                             :base-pos base-pos :max-chain max-chain :lazy lazy
                             :skip-match skip-match
                             :insert-interior insert-interior
-                            :score-p score-p :checks checks))
+                            :score-p score-p :checks checks :bt bt))
          rb :short-dist short-dist :quality quality)
     (declare (type (simple-array fixnum (*)) recs litf cmdf distf)
              (type fixnum ncmd lit-k)
@@ -2562,7 +2797,8 @@ whole and moved to the next block when necessary."
                                     (max-lit-bits 15)
                                     (score-p nil) (checks 1)
                                     (quality 5)
-                                    (one-pass nil))
+                                    (one-pass nil)
+                                    (bt nil))
   "Entropy-coded brotli stream for INPUT.  Inputs larger than one meta-block
 are split into <= 2^24-byte compressed meta-blocks followed by an empty last
 meta-block."
@@ -2609,7 +2845,7 @@ meta-block."
                                        :skip-match skip-match
                                        :insert-interior insert-interior
                                        :score-p score-p :checks checks
-                                       :quality quality))))
+                                       :quality quality :bt bt))))
       (t
        (let* ((mb-chain (if fast-fragment 32 max-chain))
               (mb-lazy (if fast-fragment t lazy))
@@ -2620,7 +2856,8 @@ meta-block."
                                    :max-chain mb-chain :lazy mb-lazy
                                    :skip-match mb-skip
                                    :insert-interior mb-interior
-                                   :score-p score-p :checks checks))
+                                   :score-p score-p :checks checks
+                                   :bt bt))
               (remaining (partition-commands cmds #.(ash 1 24)))
               (pos 0))
          (loop while remaining do
@@ -2639,6 +2876,7 @@ meta-block."
                                                  :skip-match skip-match
                                                  :insert-interior insert-interior
                                                  :quality quality
+                                                 :bt bt
                                                  :cmds block))
              (incf pos outlen)))
          (unless (= pos n)
@@ -2728,9 +2966,9 @@ dictionary at q10/q11."
     (8 '(:max-chain 32 :lazy t :use-dict nil :short-dist t :quality 8))
     (9 '(:max-chain 128 :lazy t :use-dict nil :short-dist t :quality 9))
     (10 '(:max-chain 256 :lazy t :use-dict t :short-dist t :quality 10
-           :score-p t :checks 16))
+           :score-p t :checks 16 :bt 16))
     (t '(:max-chain 512 :lazy t :use-dict t :short-dist t :quality 11
-          :score-p t :checks 16))))
+          :score-p t :checks 16 :bt 64))))
 
 (defun %compress-bytes (data n params)
   "The COMPRESS selection (entropy candidates plus stored fallback),
@@ -2751,6 +2989,7 @@ returning fresh octets.  Shared by COMPRESS and COMPRESS-INTO."
                (score-p (getf params :score-p nil))
                (checks (getf params :checks 1))
                (quality (getf params :quality 5))
+               (bt (getf params :bt nil))
                (one-pass (getf params :one-pass nil))
                (dict-ok (and (getf params :use-dict) (text-like-data-p data)))
                ;; Run the dictionary parse first.  For normal text it is
@@ -2771,6 +3010,7 @@ returning fresh octets.  Shared by COMPRESS and COMPRESS-INTO."
                                                 :score-p score-p
                                                 :checks checks
                                                 :quality quality
+                                                :bt bt
                                                 :one-pass one-pass)
                          (compress-entropy data :use-dict nil
                                                 :max-chain max-chain
@@ -2784,6 +3024,7 @@ returning fresh octets.  Shared by COMPRESS and COMPRESS-INTO."
                                                 :score-p score-p
                                                 :checks checks
                                                 :quality quality
+                                                :bt bt
                                                 :one-pass one-pass))))
           (when (and dict-ok (< (length best) 4096))
             (let ((plain (compress-entropy data :use-dict nil
@@ -2798,6 +3039,7 @@ returning fresh octets.  Shared by COMPRESS and COMPRESS-INTO."
                                                 :score-p score-p
                                                 :checks checks
                                                 :quality quality
+                                                :bt bt
                                                 :one-pass one-pass)))
               (when (< (length plain) (length best)) (setf best plain))))
           (when (>= (length best) (+ n 32))
