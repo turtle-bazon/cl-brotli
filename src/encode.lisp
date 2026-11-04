@@ -474,6 +474,7 @@ the canonical search."
 (defun cmd-symbol (icode ccode)
   (aref +cmd-symbol-table+ (+ (* icode 24) ccode)))
 
+(declaim (inline cmd-symbol-dist0))
 (defun cmd-symbol-dist0 (icode ccode)
   "Command symbol for the implicit-distance form.  Only valid for insert
 codes 0..7 and copy codes 0..15 (command symbols 0..127)."
@@ -847,6 +848,32 @@ codepoint is -1 for invalid sequences (which count as one byte)."
         (incf i bytes)))
     (> (/ (float size-utf8 1.0d0) (- end start)) 0.75d0)))
 
+(defun utf8-stats (data start end)
+  "C's BrotliIsMostlyUTF8 and DecideMultiByteStatsLevel fused into one
+pass: returns (values MOSTLY C1 C2) where C1 counts bytes >= 192, C2
+counts continuation bytes whose predecessor was >= 224, exactly as the
+two separate C loops compute them (every byte is visited once, in
+order)."
+  (declare (type (simple-array (unsigned-byte 8) (*)) data)
+           (type fixnum start end)
+           (optimize (speed 3) (safety 0)))
+  (let ((size-utf8 0) (i start) (c1 0) (c2 0) (last 0))
+    (declare (type fixnum size-utf8 i c1 c2 last))
+    (loop while (< i end) do
+      (multiple-value-bind (cp bytes) (parse-as-utf8 data i end)
+        (declare (ignore cp))
+        (dotimes (b bytes)
+          (let ((c (aref data (+ i b))))
+            (declare (type fixnum c))
+            (cond ((< c 128) nil)
+                  ((>= c 192) (incf c1))
+                  (t (when (>= last #xE0) (incf c2))))
+            (setf last c)))
+        (when (< cp #x110000) (incf size-utf8 bytes))
+        (incf i bytes)))
+    (values (> (/ (float size-utf8 1.0d0) (- end start)) 0.75d0)
+            c1 c2)))
+
 (defun utf8-position (last c clamp)
   "C UTF8Position."
   (declare (type fixnum last c clamp))
@@ -867,23 +894,16 @@ position classification computes exactly the same values."
            (type (simple-array single-float (*)) costs)
            (optimize (speed 3) (safety 0)))
   (let* ((len (- end start))
-         (mostly (mostly-utf8-p data start end))
-         (max-utf8
-           (if mostly
-               (let ((c1 0) (c2 0) (last 0))
-                 (declare (type fixnum c1 c2 last))
-                 (loop for i of-type fixnum from start below end do
-                   (let ((c (aref data i)))
-                     (cond ((< c 128) nil)
-                           ((>= c 192) (incf c1))
-                           (t (when (>= last #xE0) (incf c2))))
-                     (setf last c)))
-                 ;; C keeps max_utf8 at 1 even with >=500 three-byte stats
-                 ;; ("should be 2, but 1 compresses better"); only the
-                 ;; sparse-multibyte case drops to 0.
-                 (if (and (< c2 500) (< (+ c1 c2) 25)) 0 1))
-               0)))
-    (declare (type fixnum len max-utf8))
+         (c1 0) (c2 0)
+         (mostly nil)
+         (max-utf8 0))
+    (declare (type fixnum len c1 c2 max-utf8) (type boolean mostly))
+    (multiple-value-setq (mostly c1 c2) (utf8-stats data start end))
+    ;; C keeps max_utf8 at 1 even with >=500 three-byte stats ("should be
+    ;; 2, but 1 compresses better"); only the sparse-multibyte case drops
+    ;; to 0 (and non-UTF8 data never takes this path).
+    (when mostly
+      (setf max-utf8 (if (and (< c2 500) (< (+ c1 c2) 25)) 0 1)))
     (cond
       ((not mostly)
        ;; C's plain path: window 2000, one histogram, no prologue bump.
@@ -1211,13 +1231,11 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                (z-nm (and bt (>= bt 64)
                           (make-array (1+ n) :element-type 'fixnum
                                              :initial-element 0)))
-               (z-flat-adj (and bt (>= bt 64)
-                                (make-array (max 64 n) :element-type 'fixnum
-                                                       :adjustable t
-                                                       :fill-pointer 0)))
+               ;; C allocates 4 * num_bytes matches; we clamp at the same
+               ;; (4 * n) capacity (measured corpora peak at 3.77/byte).
                (z-flat (and bt (>= bt 64)
-                            (make-array 0 :element-type 'fixnum)))
-               (z-cands (if (and bt (>= bt 64)) 5 1))
+                            (make-array (* 4 n) :element-type 'fixnum)))
+               (z-cands (if (and bt (>= bt 64)) 3 1))
                (z-maxlen (if (and bt (>= bt 64)) 325 150))
                (head (make-array (ash 1 hbits)
                                  :element-type '(unsigned-byte 32)
@@ -1263,7 +1281,6 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                          zlen zdist zins zsc znext zdict)
                    (type (simple-array fixnum (25)) z-dmatch)
                    (type (simple-array fixnum (*)) z-nm z-flat)
-                   (type (vector fixnum) z-flat-adj)
                    (type zpq zq)
                    (type (simple-array fixnum (4)) z-dc)
                    (type fixnum z-cands z-maxlen)
@@ -1529,12 +1546,20 @@ following the shortcut chain, then the stream-starting cache."
                      (let ((idx 0) (p (aref zsc pos)))
                        (declare (type fixnum idx p))
                        (loop while (and (< idx 4) (> p 0)) do
-                         (let* ((ins (logand (aref zins p) #x7FFFFFF))
-                                (clen (logand (aref zlen p) #x1FFFFFF)))
-                           (declare (type fixnum ins clen))
-                           (setf (aref z-dc idx) (aref zdist p))
-                           (incf idx)
-                           (setf p (aref zsc (- p clen ins)))))
+                         (let ((clen (logand (aref zlen p) #x1FFFFFF)))
+                           (declare (type fixnum clen))
+                           (if (= clen 1)
+                               ;; stub: C's initialized distance is 0 and
+                               ;; its shortcut chain steps to p - 1.
+                               (progn
+                                 (setf (aref z-dc idx) 0)
+                                 (incf idx)
+                                 (setf p (aref zsc (1- p))))
+                               (let ((ins (logand (aref zins p) #x7FFFFFF)))
+                                 (declare (type fixnum ins))
+                                 (setf (aref z-dc idx) (aref zdist p))
+                                 (incf idx)
+                                 (setf p (aref zsc (- p clen ins)))))))
                        (loop for i of-type fixnum from idx below 4 do
                          (setf (aref z-dc i) (aref z-sdc i))))
                      z-dc)
@@ -1545,13 +1570,18 @@ shortcut."
                      (declare (type fixnum pos))
                      (if (zerop pos)
                          0
-                         (let* ((clen (logand (aref zlen pos) #x1FFFFFF))
-                                (ins (logand (aref zins pos) #x7FFFFFF))
-                                (short (ash (aref zins pos) -27)))
-                           (declare (type fixnum clen ins short))
-                           (if (and (zerop short) (zerop (aref zdict pos)))
+                         (let ((clen (logand (aref zlen pos) #x1FFFFFF)))
+                           (declare (type fixnum clen))
+                           (if (= clen 1)
+                               ;; stub / unwritten: zins = 0, zdict = 0
                                pos
-                               (aref zsc (- pos clen ins))))))
+                               (let* ((ins (logand (aref zins pos) #x7FFFFFF))
+                                      (short (ash (aref zins pos) -27)))
+                                 (declare (type fixnum ins short))
+                                 (if (and (zerop short)
+                                          (zerop (aref zdict pos)))
+                                     pos
+                                     (aref zsc (- pos clen ins))))))))
                    (z-update-node (pos start len len-code dist short dictp cost)
                      "C UpdateZopfliNode plus our explicit dictionary flag."
                      (declare (type fixnum pos start len len-code dist short
@@ -1764,13 +1794,12 @@ probing and storing here."
                      (declare (type boolean hq))
                      (fill zcostf +z-infinity+)
                      (fill zlen 1)
-                     (fill zdist 0)
-                     (fill zins 0)
-                     ;; zsc/znext need no fill: z-eval writes zsc[pos]
-                     ;; before anything reads it (the shortcut chain only
-                     ;; looks at earlier positions) and the backward walk
-                     ;; writes znext before the forward walk reads it.
-                     (fill zdict 0)
+                     ;; No fill for zdist/zins/zdict/zsc/znext: an
+                     ;; unwritten node is exactly ZLEN = 1 (written nodes
+                     ;; have copy length >= 2, node 0 has 0), and every
+                     ;; reader tests ZLEN first (z-shortcut/z-cache stub
+                     ;; branches behave like C's zero-initialized stub:
+                     ;; distance 0, insert 0, dictionary false).
                      ;; C re-Inits the queue for every ZopfliIterate run.
                      (setf (zpq-idx zq) 0)
                      (setf (aref zlen 0) 0
@@ -1787,14 +1816,19 @@ probing and storing here."
                                ;; BT entries into bt-md/bt-ml, dictionary
                                ;; entries into z-dmatch (length-keyed).
                                (progn
-                                 (when (plusp cnt) (fill z-dmatch 0))
-                                 (let ((mi 0))
-                                   (declare (type fixnum mi))
+                                 (let ((mi 0) (dfilled nil))
+                                   (declare (type fixnum mi)
+                                            (type boolean dfilled))
                                    (loop for k of-type fixnum below cnt do
                                      (let ((e (aref z-flat (+ off k))))
                                        (declare (type fixnum e))
                                        (if (logbitp 24 e)
                                            (progn
+                                             ;; clear stale lengths once,
+                                             ;; at the first dict entry
+                                             (unless dfilled
+                                               (fill z-dmatch 0)
+                                               (setf dfilled t))
                                              (setf (aref z-dmatch
                                                          (logand e #xFFFFFF))
                                                    (ash e -25)
@@ -1876,8 +1910,10 @@ probing and storing here."
                      ;; C ComputeShortestPathFromNodes -> backward links
                      (let ((index n))
                        (declare (type fixnum index))
-                       (loop while (and (zerop (logand (aref zins index) #x7FFFFFF))
-                                        (= (aref zlen index) 1))
+                       ;; Unwritten <=> ZLEN = 1 (fills are gone; written
+                       ;; copy lengths are >= 2), so the zins half of C's
+                       ;; stub test is redundant.
+                       (loop while (= (aref zlen index) 1)
                              do (decf index))
                        (setf (aref znext index) -1)
                        (loop while (/= index 0) do
@@ -1925,11 +1961,12 @@ Z-NM[i] counts position I's entries (skip interiors stay 0)."
                        (declare (type fixnum i total))
                        (labels ((record (dist len dict)
                                   (declare (type fixnum dist len dict))
-                                  (vector-push-extend
-                                   (logior (ash dist 25) (ash dict 24) len)
-                                   z-flat-adj)
-                                  (incf total)
-                                  (incf (aref z-nm i))))
+                                  (when (< total (* 4 n))
+                                    (setf (aref z-flat total)
+                                          (logior (ash dist 25)
+                                                  (ash dict 24) len))
+                                    (incf total)
+                                    (incf (aref z-nm i)))))
                          (loop while (< (+ i 3) n) do
                            (bt-do i t)
                            (let ((cnt bt-cnt) (longp nil))
@@ -1982,10 +2019,7 @@ Z-NM[i] counts position I's entries (skip interiors stay 0)."
                                          (incf ii))))
                                    (incf i (1- mlen)))
                                  (incf i)))))
-                     ;; Convert to a simple array for the DP passes.
-                     (setf z-flat (make-array total :element-type 'fixnum
-                                                    :initial-contents
-                                                    z-flat-adj))))
+                     total))
                    (z-iterate-hq ()
                      "C BrotliCreateHqZopfliBackwardReferences (q11): one
 match-collection pass, then the DP twice - analytic costs, then exact

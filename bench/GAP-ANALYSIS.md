@@ -1219,3 +1219,57 @@ allows (e.g. z-cands 5 -> 3 at q11 costs ~1% ratio on text).
 Validation: 150/150 tests, repro-split clean, q0-q9 byte-identical
 (35/35), ramp 352, html prefix roundtrips 1K..1M, q11 sizes: html
 132765 (C 132230), json 144842, source 81801, text 10443, binary 268132.
+
+## Rev 114: first speed pass on the DP (storage/fills/estimate/queue) — speed 1/10 -> 2/10
+
+Attack on the remaining gate (>= 1x C core), sb-sprof-guided:
+
+1. **Flat match storage**: the adjustable vector (grow + coerce copy)
+   consed ~150 MB per html q11 run (GC inside the timed region).
+   Replaced with a pre-sized simple (* 4 n) array - the same capacity C
+   allocates - with a clamp instead of C's potential overflow (measured
+   corpora peak at 3.77 entries/byte: json 3.77, html 3.40, binary 1.19,
+   source 0.92, text 0.05).
+2. **Fill elimination**: an unwritten ZopfliNode is exactly ZLEN = 1
+   (written copy lengths are >= 2, node 0 is 0), so z-shortcut/z-cache
+   got stub branches (distance 0, step to p-1 - C's zero-init stub
+   semantics) and the backward walk tests ZLEN alone; the zdist, zins
+   and zdict fills (3 x 4 MB per pass, twice per q11 run) are gone.
+   zcostf/zlen fills remain (they ARE the stub/cost state).
+3. **z-cands 5 -> 3 at q11**: entries k >= 2 only run short candidates;
+   dropping two of them costs <= 0.2% ratio on every corpus (html q11
+   132765 -> 132829, binary 268132 -> 268674, json/text/source within
+   67 bytes) and buys ~25% q11 speed.  All five q11 ratios keep >= 2.4%
+   margin to 1.10.
+4. **estimate-literal-costs fused**: BrotliIsMostlyUTF8 and
+   DecideMultiByteStatsLevel were two separate full passes; utf8-stats
+   does both in one sequence-ordered pass (byte-identical results -
+   every byte visited once in order), saving ~3-4 ms/MiB.
+5. Misc: cmd-symbol-dist0 inlined; dict bucket AREF cast (the
+   (the (simple-array t (65536)) ...) open-codes); z-dmatch cleared
+   only at a position's first dictionary entry instead of every position.
+
+**Gates (1 MiB vs C 1.0.9 core):**
+  ratio <= 1.10: 9/10 (unchanged) - only binary q10 1.106 remains.
+  speed >= 1.0x: 2/10 - binary q10 1.70x, binary q11 1.34x (was 0.96x);
+  html 0.71/0.67, json 0.70/0.67, source 0.84/0.82, text 0.86/0.46.
+  BOTH gates: binary q11 (1 cell; was 0 after r113).
+  q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean.
+
+**What the remaining gap is made of:** the DP loops are C-mandated
+work (16 short candidates x queue entries, full BT walk: 12.5M walk
+nodes + 29M loop iterations per 1 MiB at q10 on html) executed at ~1.5-2x
+gcc's per-op cost; q11 doubles the DP (two iterations) and adds fixed
+costs (estimate ~13 ms, fills, array allocation) that dominate
+skip-heavy corpora - text q11's runtime is only ~2x its q10 estimate
+floor.  No structural inefficiency is left in the port; closing the rest
+means inner-loop constant factors (float conversions %SINGLE-FLOAT ~4%
+at q11, guard chains, struct accessor hoisting) or accepting larger
+deviations from C where ratio margin permits.
+
+Next steps: (a) binary q10 ratio - differential the DP's command
+stream vs C's on the binary corpus (our score path reached 1.076 there,
+so candidates/queue decisions differ somewhere); (b) continued
+constant-factor work on z-update/bt-do inner loops; (c) evaluate
+per-iteration candidate counts (iteration 1 needs 5, iteration 2 may
+tolerate fewer).
