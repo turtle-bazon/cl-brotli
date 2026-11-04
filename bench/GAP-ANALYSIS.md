@@ -929,3 +929,34 @@ fixed (~0.3-0.5 KB residual); html q10 already passes; html q11 residual
 zopfli chain expansion).  Build order: (1) literal block splitting +
 per-block 64-context clustering at q10/11 (entropy-side, precedented by
 r98/r100), (2) HQ parse (binary-tree/zopfli) for the residual.
+
+## Rev 94: E3 literal block splitting + clustering prototype - REFUTED, pivot to HQ parse
+
+Prototype (standalone, not in the tree): split-block on the
+(ctx64<<8|sym) sequence (alphabet 16384) + per-type similarity-path
+agglomerative clustering of the 64 context histograms, full cost with
+realistic overhead (+256 bits/tree for the description, +4 bits/cell
+map, +40 bits/switch).
+
+split-block itself is fast (0-32 ms even on 166K binary literals) and
+agrees with C's shape (text -> 2 blocks like C, binary -> 41+ types).
+But the COST results kill the plan that E2's ceilings suggested:
+
+  corpus  flat(K from r98)  best split+cluster (+overhead)  verdict
+  html    170004            172001 (3 blocks, 11 trees)     worse
+  json    137052            136979 (3 blocks, 4 trees)      -73 bits
+  text     23893            28076 (fallback to flat wins)   worse
+  binary 1248695           1227592 (41 blocks, 80 trees)    -2638 bytes
+
+Root cause: E2 measured Huffman capacity only.  Per-segment trees cost
+~256 bits each to describe, so the -9.3% (binary) / -15.3% (text) raw
+ceilings collapse to ~-2% / ~0% after overhead.  Splitting into MANY
+blocks (min 512) is far worse still (overhead explosion).  Text's C
+parity gap is therefore also parse-bound, not entropy-bound.
+
+Consequences: (a) the literal-block-splitting writer surgery is DROPPED
+(it fixes no failing cell by itself - binary q11 needs -8744 bytes,
+splitting gives ~-2600); (b) every remaining q10/11 cell (html q11
+-2.4KB, json q10 -1.4KB, json q11 -10.4KB, text -0.5KB, binary q11
+-6.1KB) is a PARSE gap = C's to_binary_tree hasher + zopfli chain
+expansion.  Next campaign item: the HQ matcher.
