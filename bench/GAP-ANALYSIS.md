@@ -425,6 +425,79 @@ Next: GREEDY SUB-BLOCK SPLITTING (2 above) for the rest of the q5+
 gap (clustered sub-blocks + block-switch alphabet in the writer;
 decoder already supports NBLTYPES>1, block lengths and switch codes).
 
+## Shipped 4 Nov (late night): greedy block splitting (rev 100) — done
+
+The (2) above, done for the command and distance categories.  Before
+implementing, instrumented the DECODER to dump C's actual stream
+structures (temporary *hdr-log*, reverted): **C q5/q9 emits NBLTYPES
+L=1 / I=2-3 / D=9-12 with NTREESL=13, NTREESD=NBLTYPES-D** — no
+literal splitting (contexts carry literals, as r98 assumed) and no
+clustering (ntrees = ntypes).  That scoped the work to C's greedy
+BlockSplitter (v1.0.9 metablock_inc.h, fetched from GitHub — the local
+/tmp/opencode/brotli-c tree is version-mixed and does not contain it):
+
+* split-block: per-category state machine — min-block 1024 (cmds) /
+  512 (dists), thresholds 500.0 / 100.0, new-type iff both diffs >
+  threshold and ntypes < 256, second-last merge iff diff1 < diff0-20,
+  else merge-last with the growing target;
+* header: NBLTYPES-I/D varints + (when >1) block-type tree over
+  ntypes+2 (switch symbol = type+2; syms 0/1 unused) + block-length
+  tree over 26 + first count — the exact READ-BLK-HEADER inverse;
+* switches: writer decfs ileft/dleft exactly where blk-maybe-switch
+  reads (I: every command; D: only distance-bearing commands =
+  dcode >= 0 = C's cmd_prefix >= 128); lengths may overshoot the
+  tail (harmless: a count that never reaches zero reads no switch);
+* per-type cmd/dist histograms + trees, NTREESD = NBLTYPES-D with the
+  identity 4-context distance map; NBLTYPES-L stays 1.
+  Degraded (no split) output is byte-for-byte the old form.
+
+Two real bugs caught by the validation harness (worth remembering):
+1. TREE-BUILD ORDER: cmd-ets/dist-ets were let* bindings evaluated
+   BEFORE the tally body filled the histograms — every split tree was
+   built EMPTY (single-symbol-0), so the decoder read every distance
+   as symbol 0 after the first switch.  The tally now runs before the
+   trees (first let* = histograms + tally, second let* = trees).
+2. LOOP DO-FORM SWALLOWING: in `(loop ... do (incf ...) (incf j0 ln))`
+   the advance after DO but before the loop's closing paren becomes ANOTHER
+   DO form — j0 grew by min-block PER SYMBOL (512 -> 262144), blocks
+   1+ were never tallied, and the probes showed bi stuck at 0.  Both
+   tally loops now close before the advance.  (Symptom signature:
+   j0 = old-j0 + min-block*count; keeps appearing in :after-style
+   traces.)
+
+Debugging tools used (kept in /tmp/opencode): hdr-parse.lisp (field-by-
+field stream header dump), trace-cmp.lisp (writer/decoder command
+traces), the split-log push pattern — all stripped from the tree.
+
+Verified: 150/150; repro matrix (5 datasets x q5,q6,q7,q9,q10,q11 x
+64KB + bimodal 4KB) 0 failures.  Sizes vs r99 (interleaved sweeps):
+
+level | html | json | text | source | binary | geomean
+q0-q2 | byte-identical (different writer)
+q5    | -0.47% | -1.11% | -0.27% | -0.16% | -1.62% | -0.73%
+q6    | -0.53% | -1.15% | -0.27% | -0.17% | -1.62% | -0.75%
+q7    | -0.77% | -1.38% | -0.41% | -0.30% | -1.53% | -0.88%
+q9    | -1.07% | -1.74% | -0.48% | -0.33% | -1.57% | -1.04%
+q10   | -1.08% | -1.51% | -0.30% | -0.28% | -1.67% | -0.97%
+q11   | -1.24% | -1.58% | -0.30% | -0.24% | -1.71% | -1.01%
+
+20/20 changed cells at q5-q9 SMALLER; 10/10 at q10/q11 smaller.
+Headline ratios vs C (1 MiB, lgwin 22): **html q5 1.110 -> 1.095**
+(first real cap headroom after r98's 1.0999); **json q9 1.018 ->
+1.000 (169084 vs C 169076 — statistical parity)**; html q9 1.022;
+html q11 151068/132230 = 1.143 (was 1.157).
+
+Cost: compression -5..-12% at q5+ (splitter + extra trees + switch
+codes — all C-parity work C pays too); decode of C streams unchanged
+(dec-of-C ~1.0); decode of our own streams -12..-21% (per-command
+block bookkeeping, also C-parity: C's streams always paid it).
+
+Remaining known gaps (unchanged): q10/q11 context modeling depth
+(html 151068/132230 = 1.143 at q11), BrotliOptimizeHistograms (C does
+it at q>=4, we do not — easy tree-size win, untried), the HQ
+clustered splitter for q10+ (we run the greedy one there; C runs
+BrotliSplitBlock), and the q0/q1 one-pass encoder.
+
 ## Attempted 3 Nov 2026: the local-state command loop (step 1 above)
 
 An implementation of the fast command loop as a separate
