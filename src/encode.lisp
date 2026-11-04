@@ -1175,7 +1175,7 @@ the new last-distance.  Mirrors WRITE-FAST-BLOCK-BODY's emission decisions."
                            (sb-sys:sap-ref-8 sap (+ b 4)))
                         (= (sb-sys:sap-ref-16 sap (+ a 4))
                            (sb-sys:sap-ref-16 sap (+ b 4))))))
-             (mlen (a b) (%match-len-sap-call sap a b n))
+             (mlen (a b) (%match-len-sap sap a b n))
              (push-cmd (ins ls cpy dist)
                (when (>= (* 4 nc) (length cv))
                  (let ((new (make-array (* 2 (length cv))
