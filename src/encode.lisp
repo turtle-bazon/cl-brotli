@@ -1647,20 +1647,26 @@ returns the cached result."
                             ;; whose 4-byte hashes differ.
                             (let ((stop (max 0 (- pos bt-short))))
                               (declare (type fixnum stop))
-                              (loop for i of-type fixnum
-                                      from (1- pos) downto (1+ stop)
-                                    while (<= best 2) do
-                                (when (> (- pos i) window) (return))
-                                (when (and (= (aref data pos) (aref data i))
-                                           (= (aref data (1+ pos))
-                                              (aref data (1+ i))))
+                              ;; BT-SHORT is at most 64 (bt is nil/16/64)
+                              ;; and every brotli window is >= 1008, so the
+                              ;; backward distance here (<= 63) can never
+                              ;; exceed the window - C's per-iteration
+                              ;; max_backward break is dead code we drop.
+                              (let ((pos1 (1+ pos)))
+                                (declare (type fixnum pos1))
+                                (loop for i of-type fixnum
+                                        from (1- pos) downto (1+ stop)
+                                      while (<= best 2) do
+                                  (when (and (= (aref data pos) (aref data i))
+                                             (= (aref data pos1)
+                                                (aref data (1+ i))))
                                   (let ((len (mlen i pos)))
                                     (declare (type fixnum len))
                                     (when (> len best)
                                       (setf best len)
                                       (setf (aref bt-md cnt) (- pos i)
                                             (aref bt-ml cnt) len)
-                                      (incf cnt)))))))
+                                      (incf cnt))))))))
                           (when (< best max-len)
                             (let* ((comp (min max-len 128))
                                    (reroot (>= max-len 128))

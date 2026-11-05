@@ -1704,3 +1704,33 @@ constants confirmed MaxZopfliCandidates = 1 (q10) / 5 (q11),
 MaxZopfliLen = 150/325, LONG_COPY_QUICK_STEP = 16384 - all already
 faithful in our port (q11's z-cands 2/1 remains the recorded
 deliberate deviation).
+
+## Rev 127: short-scan dead window check removed - html/json q10 to 0.88
+
+Instrumented exact loop counters (temporary, removed): per 1 MiB html
+q10 run the bt-do short scan does **15.6M iterations** (15 per
+position - almost always the full 16-deep scan), tree steps 11.4M,
+match l-iters 9.2M, short l-iters 0.87M.  The scan's per-iteration
+window check `(> (- pos i) window)` is provably dead: BT-SHORT is
+only ever nil/16/64 (quality params: q10 = 16, q11 = 64) and every
+brotli window is >= 1008, so BACKWARD <= 63 can never trip it - C
+cannot prove this and keeps the check; we deleted it.  Also hoisted
+(1+ POS) out of the loop (POS1).
+
+Measured (best-of-5): html q10 2.07 -> 2.12 MiB/s, json 2.05 ->
+2.07, source 4.81 -> 5.00, **text q10 20.83 -> 22.73 (+9%)**.
+
+**Gates (1 MiB vs C 1.0.9 core; this sweep ran under load ~1.0):**
+  ratio <= 1.10: 10/10, byte-identical sizes.
+  speed >= 1.0x: 7/10, both gates on 7 cells.  html q10 0.84 ->
+  **0.88**, json q10 0.83 -> **0.88**, source q10 1.00 -> **1.04**,
+  text q10 1.04 -> **1.07**, binary q10 1.91x, q11 cells
+  1.23/1.26/1.42/2.52; text q11 0.61.
+  q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
+  bt-min 8/8, ramp 325.
+
+Next: the scan lesson says look for other provably-dead or
+hoistable work inside the 15.6M/11.4M/9.2M loops (tree-step and
+match-l bodies were C-faithful on inspection, but the per-iteration
+window/depth guards and address recomputation deserve the same
+scrutiny).
