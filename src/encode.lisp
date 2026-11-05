@@ -1441,7 +1441,6 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                ;; them before any read (the initial-element form consed a
                ;; second full-array fill per compress).
                (zlen (and bt (make-array (1+ n) :element-type 'fixnum)))
-               (zdist (and bt (make-array (1+ n) :element-type 'fixnum)))
                (zins (and bt (make-array (1+ n) :element-type 'fixnum)))
                (zsc (and bt (make-array (1+ n) :element-type 'fixnum)))
                (znext (and bt (make-array (1+ n) :element-type 'fixnum)))
@@ -1519,7 +1518,7 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                    (type zmodel zmodel)
                    (type (simple-array single-float (*)) zcostf)
                    (type (simple-array fixnum (*))
-                         zlen zdist zins zsc znext)
+                         zlen zins zsc znext)
                    (type (simple-array fixnum (25)) z-dmatch)
                    (type (simple-array fixnum (4)) z-sdc)
                    (type (simple-array fixnum (*)) z-nm z-flat)
@@ -1800,8 +1799,9 @@ following the shortcut chain, then the stream-starting cache."
                      (let ((idx 0) (p (aref zsc pos)))
                        (declare (type fixnum idx p))
                        (loop while (and (< idx 4) (> p 0)) do
-                         (let ((clen (logand (aref zlen p) #xFFFFFF)))
-                           (declare (type fixnum clen))
+                         (let* ((zv (aref zlen p))
+                                (clen (logand zv #xFFFFFF)))
+                           (declare (type fixnum zv clen))
                            (if (= clen 1)
                                ;; stub: C's initialized distance is 0 and
                                ;; its shortcut chain steps to p - 1.
@@ -1811,7 +1811,8 @@ following the shortcut chain, then the stream-starting cache."
                                  (setf p (aref zsc (1- p))))
                                (let ((ins (logand (aref zins p) #x7FFFFFF)))
                                  (declare (type fixnum ins))
-                                 (setf (aref z-dc idx) (aref zdist p))
+                                 ;; distance packed into ZLEN bits 25..50
+                                 (setf (aref z-dc idx) (ash zv -25))
                                  (incf idx)
                                  (setf p (aref zsc (- p clen ins)))))))
                        (loop for i of-type fixnum from idx below 4 do
@@ -1865,8 +1866,12 @@ both readers already had ZLEN in hand)."
                               (optimize (speed 3) (safety 0)))
                      (let ((q (+ pos len)))
                        (declare (type fixnum q))
-                       (setf (aref zlen q) (logior len (ash dictp 24))
-                             (aref zdist q) dist
+                       ;; DIST packs into ZLEN bits 25..50 (dist < 2^26):
+                     ;; both zdist readers (z-cache, path reconstruction)
+                     ;; already had ZLEN in hand, so the separate 8 MB
+                     ;; array and its per-node store are gone.
+                     (setf (aref zlen q) (logior len (ash dictp 24)
+                                                  (ash dist 25))
                              (aref zins q) (logior (ash short 27)
                                                    (- pos start))
                              (aref zcostf q) cost)))
@@ -2102,7 +2107,7 @@ probing and storing here."
                      (declare (type boolean hq))
                      (fill zcostf +z-infinity+)
                      (fill zlen 1)
-                     ;; No fill for zdist/zins/zsc/znext: an
+                     ;; No fill for zins/zsc/znext: an
                      ;; unwritten node is exactly ZLEN = 1 (written nodes
                      ;; have copy length >= 2, node 0 has 0), and every
                      ;; reader tests ZLEN first (z-shortcut/z-cache stub
@@ -2236,7 +2241,7 @@ probing and storing here."
                                 (zv (aref zlen q))
                                 (cpy (logand zv #xFFFFFF))
                                 (ins (logand (aref zins q) #x7FFFFFF))
-                                (dist (aref zdist q))
+                                (dist (ash zv -25))
                                 (dictp (if (logbitp 24 zv) 1 0))
                                 (lit-start pos))
                            (declare (type fixnum q zv cpy ins dist dictp

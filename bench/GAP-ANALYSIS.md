@@ -1829,3 +1829,29 @@ the bubble-loop body, which must run regardless).
   q11 cells 1.25/1.29/1.46/2.57, text q11 0.63.
   q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
   bt-min 8/8, ramp 325.
+
+## Rev 131: distance packed into ZLEN - zdist array eliminated
+
+ZLEN's layout is now LEN(0..23) | DICTP(24) | DIST(25..50) - one
+51-bit fixnum per node (dist < 2^26 from the Rev-121 ranges).  Both
+zdist readers already had ZLEN in hand at the same node:
+  - z-cache: binds ZV once, CLEN = mask 24 bits, DIST = (ASH ZV -25)
+    (the stub path still writes 0 explicitly);
+  - path reconstruction: DIST = (ASH ZV -25) beside the existing CPY
+    read.
+So the separate (1+ N) zdist array (8 MB per compress), its
+per-node store in z-update-node, and one array touch per node write
+are gone.  Unwritten cells stay 1 (fill), which unpacks to stub
+distance 0 exactly like C's zero-initialized stub.
+
+**Gates (1 MiB vs C 1.0.9 core, load ~0.75):**
+  ratio <= 1.10: 10/10, byte-identical sizes (pack verified by exact
+  sizes + roundtrip on all 8 corpora).
+  speed >= 1.0x: 7/10, both gates on 7 cells.  **text q11 0.63 ->
+  0.66** (two DP passes each pay the node store), html q10 0.90,
+  json q10 0.88 (band), source q10 1.06, text q10 1.09, binary
+  2.02x/2.55x, q11 cells 1.22/1.24/1.42.
+  best-of-5: html q10 2.21 MiB/s (0.96x of C's 2.3), text q11
+  15.6 MiB/s.
+  q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
+  bt-min 8/8, ramp 325.
