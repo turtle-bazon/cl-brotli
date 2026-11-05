@@ -3664,7 +3664,11 @@ per command."
          (distfreq (make-array 64 :element-type 'fixnum :initial-element 0)))
     (declare (type fixnum ri)
              (type (simple-array (unsigned-byte 8) (*)) data)
-             (type (simple-array fixnum (*)) recs litfreq cmdfreq distfreq rb))
+             (type (simple-array fixnum (*)) recs litfreq cmdfreq distfreq rb)
+             ;; every CMAP variant is a #(...) literal vector (or NIL for
+             ;; the unmodelled path); without this the per-literal AREF in
+             ;; the loop below fell back to the generic hairy accessor
+             (type (or null simple-vector) lit-cmap))
     ;; Explicit CAR/CDR access instead of DESTRUCTURING-BIND: the latter
     ;; expands to SB-C::CHECK-DS-LIST in this hot loop.
     (dolist (c cmds)
@@ -4109,7 +4113,9 @@ finds no split the header degrades to the single-type form byte-for-byte."
            (nd (loop for k of-type fixnum below ncmd
                      count (>= (aref recs (+ (* k +cmd-stride+) 7)) 0)))
            (dist-syms (make-array nd :element-type '(unsigned-byte 16))))
-      (declare (type fixnum nd))
+      (declare (type fixnum nd)
+               (type (simple-array (unsigned-byte 16) (*))
+                     cmd-syms dist-syms))
       (dotimes (k ncmd)
         (declare (type fixnum k))
         (setf (aref cmd-syms k) (aref recs (+ (* k +cmd-stride+) 2))))
@@ -4124,10 +4130,15 @@ finds no split the header degrades to the single-type form byte-for-byte."
               (incf j)))))
       (multiple-value-bind (itypes ilens niblocks nitypes)
           (split-block cmd-syms ncmd 704 1024 500.0d0)
-        (declare (type fixnum niblocks nitypes))
+        (declare (type fixnum niblocks nitypes)
+                 ;; SPLIT-BLOCK returns (values ub8-types fixnum-lengths ...)
+                 (type (simple-array (unsigned-byte 8) (*)) itypes)
+                 (type (simple-array fixnum (*)) ilens))
         (multiple-value-bind (dtypes dlens ndblocks ndtypes)
             (split-block dist-syms nd 64 512 100.0d0)
-          (declare (type fixnum ndblocks ndtypes))
+          (declare (type fixnum ndblocks ndtypes)
+                   (type (simple-array (unsigned-byte 8) (*)) dtypes)
+                   (type (simple-array fixnum (*)) dlens))
           ;; ---- per-type histograms, trees, switch trees ----------------
           (let* ((cmd-histo (make-array (* nitypes 704)
                                         :element-type 'fixnum

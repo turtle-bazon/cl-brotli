@@ -2336,3 +2336,41 @@ honestly (1 MiB, median-of-3, load ~1.0):
 Supporting battery at r147: 241/241 tests (including the Rev 146
 multi-threaded suite), bt-min 8/8, repro-split clean, byte-identical
 sizes on all 8 corpora, ramp 325.
+
+## Rev 148: q0-q9 speed campaign opens - diagnosis + first type fixes
+
+Scope now (user decision): reach BOTH gates (ratio <= 1.10 AND speed >= 1.0)
+on all 45 cells (5 corpora x 9 levels), by matching C's algorithm and adding
+SIMD VOPs.  The old "q0-9 byte-identical to r147" constraint is superseded:
+output may change, guarded by the ratio gate.
+
+Diagnosis (html 1 MiB, pooled compressor, sb-sprof + instrumentation):
+
+* Probe counts: q9 = 7,551,245 chain probes over 92,195 positions = 81.9
+  probes/position at max-chain 128, ~5.7 ns/probe (~24 cycles); probe-ok
+  rejects 96.4% before MLEN.  q5 = 755,695 chain + 707,996 cache probes,
+  12.5% reach MLEN.
+* Codegen fat in the probe loop (replica disassembly, 0 CALLs so probe-ok
+  and the match-length VOP are inlined): (- N POS) recomputed from two spill
+  slots EVERY probe, SAP base reloaded 3x, BEST-LEN untagged twice - ~6-8 of
+  ~20 probe instructions redundant.  The INS label shows the same disease
+  (repeated SARs, double array-base loads), matching Rev ~714's
+  "fixnum-tag arithmetic and spill profile" note.
+* C side (ChooseHasher): our gate = lgwin 22 + 1 MiB => H6 =
+  hash_longest_match64 with num_last_distances_to_check = 4/10/16 at
+  q5/q6/q9 (we run score at q5/q6 only, checks=4; q7-q9 run greedy with 1
+  cache check), bucket walk bounded by block_size = 2^(quality-1) with
+  PREFETCH_L1, 1-byte probe at best_len (normalised >= 3), score selection.
+* GAP's own record: enabling the score matcher at q7/q9 previously cost -25%
+  speed for -1.2% size, because score-accepted best-len is lower than greedy,
+  which weakens probe-ok and blows up MLEN scans.  => SIMD MLEN first (16
+  bytes/iteration), which is what removes that penalty, then C's selection.
+
+Also fixed (committed): missing type declarations that left the generic
+hairy accessor in hot code - PLAN-COMMANDS' LIT-CMAP (every CMAP variant is
+a #(...) literal vector or NIL): hairy refs 1 -> 0.  Writer declares added
+for CMD-SYMS/DIST-SYMS/ITYPES/ILENS/DTYPES/DLENS (SBCL had already derived
+these; its 6 remaining hairy sites are cold fallback paths, ~2.8% at q5).
+
+Verified: 241/241 tests, bt-min 8/8, repro-split clean, ALL 45 CELL SIZES
+BYTE-IDENTICAL (check45 harness, reference = r147 sweep).
