@@ -1705,25 +1705,32 @@ returns the cached result."
                                    (node-left (* 2 pos))
                                    (node-right (1+ node-left))
                                    (bl-left 0) (bl-right 0)
-                                   (depth 64))
+                                   (depth 64)
+                                   ;; both loop invariants: the mlen2 scan
+                                   ;; end and the window bound (POS - WINDOW)
+                                   ;; were recomputed on every tree step
+                                   (mend (+ pos max-len))
+                                   (min-prev (- pos window)))
                               (declare (type fixnum comp key prev node-left
-                                             node-right bl-left bl-right depth)
+                                             node-right bl-left bl-right depth
+                                             mend min-prev)
                                        (type boolean reroot))
                               (when reroot (setf (aref bt-buckets key) pos))
                               (loop
-                                (let ((backward (- pos prev)))
-                                  (declare (type fixnum backward))
-                                  ;; BACKWARD <= 0 covers PREV = sentinel
-                                  ;; (#xFFFFFFFF) and PREV = POS.
-                                  (when (or (<= backward 0)
-                                            (> backward window)
-                                            (<= depth 0))
+                                ;; PREV >= POS covers the sentinel
+                                ;; (#xFFFFFFFF read as a fixnum) and
+                                ;; PREV = POS; PREV < POS - WINDOW is the
+                                ;; old (> BACKWARD WINDOW) - both compare-
+                                ;; only, no per-step subtraction.
+                                (when (or (<= pos prev)
+                                          (< prev min-prev)
+                                          (<= depth 0))
                                     (when reroot
                                       (setf (aref bt-forest node-left)
                                             #xFFFFFFFF
                                             (aref bt-forest node-right)
                                             #xFFFFFFFF))
-                                    (return)))
+                                    (return))
                                 (decf depth)
                                 (let* ((clen (min bl-left bl-right))
                                        (len (+ clen
@@ -1734,7 +1741,7 @@ returns the cached result."
                                                ;; (128 for store scans).
 (mlen2 (+ prev clen)
                                                       (+ pos clen)
-                                                      (+ pos max-len)))))
+                                                      mend))))
                                   (declare (type fixnum clen len))
                                   (when (and collect (> len best))
                                     (setf best len)

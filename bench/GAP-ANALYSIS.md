@@ -1913,3 +1913,24 @@ profile.
   json 0.94, text q10 1.17 (load 0.24 window).
   q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
   bt-min 8/8, ramp 325.
+
+## Rev 135: tree-step guard/scan-end hoists (no duplication)
+
+Two loop invariants recomputed on each of the 11.4M tree steps per
+MiB, both hoisted WITHOUT duplicating the loop (the Rev 123/128
+lesson):
+  - MEND = (+ POS MAX-LEN): the mlen2 scan end, bound once in the
+    tree let* instead of per step;
+  - MIN-PREV = (- POS WINDOW): the guard's (> BACKWARD WINDOW)
+    becomes (< PREV MIN-PREV) and (<= BACKWARD 0) becomes
+    (<= POS PREV) - compare-only, the per-step subtraction is gone
+    (BACKWARD is now computed only where recorded).
+
+**Gates (1 MiB vs C 1.0.9 core, sweep under load ~1.0):**
+  ratio <= 1.10: 10/10, byte-identical sizes.
+  speed >= 1.0x: 7/10, both gates on 7 cells - **html q10 0.94 ->
+  0.95, json 0.93 -> 0.94**, binary 2.11/2.60, source 1.11/1.48,
+  text 1.10/0.66, q11 cells 1.27/1.30.  best-of-5: html q10
+  2.29 MiB/s, source 5.43.
+  q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
+  bt-min 8/8, ramp 325.
