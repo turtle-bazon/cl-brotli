@@ -771,7 +771,7 @@ are considered so command copy lengths remain the base-word lengths."
                        (return)))))))
     (values best-len best-idx best-tid)))
 
-(defun dict-matches-at (sap data p n min-len dist-base dists)
+(defun dict-matches-at (sap data p n min-len dist-base dists stamp)
   "C BrotliFindAllStaticDictionaryMatches (length-preserving transforms
 only): for every dictionary word of length LEN in [MIN-LEN, 24] that
 matches DATA[P..), set DISTS[LEN] to its backward distance and return the
@@ -783,6 +783,7 @@ as a dictionary reference."
            (type fixnum p n min-len)
            (type (integer 0 #x1FFFFFF) dist-base)
            (type (simple-array fixnum (25)) dists)
+           (type (integer 0 #x7FFFFF) stamp)
            (optimize (speed 3) (safety 0)))
   (let* ((key (if (and sap (<= (+ p 4) n))
                   (sb-sys:sap-ref-32 sap p)
@@ -807,7 +808,9 @@ as a dictionary reference."
                  (type (integer 0 31) len)
                  (type (integer 0 2047) idx))
         (when (and (<= len (- n p)) (>= len min-len)
-                   (zerop (aref dists len)))
+                   ;; not yet filled by THIS call (stamps replace the
+                   ;; per-call clear the old zero-test relied on)
+                   (/= (ash (aref dists len) -26) stamp))
           (let ((off (+ (aref +doffset+ len) (* idx len)))
                 (skip1 nil))
             (declare (type boolean skip1))
@@ -824,9 +827,10 @@ as a dictionary reference."
               (cond
                 ((>= fpos len)
                  (setf (aref dists len)
-                       (+ dist-base 1 idx
-                          (* (the (integer 0 127) +dict-tid0+)
-                             (the (integer 0 2048) (nwords len)))))
+                       (logior (ash stamp 26)
+                               (+ dist-base 1 idx
+                                  (* (the (integer 0 127) +dict-tid0+)
+                                     (the (integer 0 2048) (nwords len))))))
                  (incf count))
                 (t
                  ;; KIND 1 (upper-first) only changes the first UTF-8
@@ -843,9 +847,10 @@ as a dictionary reference."
                                 (not (and skip1 (= kd 1))))
                        (when (%dict-word-match-p data p dict off len kd)
                          (setf (aref dists len)
-                               (+ dist-base 1 idx
-                                  (* (the (integer 0 127) (car tk))
-                                     (the (integer 0 2048) (nwords len)))))
+                               (logior (ash stamp 26)
+                                       (+ dist-base 1 idx
+                                          (* (the (integer 0 127) (car tk))
+                                             (the (integer 0 2048) (nwords len))))))
                          (incf count)
                          (return))))))))))))
         count))
@@ -1443,7 +1448,12 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                (zq (and bt (make-zpq)))
                (z-sdc #(4 11 15 16))
                (z-dc (make-array 4 :element-type 'fixnum))
-               (z-dmatch (and bt (make-array 25 :element-type 'fixnum)))
+               ;; Dictionary distances are packed (STAMP << 26 | DIST):
+               ;; the consumer tests the stamp instead of zero-testing, so
+               ;; the per-probe 25-element clear disappears.  -1 can never
+               ;; equal a position stamp (and keeps first-use deterministic).
+               (z-dmatch (and bt (make-array 25 :element-type 'fixnum
+                                             :initial-element -1)))
                ;; HQ (q11) pre-collected match storage: one packed entry per
                ;; match, (dist << 25) | (dict-flag << 24) | len.
                (z-nm (and bt (>= bt 64)
@@ -2035,11 +2045,13 @@ position.  Returns the longest newly-reached copy length."
                                             (incf mi))
                                            ((and dict-p (<= dl 24))
                                             (loop while (and (<= dl 24)
-                                                             (zerop (aref z-dmatch dl)))
+                                                             (/= (ash (aref z-dmatch dl) -26)
+                                                                 pos))
                                                   do (incf dl))
                                             (when (> dl 24)
                                               (return))
-                                            (setf dist (aref z-dmatch dl)
+                                            (setf dist (logand (aref z-dmatch dl)
+                                                               #x3FFFFFF)
                                                   max-m dl
                                                   isdict 1)
                                             (incf dl))
@@ -2110,22 +2122,20 @@ probing and storing here."
                                ;; BT entries into bt-md/bt-ml, dictionary
                                ;; entries into z-dmatch (length-keyed).
                                (progn
-                                 (let ((mi 0) (dfilled nil))
-                                   (declare (type fixnum mi)
-                                            (type boolean dfilled))
+                                 (let ((mi 0))
+                                   (declare (type fixnum mi))
                                    (loop for k of-type fixnum below cnt do
                                      (let ((e (aref z-flat (+ off k))))
                                        (declare (type fixnum e))
                                        (if (logbitp 24 e)
                                            (progn
-                                             ;; clear stale lengths once,
-                                             ;; at the first dict entry
-                                             (unless dfilled
-                                               (fill z-dmatch 0)
-                                               (setf dfilled t))
+                                             ;; stamp-packed: the consumer
+                                             ;; tests STAMP == position, so
+                                             ;; no per-position clear
                                              (setf (aref z-dmatch
                                                          (logand e #xFFFFFF))
-                                                   (ash e -25)
+                                                   (logior (ash i 26)
+                                                           (ash e -25))
                                                    dok t))
                                            (progn
                                              (setf (aref bt-md mi)
@@ -2144,13 +2154,12 @@ probing and storing here."
                                  (when (and use-dict
                                             (< (if (plusp cnt) bt-cbest 0) 24)
                                             (< dict-used dlim))
-                                   (fill z-dmatch 0)
                                    (dict-matches-at sap data i n
                                                     (max 4 (1+
                                                             (if (plusp cnt)
                                                                 bt-cbest 0)))
                                                     (min window (+ base-pos i))
-                                                    z-dmatch)
+                                                    z-dmatch i)
                                    (setf dok t))
                                  ;; C: only the longest match survives when
                                  ;; it exceeds MaxZopfliLen.
@@ -2286,15 +2295,15 @@ Z-NM[i] counts position I's entries (skip interiors stay 0)."
                              (when (and use-dict
                                         (< bt-cbest 24)
                                         (< dict-used dlim))
-                               (fill z-dmatch 0)
                                (dict-matches-at sap data i n
                                                 (max 4 (1+ bt-cbest))
                                                 (min window (+ base-pos i))
-                                                z-dmatch)
+                                                z-dmatch i)
                                (loop for l of-type fixnum from 4 to 24 do
                                  (let ((d (aref z-dmatch l)))
                                    (declare (type fixnum d))
-                                   (when (plusp d) (record d l 1)))))
+                                   (when (= (ash d -26) i)
+                                     (record (logand d #x3FFFFFF) l 1)))))
                              (loop for k of-type fixnum below cnt do
                                (record (aref bt-md k) (aref bt-ml k) 0))
                              (if longp

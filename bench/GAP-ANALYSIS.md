@@ -1765,3 +1765,40 @@ scrutiny).
   put html/json at 0.85-0.89).
   q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
   bt-min 8/8, ramp 325.
+
+## Rev 129: stamp-packed dictionary distances - per-probe clears gone, html q10 to 0.92
+
+z-dmatch (the 25-slot length-keyed dictionary scratch) was cleared
+with a 25-element FILL on every dictionary probe - three sites (q10
+interleaved, q11 prepass, q11 hq unpack), each firing on most
+positions (~1.4M probes/MiB on html).  Replaced with a **position
+stamp packed into the distance value**:
+
+  z-dmatch[len] = (STAMP << 26) | DIST      (dist < 2^26, pos < 2^23)
+
+- dict-matches-at takes a STAMP parameter and packs it; its
+  first-writer guard changed from (ZEROP ...) to (STAMP != this
+  call) - the old zero-test relied on the clear it no longer does.
+- consumers test (ASH v -26) == position instead of (PLUSP/ZEROP v)
+  and unpack with (LOGAND v #x3FFFFFF): z-update's dl skip-scan,
+  the prepass l 4..24 record loop.
+- the hq unpack packs (ASH I 26) with the flat entry's distance; its
+  conditional clear (DFILLED) is gone.
+- allocation uses :INITIAL-ELEMENT -1 (never equals a stamp, keeps
+  first-use deterministic).  Cross-pass reads (q11 prepass -> pass2)
+  are harmless: dictionary distances are position-determined, so a
+  same-position stale slot holds the identical value.
+
+Sizes initially broke (text q10 +9%): the (ZEROP ...) guard in
+dict-matches-at never fired once slots held -1/stamps, killing every
+dictionary record - fixed by the stamp guard, then byte-identical.
+
+**Gates (1 MiB vs C 1.0.9 core, sweep under load ~1.0):**
+  ratio <= 1.10: 10/10, byte-identical sizes.
+  speed >= 1.0x: 7/10, both gates on 7 cells.  **html q10 0.86 ->
+  0.92, json q10 0.84 -> 0.90** (best-of-5: 2.19 / 2.14 MiB/s vs
+  C 2.3 = 0.95x/0.93x); source q10 1.02 -> 1.07, binary q10 1.96x,
+  q11 cells 1.25/1.28/1.46/2.54, text q10 1.07x, text q11 0.61.
+  html/json q10 now need only +8-10%.
+  q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
+  bt-min 8/8, ramp 325.
