@@ -2960,6 +2960,11 @@ score rather than length.  Returns (values len dist score)."
 (defparameter +q0-cmd-map+
   (let ((v (make-array 64 :element-type 'fixnum)))
     (dotimes (c 64 v) (setf (aref v c) (q0-cmd-symbol c)))))
+;; typed: an untyped DEFPARAMETER made every (AREF +Q0-CMD-MAP+ CC) in the
+;; fragment's hot emit loop go through VECTOR-HAIRY-DATA-VECTOR-REF
+;; (5.6% of q0 samples); SBCL reads the symbol value at runtime, so the
+;; declaration is what lets it open-code the ref.
+(declaim (type (simple-array fixnum (64)) +q0-cmd-map+))
 
 ;; C's kCmdHistoSeed: a prior that keeps every command code the fast path can
 ;; emit encodable and avoids degenerate one-symbol command trees.

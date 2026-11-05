@@ -2565,3 +2565,46 @@ car/cadr/caddr/cadddr/cddddr plus the consing in EMIT-NORMAL; estimated
 +6-8% across tiers but a 10+ site change with partition-commands and
 dictp's boolean semantics to preserve); (b) C's score matcher at q7-q9,
 already measured at -29%/-39% in Rev 150.
+
+## Rev 154: +Q0-CMD-MAP+ type declaim (+9% on q0) - and a FAILED experiment
+
+**Win: one missing DECLAIM.**  +Q0-CMD-MAP+ is a DEFPARAMETER holding a
+fixnum array with no type declaration.  SBCL reads a symbol's value at
+runtime, so without the declaration it can never open-code the reference:
+every (AREF +Q0-CMD-MAP+ CC) in %LZ77-FRAGMENT's per-command emit loop
+went through VECTOR-HAIRY-DATA-VECTOR-REF - 5.6% of q0's samples (the
+fragment's only hairy site, confirmed by disassembly: 1 -> 0).
+(declaim (type (simple-array fixnum (64)) +Q0-CMD-MAP+)) fixes it.
+A sweep of every DEFPARAMETER/DEFVAR in src/ for the same defect found no
+other HOT one (the length-code tables are declared, +LUT0/1/2+ are
+declared, the rest are cold or load-time).
+
+Verified: fragment hairy 1 -> 0; ALL 45 cell sizes byte-identical;
+241/241 tests; bt-min 8/8; repro-split clean; ratio 0 failures.
+Measured (two independent sweeps, r154 vs r152, median per level):
+  q0 = 1.094 (+9.4%) - binary 0.31 -> 0.36, html 0.32 -> 0.35,
+  json 0.31 -> 0.33, source 1.33 -> 1.49, text 6.00 -> 6.15-6.81.
+  q1 = 1.000 (its emit path is WRITE-FAST-BLOCK-BODY, which does not
+  use the map), q2 = 1.021, q5 = 1.035, q6 = 1.017, q7 = 0.989,
+  q9 = 0.984, q10 = 1.000, q11 = 0.995 (all within run noise except q0).
+
+**FAILED - do not re-derive: rotating P1/P2 in the literal loops.**
+PLAN-COMMANDS and the writer re-read (AREF DATA (1- I)) / (AREF DATA
+(- I 2)) per literal; the obvious fix is C's rotating-register form with
+pre-loop initialisation (byte-identical, and it did compile and pass
+check45).  Measured SLOWER on every cell: html q7 -2.1%, source q7
+-4.0%, text q7 -3.3%, html q5 -1.1%, html q9 -0.5%.  Reason: the
+original's two loads are independent (hidden by the OoO engine, L1 hits
+on sequential data), while the rotation creates a loop-carried
+dependency chain (p2<-p1<-sym) that serialises CID computation every
+iteration.  Fewer instructions, worse critical path.  Reverted.
+
+**Methodology finding (gate stability):** sweep-vs-sweep on this
+13-user box is load-confounded.  html q7 read 1.01 (r152), 0.92 and
+0.99 (two r154 runs) while the controlled timing2 A/B for the same
+code read 43.86 MiB/s = 1.06x - i.e. the cell straddles 1.0 with
++/-5% run variance and the total gate count can swing 18 <-> 19 from
+load alone.  Both r154 sweeps agreed on **18/45 with 0 ratio failures**
+(the passing set differed from r152 only by html q7 at the boundary).
+Recorded per-level medians above so future comparisons use them rather
+than single cells.
