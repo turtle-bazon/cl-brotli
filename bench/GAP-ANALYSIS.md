@@ -2050,3 +2050,30 @@ cluster (text q11's remaining outside-HQ gap):
   2.11/2.90).
   q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
   bt-min 8/8, ramp 325.
+
+## Rev 140: zins/zsc as u32 - consing cut 21-33% per compress
+
+ZINS packs (short<<27)|insert and fits EXACTLY 32 bits (short <= 31,
+insert < 2^23); ZSC holds shortcut positions < 2^23.  Both arrays are
+now (unsigned-byte 32): every read masks/shifts to the same fixnums
+(LOGAND #x7FFFFFF / ASH -27 / plain aref), and stores truncate to
+identical values (provably in range).  Effect on measured consing
+per compress (cons.lisp):
+
+  html q10: 73 -> 48.9 MB (-33%), html q11: 115 -> 91.5 MB (-21%),
+  text q11: 106 -> 82.5 MB (-23%), binary q10: 78 -> 54.1 MB (-31%).
+
+Motivation: the remaining sweep-median drag on the boundary cells
+(json q10, text q11) is GC-pause variance from our allocation volume
+(vs C's ~72 MB); less volume tightens medians toward the best-of-5
+numbers (where both cells already measure ~1.0x C in isolation:
+json 2.29-2.40 vs 2.2-2.3; text q11 20.83 vs 20.6-21.2).
+
+**Gates (1 MiB vs C 1.0.9 core):**
+  ratio <= 1.10: 10/10, byte-identical sizes (all 8 corpora + roundtrip).
+  speed: 8/10 confirmed this sweep under load 1.07 (html q10 1.01,
+  html q11 1.45, json q11 1.48, source 1.19/1.74, text q10 1.16,
+  binary 2.12/2.97); json q10 0.98-1.01 and text q11 0.84-0.88
+  remain boundary/isolated-parity cells.
+  q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
+  bt-min 8/8, ramp 325.

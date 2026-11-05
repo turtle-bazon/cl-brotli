@@ -1464,8 +1464,17 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                ;; them before any read (the initial-element form consed a
                ;; second full-array fill per compress).
                (zlen (and bt (make-array (1+ n) :element-type 'fixnum)))
-               (zins (and bt (make-array (1+ n) :element-type 'fixnum)))
-               (zsc (and bt (make-array (1+ n) :element-type 'fixnum)))
+               ;; u32: ZINS = (short<<27)|insert fits EXACTLY 32 bits
+               ;; (short<=31, insert<2^23), ZSC values < 2^23 - halves
+               ;; 16 MB of per-compress allocation and doubles cache
+               ;; density for two arrays read on every DP position.
+               ;; All reads mask/shift as before (u32 arefs yield the
+               ;; same fixnums); stores truncate identically (values
+               ;; provably fit).
+               (zins (and bt (make-array (1+ n)
+                                         :element-type '(unsigned-byte 32))))
+               (zsc (and bt (make-array (1+ n)
+                                        :element-type '(unsigned-byte 32))))
                (znext (and bt (make-array (1+ n) :element-type 'fixnum)))
                (zq (and bt (make-zpq)))
                (z-sdc (make-array 4 :element-type 'fixnum
@@ -1556,7 +1565,8 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                    (type zmodel zmodel)
                    (type (simple-array single-float (*)) zcostf)
                    (type (simple-array fixnum (*))
-                         zlen zins zsc znext)
+                         zlen znext)
+                         (type (simple-array (unsigned-byte 32) (*)) zins zsc)
                    (type (simple-array fixnum (25)) z-dmatch)
                    (type (simple-array fixnum (4)) z-sdc)
                    (type (simple-array fixnum (*)) z-nm z-flat)
