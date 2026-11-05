@@ -2374,3 +2374,37 @@ these; its 6 remaining hairy sites are cold fallback paths, ~2.8% at q5).
 
 Verified: 241/241 tests, bt-min 8/8, repro-split clean, ALL 45 CELL SIZES
 BYTE-IDENTICAL (check45 harness, reference = r147 sweep).
+
+## Rev 149: SSE2 match-length VOP - gate cells all improve, bit-identical
+
+The %MATCH-LEN-SAP template is now a three-stage SSE2 sequence: 16-byte
+PCMPEQB/PMOVMSKB loop, then the 8-byte word loop for the 8..15-byte
+remainder, then the byte tail.  Every load is guarded by len+K <= maxl, so
+reads stay inside the vector (maxl = N-B and A < B imply A+len+K < N).
+
+* Correctness: 0 mismatches vs the reference body on 300,000 random pairs
+  (structured regions so matches of every length occur, zero runs for the
+  ctz edge) plus an exhaustive a<b, bound sweep.  All 45 gate cell sizes
+  BYTE-IDENTICAL; 241/241 tests; bt-min 8/8; repro-split clean.
+* CPU requirements: PCMPEQB/PMOVMSKB/MOVDQU are SSE2 = baseline x86-64, so
+  this runs on every x86-64 CPU (no BMI1/SSE4.2/AVX).  The only
+  non-baseline instruction is TZCNT (BMI1); its F3-prefixed encoding is
+  architecturally executed as BSF on pre-BMI1 CPUs, and both uses here have
+  a provably non-zero operand (word-loop XOR non-zero by branch; SSE mask
+  non-0xFFFF by branch) where BSF and TZCNT agree - same argument as the
+  match-length template had before, now stated for both sites.
+* Micro-benchmark (2.2M calls, half long matches): 1.60x the old 8-byte
+  word-loop template (both confirmed inlined: PCMPEQB vs TZCNT).
+* Gate sweep vs r147 (same method): q10/q11 ALL IMPROVED - binary q11
+  2.98 -> 3.16, html q11 1.45 -> 1.50, json q11 1.48 -> 1.53, source q11
+  1.81 -> 1.85, text q11 1.14 -> 1.17, html q10 1.07 -> 1.09, text q10
+  1.54 -> 1.57; ratios unchanged (45/45 <= 1.10, zero flips).
+* The same sweep showed binary q5/q6/q7 -0.09/-0.08/-0.09, but a
+  controlled A/B (identical harness, both orders) proves that was load
+  noise (load 0.87): binary q5 33.07 -> 35.61 MiB/s (+7.7%), q6
+  29.83 -> 29.90, q7 33.51 -> 33.97 (+1.4%).
+
+Why this matters beyond its own gain: the probe filter's strength is what
+keeps MLEN rare (3.6% of chain probes at q9).  Adopting C's cheaper 1-byte
+probe makes MLEN run far more often - affordable only once MLEN is cheap,
+which is what this VOP provides.  SIMD first, then C's selection.
