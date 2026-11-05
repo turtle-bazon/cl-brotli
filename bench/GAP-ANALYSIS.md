@@ -1934,3 +1934,38 @@ lesson):
   2.29 MiB/s, source 5.43.
   q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
   bt-min 8/8, ramp 325.
+
+## Rev 136: length-code tables as lexical locals - SPEED 7/10 -> 9/10, html/json q10 FLIP
+
+Disassembly of the current match/short l-loop showed its back-edge
+landing on a block that re-loads all four length-code tables
+(+CPY-CODE+, +CPY-XBITS-F+, +CPY-BASE+, +CPY-BITS+) **through
+symbol+value indirection on every l-iteration** (~6 instructions x
+4 tables before anything else) - SBCL never hoists symbol-value
+loads out of loops, and the inlined LENGTH-CODE-F received the
+defparameter literals directly at each call site.  The four cpy
+tables (and the four ins tables for the per-k insert site) are now
+LEXICAL bindings in %lz77, evaluated once per compress; the body
+reads frame slots (1 reload + aref) instead of the symbol dance.
+
+Sizes byte-identical (pure code motion).
+
+**Gates (1 MiB vs C 1.0.9 core, sweep under load ~1.0):**
+  ratio <= 1.10: 10/10, byte-identical sizes.
+  speed >= 1.0x: **9/10** (was 7/10) -
+    **HTML q10 0.95 -> 1.01x PASS, JSON q10 0.94 -> 1.01x PASS**;
+    source q10 1.11 -> 1.18, text q10 1.13, binary 2.12/2.85,
+    q11 cells html 1.38, json 1.42, source 1.59.
+    best-of-5: html q10 2.45 MiB/s (1.07x of C's 2.3), json 2.38
+    (1.03x), source 5.68.
+  **BOTH gates now on 9 cells** - the only failing cell is
+  TEXT q11 at 0.65 (needs +54%; structural: two DP passes + prepass
+  vs C's cheaper passes on the repetitive corpus - phase timings in
+  Rev 122).
+  q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
+  bt-min 8/8, ramp 325.
+
+Session trajectory (r121 -> r136): speed 5/10 -> **9/10**, both-
+gate cells 5 -> 9, html q10 0.79 -> 1.01, json 0.79 -> 1.01,
+source 0.95 -> 1.18 (flip), text q10 0.97 -> 1.13 (flip),
+text q11 0.56 -> 0.65.

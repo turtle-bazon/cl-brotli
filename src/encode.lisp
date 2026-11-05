@@ -1485,6 +1485,18 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                (cpy-n (length +cpy-code+))
                (ins-n (length +ins-code+))
                (cmd-tab +cmd-symbol-table+)
+               ;; The l-loops' length-code tables: bound as LEXICALS so
+               ;; the inlined LENGTH-CODE-F body reads frame slots.  As
+               ;; literal defparameter refs each table went through
+               ;; symbol+value indirection ON EVERY l-iteration (~6
+               ;; instructions x 4 tables - the disassembly's loop head
+               ;; re-loaded +CPY-CODE+/+CPY-XBITS-F+/+CPY-BASE+/+CPY-BITS+
+               ;; through the symbol each pass; SBCL never hoists
+               ;; symbol-value loads out of loops).
+               (cpy-c +cpy-code+) (cpy-xf +cpy-xbits-f+)
+               (cpy-bs +cpy-base+) (cpy-bt +cpy-bits+)
+               (ins-c +ins-code+) (ins-xf +ins-xbits-f+)
+               (ins-bs +ins-base+) (ins-bt +ins-bits+)
                (head (make-array (ash 1 hbits)
                                  :element-type '(unsigned-byte 32)
                                  :initial-element #xFFFFFFFF))
@@ -1959,8 +1971,8 @@ position.  Returns the longest newly-reached copy length."
                                   (start (aref pos-a ki)))
                              (declare (type fixnum ki start))
                              (multiple-value-bind (icode ixbf)
-                                 (length-code-f (- pos start) +ins-code+ ins-n
-                                              +ins-xbits-f+ +ins-base+ +ins-bits+)
+                                 (length-code-f (- pos start) ins-c ins-n
+                                              ins-xf ins-bs ins-bt)
                                (let ((base (+ (aref cd-a ki)
                                               ixbf
                                               (aref prefix pos)))
@@ -2019,9 +2031,8 @@ position.  Returns the longest newly-reached copy length."
                                                (loop while (<= l len) do
                                                  (progn
                                                  (multiple-value-bind (cc cxbf)
-                                                     (length-code-f l +cpy-code+ cpy-n +cpy-xbits-f+
-                                                                    +cpy-base+
-                                                                    +cpy-bits+)
+                                                     (length-code-f l cpy-c cpy-n cpy-xf
+                                                                    cpy-bs cpy-bt)
                                                    (let* ((cmdc
                                                             (if (and dist0
                                                                      (< cc 16))
@@ -2100,9 +2111,8 @@ position.  Returns the longest newly-reached copy length."
                                                              dist-cost))
                                              (loop while (<= len max-m) do
                                                (multiple-value-bind (cc cxbf)
-                                                   (length-code-f len +cpy-code+ cpy-n +cpy-xbits-f+
-                                                                  +cpy-base+
-                                                                  +cpy-bits+)
+                                                   (length-code-f len cpy-c cpy-n cpy-xf
+                                                                  cpy-bs cpy-bt)
                                                  (let* ((cmdc (aref cmd-tab
                                                                     (+ cmd-base cc)))
                                                         (cost (+ dist-cost
