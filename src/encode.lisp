@@ -1107,6 +1107,10 @@ position classification computes exactly the same values."
            (type (simple-array single-float (*)) costs)
            (optimize (speed 3) (safety 0)))
   (let* ((len (- end start))
+         ;; lexical table: the inlined FAST-LOG2 body re-loaded
+         ;; +FAST-LOG2-TABLE+ through symbol indirection on every byte
+         ;; (Rev 136/137 lesson) - a frame slot here instead
+         (fl2tab +fast-log2-table+)
          (c1 0) (c2 0)
          (mostly nil)
          (max-utf8 0))
@@ -1146,7 +1150,7 @@ position classification computes exactly the same values."
                (setf iw-last in-window
                      liw (fast-log2 in-window)))
              (let* ((h (max 1 (aref hist (aref data p))))
-                    (cost (+ (- liw (fast-log2 h))
+                    (cost (+ (- liw (if (< h 2048) (aref fl2tab h) (log (float h 1.0d0) 2.0d0)))
                              0.029d0)))
                (declare (type double-float cost))
                (when (< cost 1.0d0)
@@ -1181,7 +1185,7 @@ position classification computes exactly the same values."
                (setf iw-last in-window
                      liw (fast-log2 in-window)))
              (let* ((h (max 1 (aref hist (aref data p))))
-                    (cost (+ (- liw (fast-log2 h))
+                    (cost (+ (- liw (if (< h 2048) (aref fl2tab h) (log (float h 1.0d0) 2.0d0)))
                              0.029d0)))
                (declare (type double-float cost))
                (when (< cost 1.0d0)
@@ -1231,8 +1235,8 @@ position classification computes exactly the same values."
                     (lc (if (< i 2) 0 (aref data (- p 2))))
                     (upos (utf8-position lc c max-utf8))
                     (h (max 1 (aref hist (+ (* 256 upos) (aref data p)))))
-                    (cost (+ (- (fast-log2 (aref in-u upos))
-                                (fast-log2 h))
+                    (cost (+ (- (let ((u (aref in-u upos))) (if (< u 2048) (aref fl2tab u) (log (float u 1.0d0) 2.0d0)))
+                                (if (< h 2048) (aref fl2tab h) (log (float h 1.0d0) 2.0d0)))
                              0.029d0)))
                (declare (type fixnum upos) (type double-float cost))
                (when (< cost 1.0d0)
@@ -1247,8 +1251,9 @@ position classification computes exactly the same values."
 prefix sum + analytic command/distance costs (log2(11+i)/log2(20+i))."
   (declare (type (simple-array (unsigned-byte 8) (*)) data)
            (type fixnum n) (optimize (speed 3) (safety 0)))
-  (let* ((prefix (make-array (+ n 2) :element-type 'single-float
-                                     :initial-element 0.0f0))
+  (let* (;; no initial-element: prefix[0] is setf'd, [1..n] written by
+         ;; the in-place estimate, and the fold only reads [0..n]
+         (prefix (make-array (+ n 2) :element-type 'single-float))
          (cc (make-array 704 :element-type 'single-float
                              :initial-element 0.0f0))
          (cd (make-array 64 :element-type 'single-float

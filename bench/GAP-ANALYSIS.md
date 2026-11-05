@@ -2027,3 +2027,26 @@ when a future full walk can exist.  Byte-identical by construction
   outside vs C's ~0-5 inside-iter accounting).
   q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
   bt-min 8/8, ramp 325.
+
+## Rev 139: estimate-side cleanups - text q11 0.84 -> 0.88
+
+Following the Rev 136/137 symbol-indlocation lesson into the estimate
+cluster (text q11's remaining outside-HQ gap):
+  - FAST-LOG2's inlined body re-loaded +FAST-LOG2-TABLE+ through
+    symbol indirection on EVERY byte of the cost loop (one call per
+    byte per active path, plus the general-UTF8 path's per-byte call):
+    the per-byte sites now inline against a LEXICAL FL2TAB bound in
+    estimate-literal-costs (frame slot, no symbol dance);
+  - the literal_costs prefix array's 4 MB :INITIAL-ELEMENT fill is
+    dead: prefix[0] is setf'd, [1..n] written by the in-place
+    estimate, and the fold only reads [0..n] - fill dropped.
+
+**Gates (1 MiB vs C 1.0.9 core, sweep under load ~1.0):**
+  ratio <= 1.10: 10/10, byte-identical sizes.
+  speed: **text q11 0.84 -> 0.88**; json q10 measured 0.99 this run
+  (band 0.99-1.01 across the last four sweeps under varying load -
+  effectively at parity); everything else in band (html q10 1.01,
+  html/json q11 1.42/1.46, source 1.15/1.72, text q10 1.16, binary
+  2.11/2.90).
+  q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
+  bt-min 8/8, ramp 325.
