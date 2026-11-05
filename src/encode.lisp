@@ -944,8 +944,13 @@ costdiff order."
           (rotatef (aref pos-a a) (aref pos-a b))
           (rotatef (aref cost-a a) (aref cost-a b))
           (rotatef (aref cd-a a) (aref cd-a b))
-          (loop for k of-type fixnum from 0 below 4 do
-            (rotatef (aref dc (+ (* 4 a) k)) (aref dc (+ (* 4 b) k)))))
+          ;; unrolled: the loop re-multiplied (* 4 a)/(* 4 b) per slot
+          (let ((ba (ash a 2)) (bb (ash b 2)))
+            (declare (type fixnum ba bb))
+            (rotatef (aref dc ba) (aref dc bb))
+            (rotatef (aref dc (+ ba 1)) (aref dc (+ bb 1)))
+            (rotatef (aref dc (+ ba 2)) (aref dc (+ bb 2)))
+            (rotatef (aref dc (+ ba 3)) (aref dc (+ bb 3)))))
         (setf offset b)))))
 
 (declaim (inline zq-at))
@@ -1407,9 +1412,14 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                (bt-buckets (and bt (make-array 131072
                                  :element-type '(unsigned-byte 32)
                                  :initial-element #xFFFFFFFF)))
+               ;; No initial fill: like C (Prepare clears buckets only),
+               ;; every forest read is preceded by a write - the bucket
+               ;; root and every chained prev were written on all of
+               ;; their insert's exit paths, and the current node's slots
+               ;; are only ever written (termination, >=comp, or branch).
+               ;; Saves an 8 MB memset per compress.
                (bt-forest (and bt (make-array (* 2 (+ n 8))
-                                 :element-type '(unsigned-byte 32)
-                                 :initial-element #xFFFFFFFF)))
+                                 :element-type '(unsigned-byte 32))))
                (bt-next 0) (bt-cnt 0) (bt-cpos -1) (bt-cbest 0)
                (bt-md (and bt (make-array 128 :element-type 'fixnum)))
                (bt-ml (and bt (make-array 128 :element-type 'fixnum)))

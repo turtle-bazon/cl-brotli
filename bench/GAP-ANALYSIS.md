@@ -1613,3 +1613,33 @@ the Rev 122 C profile), all pure hoists - sizes byte-identical:
   reduction or cost-chain surgery) rather than a single silver bullet.
   q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
   bt-min 8/8, ramp 325.
+
+## Rev 124: forest fill dropped (C parity) + zq-push unroll - source q10 flips
+
+1. **bt-forest initial fill removed** (8 MB memset per compress):
+   C's HashToBinaryTree::Prepare clears only buckets_ - the forest is
+   write-before-read.  Traced every read path in our bt-do: the
+   bucket root and every chained prev were written on all of their
+   insert's exit paths (termination / >=comp / branch), and the
+   current node's slots are only ever written, never read before
+   that.  Verified empirically: all sizes byte-identical, 150/150,
+   roundtrip green - the invariant holds.
+2. **zq-push dc rotation unrolled**: the 4-iteration loop
+   re-multiplied (* 4 a)/(* 4 b) on every slot; explicit ba/bb
+   (ash a 2) bindings, four rotatefs.
+
+**Gates (1 MiB vs C 1.0.9 core, load ~0.8):**
+  ratio <= 1.10: 10/10, byte-identical.
+  speed >= 1.0x: **7/10** (was 6/10) - **source q10 flipped
+  0.99 -> 1.01x**.  Both gates now on 7 cells: binary q10/q11,
+  html q11, json q11, source q10/q11, text q10.
+  html q10 0.84 -> 0.87, json q10 0.83 -> 0.86 (still need +16%);
+  text q11 0.58.
+  q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
+  bt-min 8/8, ramp 325.
+
+Session trajectory (r121 -> r124): speed 5/10 -> 7/10, both-gate
+cells 5 -> 7, html q10 0.79 -> 0.87, json 0.79 -> 0.86, source q10
+0.95 -> 1.01 (flip), text q10 0.97 -> 1.01 (flip), text q11
+0.56 -> 0.58 - via the 11-bit dict-index fix, generic/bignum
+elimination, ZDICT packing, l-loop hoists and fill removal.
