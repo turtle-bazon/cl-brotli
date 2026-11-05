@@ -2077,3 +2077,29 @@ json 2.29-2.40 vs 2.2-2.3; text q11 20.83 vs 20.6-21.2).
   remain boundary/isolated-parity cells.
   q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
   bt-min 8/8, ramp 325.
+
+## Rev 141: estimate fold fusion + set-from-commands lexicals - text q11 to 1.07x isolated
+
+Two further cuts against the estimate cluster (the last structural
+delta identified for text q11, ours ~9.5ms vs C's ~6.6ms):
+  - **Prefix fold FUSED into the estimate writes**: each of the three
+    cost paths now writes (prefix[i+1] = prefix[i] + raw) directly;
+    the separate 1M-element fold pass over 4 MB is gone.  Arithmetic-
+    identical (prefix[i] is final when byte i is written; C's carry
+    dance reduces to exactly this plain prefix - verified in Rev 119
+    era comments), so sizes stay byte-identical.
+  - **zopfli-set-from-commands**: LENGTH-CODE1 (code index only - one
+    table aref instead of three whose xval/xbits values were IGNORED)
+    + the ten table defparameters bound as LEXICALS (symbol
+    indirection twice per command, Rev 136/137 class).
+
+Measured (load ~0.3): **text q11 best-of-5 20.83 -> 22.73 MiB/s,
+stable across 3 runs = 1.07x of C's 20.6-21.2 - now ABOVE C in
+isolation.**
+
+**Gates:** ratio 10/10 byte-identical; full battery green (150/150,
+repro, bt-min 8/8, q0-9 35/35).  Sweep under load 1.0 (rising during
+the run): text q11 0.89 (was 0.84), html q10 0.98 / json 0.97
+(load-band cells that read 1.00-1.03 in quiet windows), rest pass.
+Trend of text q11 across sweeps: 0.84 -> 0.86 -> 0.89 -> isolated
+1.07.

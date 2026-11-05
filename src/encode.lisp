@@ -456,6 +456,16 @@ LENGTH-CODE was ~20% of low-quality compression time."
       (setf (aref v i) (float (aref +cpy-xbits+ i) 1.0f0))))
   "Copy-length extra bits as single-float for the hot DP loops.")
 (declaim (type (simple-array single-float (*)) +ins-xbits-f+ +cpy-xbits-f+))
+(declaim (inline length-code1))
+(defun length-code1 (len code code-n base)
+  (declare (type (simple-array fixnum (*)) code)
+           (type fixnum code-n len)
+           (type simple-vector base)
+           (optimize (speed 3) (safety 0)))
+  (if (< len code-n)
+      (aref code len)
+      (loop for c from (1- (length base)) downto 0
+            when (>= len (aref base c)) do (return c))))
 (declaim (inline length-code-f))
 (defun length-code-f (len code code-n xbits-f base bits)
   "Like LENGTH-CODE but returns the extra bit count as a single-float
@@ -1155,7 +1165,7 @@ position classification computes exactly the same values."
                (declare (type double-float cost))
                (when (< cost 1.0d0)
                  (setf cost (+ (* 0.5d0 cost) 0.5d0)))
-               (setf (aref costs (1+ i)) (float cost 1.0f0)))))))
+               (setf (aref costs (1+ i)) (+ (aref costs i) (float cost 1.0f0))))))))
       ((zerop max-utf8)
        ;; Single-row fast path (window 495 + prologue bump): byte-identical
        ;; to the general UTF8 loop because UTF8Position(.., 0) == 0 always.
@@ -1192,7 +1202,7 @@ position classification computes exactly the same values."
                  (setf cost (+ (* 0.5d0 cost) 0.5d0)))
                (when (< i 2000)
                  (incf cost (+ 0.35d0 (* 0.000175d0 i))))
-               (setf (aref costs (1+ i)) (float cost 1.0f0)))))))
+               (setf (aref costs (1+ i)) (+ (aref costs i) (float cost 1.0f0))))))))
       (t
        ;; General UTF8 path: 3x256 position histograms, window 495.
        (let* ((window 495)
@@ -1243,7 +1253,7 @@ position classification computes exactly the same values."
                  (setf cost (+ (* 0.5d0 cost) 0.5d0)))
                (when (< i 2000)
                  (incf cost (+ 0.35d0 (* 0.000175d0 i))))
-               (setf (aref costs (1+ i)) (float cost 1.0f0))))))))
+               (setf (aref costs (1+ i)) (+ (aref costs i) (float cost 1.0f0)))))))))
     costs))
 
 (defun zopfli-analytic-model (data n)
@@ -1264,10 +1274,8 @@ prefix sum + analytic command/distance costs (log2(11+i)/log2(20+i))."
     ;; full n-slot alloc + fill per compress).
     (setf (aref prefix 0) 0.0f0)
     (when (plusp n) (estimate-literal-costs data 0 n prefix))
-    (dotimes (i n)
-      (let ((r (aref prefix (1+ i))))
-        (declare (type single-float r))
-        (setf (aref prefix (1+ i)) (+ (aref prefix i) r))))
+    ;; fold FUSED into ESTIMATE-LITERAL-COSTS' writes (prefix[i+1] =
+    ;; prefix[i] + raw[i], identical arithmetic, saves a 1M-pass)
     (dotimes (i 704)
       (setf (aref cc i) (float (log (float (+ 11 i) 1.0d0) 2.0d0) 1.0f0)))
     (dotimes (i 64)
@@ -1339,7 +1347,9 @@ The final insert-only trailing command is not part of C's command stream
            (type (simple-array (unsigned-byte 8) (*)) data)
            (type fixnum n) (type list commands)
            (optimize (speed 3) (safety 0)))
-  (let ((hl (make-array 256 :element-type 'fixnum :initial-element 0))
+  (let ((ins-c +ins-code+) (ins-n (length +ins-code+)) (ins-bs +ins-base+)
+        (cpy-c +cpy-code+) (cpy-n (length +cpy-code+)) (cpy-bs +cpy-base+)
+        (hl (make-array 256 :element-type 'fixnum :initial-element 0))
         (hc (make-array 704 :element-type 'fixnum :initial-element 0))
         (hd (make-array 64 :element-type 'fixnum :initial-element 0))
         (ct (make-array 256 :element-type 'single-float
@@ -1353,14 +1363,8 @@ The final insert-only trailing command is not part of C's command stream
             (dist (cadddr c)) (dictp (car (cddddr c))))
         (declare (type fixnum ins ls cpy dist))
         (when (plusp cpy)
-          (multiple-value-bind (icode ixv ixb)
-              (length-code ins +ins-code+ +ins-xval+ +ins-xbits+
-                               +ins-base+ +ins-bits+)
-            (declare (ignore ixv ixb))
-            (multiple-value-bind (ccode cxv cxb)
-                (length-code cpy +cpy-code+ +cpy-xval+ +cpy-xbits+
-                                 +cpy-base+ +cpy-bits+)
-              (declare (ignore cxv cxb))
+          (let ((icode (length-code1 ins ins-c ins-n ins-bs)))
+            (let ((ccode (length-code1 cpy cpy-c cpy-n cpy-bs)))
               (let* ((ring-pos (aref rb 4))
                      (repeat (and (not dictp)
                                   (= dist (aref rb (logand (+ ring-pos 3) 3)))))
