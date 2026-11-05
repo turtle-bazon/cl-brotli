@@ -1643,3 +1643,32 @@ cells 5 -> 7, html q10 0.79 -> 0.87, json 0.79 -> 0.86, source q10
 0.95 -> 1.01 (flip), text q10 0.97 -> 1.01 (flip), text q11
 0.56 -> 0.58 - via the 11-bit dict-index fix, generic/bignum
 elimination, ZDICT packing, l-loop hoists and fill removal.
+
+## Rev 125: dist0/cmdc range declarations - generic sites 9 -> 3
+
+Disassembly after Rev 123/124 found the short loop's dist0 command
+code (+ (* (ash cc -3) 64) icode8 (logand cc 7)) compiling to the
+GENERIC/bignum path on every l-iteration - the operands' ranges were
+unknown (cc from the length-code table, icode8 from the mvb).  Fixed
+with provable ranges:
+  - insert codes are 0..23 (24-row +ins-code+ table): ICODE
+    (INTEGER 0 23), CMD-BASE (INTEGER 0 552), ICODE8 (INTEGER 0 184);
+  - copy codes are 0..23: CC declared (INTEGER 0 23) in both l-loops;
+  - score path (q0-9): dict distance terms THE'd (window < 2^25,
+    dict-idx <= 2047 from the 11-bit packing, dict-tid <= 127) and
+    the dict-match-at mvb values typed - the (>= DICT-LEN 9) compare
+    was even a TWO-ARG->= function call.
+
+%lz77 generic/bignum sites: 9 -> 3 (remaining: %hash4-tail's 64-bit
+hash multiply, which fires only for the last 7 positions of the
+input, and one score-path compare - both cold).
+
+**Gates (1 MiB vs C 1.0.9 core, load ~0.7):**
+  ratio <= 1.10: 10/10, byte-identical sizes.
+  speed >= 1.0x: 7/10, both gates on 7 cells.  q11 cells all moved:
+  html 1.16 -> 1.21, json 1.19 -> 1.23, source 1.37 -> 1.41,
+  binary 2.35 -> 2.42, text q11 0.58 -> 0.60.  q10: html 0.87,
+  json 0.86, source 1.02, text 1.00 (best-of-5 moved html q10
+  2.03 -> 2.07 MiB/s, source 4.72 -> 4.81).
+  q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
+  bt-min 8/8, ramp 325.

@@ -1917,7 +1917,15 @@ position.  Returns the longest newly-reached copy length."
                                               (aref prefix pos)))
                                        (cmd-base (* icode 24))
                                        (icode8 (* icode 8)))
-                                 (declare (type fixnum icode cmd-base icode8)
+                                 ;; insert codes are 0..23 (+ins-code+ is
+                                 ;; a 24-row table), so the derived indices
+                                 ;; have tiny provable ranges - this keeps
+                                 ;; the dist0 cmdc arithmetic in fixnum
+                                 ;; registers (it was compiling to the
+                                 ;; generic/bignum path per l-iteration).
+                                 (declare (type (integer 0 23) icode)
+                                          (type (integer 0 552) cmd-base)
+                                          (type (integer 0 184) icode8)
                                           (type single-float base))
                                  ;; --- 16 short-distance candidates ---
                                  (let ((best (1- min-len)) (j 0)
@@ -1979,7 +1987,9 @@ position.  Returns the longest newly-reached copy length."
                                                               (+ base dist-add))
                                                           cxbf
                                                           (aref cmd-a cmdc))))
-                                                     (declare (type fixnum cmdc)
+                                                     ;; copy codes are 0..23
+                                                     (declare (type (integer 0 23) cc)
+                                                              (type fixnum cmdc)
                                                               (type single-float cost))
                                                      (when (< cost (aref zcostf (+ pos l)))
                                                        (z-update-node pos start l back j 0 cost)
@@ -2047,7 +2057,8 @@ position.  Returns the longest newly-reached copy length."
                                                         (cost (+ dist-cost
                                                                  cxbf
                                                                  (aref cmd-a cmdc))))
-                                                   (declare (type fixnum cmdc)
+                                                   (declare (type (integer 0 23) cc)
+                                                            (type fixnum cmdc)
                                                             (type single-float
                                                                    cost))
                                                    (when (< cost (aref zcostf (+ pos len)))
@@ -2500,10 +2511,18 @@ score rather than length.  Returns (values len dist score)."
                           ;; (> dict-len best-len) guard while pruning the
                           ;; candidate scan (C: minlen = max(4, best_len+1)).
                           (dict-match-at data p n (1+ best-len))
+                        ;; DICT-IDX is NIL only when no word matched, which
+                        ;; the DICT-LEN >= 9 guard excludes; typing the three
+                        ;; keeps the compares/arith in fixnum registers.
+                        (declare (type fixnum dict-len dict-idx dict-tid))
                         (when (and (>= dict-len 9) (> dict-len best-len))
                           (setf dict-p t)
-                          (let ((dist (+ (min window (+ base-pos p)) 1 dict-idx
-                                         (* dict-tid (nwords dict-len)))))
+                          (let ((dist (+ (the (integer 0 #x1FFFFFF)
+                                             (min window (+ base-pos p)))
+                                       1
+                                       (the (integer 0 2047) dict-idx)
+                                       (* (the (integer 0 127) dict-tid)
+                                          (nwords dict-len)))))
                             (push (list (- p lit-start) lit-start dict-len dist t)
                                   cmds)
                             (incf dict-used)
