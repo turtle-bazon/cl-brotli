@@ -1,8 +1,17 @@
 ;;;; src/dict.lisp — brotli static dictionary + word transforms (RFC 7932 §8).
 (in-package #:cl-brotli.lisp)
 
-(defparameter +ndbits+ #(0 0 0 0 10 10 11 11 10 10 10 10 10 9 9 8 7 7 8 7 7 6 6 5 5))
-(defun nwords (len) (if (>= len 4) (ash 1 (aref +ndbits+ len)) 0))
+(defparameter +ndbits+
+  (make-array 25 :element-type 'fixnum
+                  :initial-contents '(0 0 0 0 10 10 11 11 10 10 10 10 10 9 9 8 7 7 8 7 7 6 6 5 5)))
+(declaim (type (simple-array fixnum (25)) +ndbits+))
+(declaim (inline nwords)
+         (ftype (function ((integer 0 24)) (integer 0 2048)) nwords))
+(defun nwords (len)
+  "Number of dictionary words of length LEN (0 below 4).  Inlined with a
+tight ftype so hot callers' distance arithmetic stays in fixnum range."
+  (declare (type (integer 0 24) len) (optimize (speed 3) (safety 0)))
+  (if (>= len 4) (ash 1 (aref +ndbits+ len)) 0))
 (defparameter +doffset+
   (let ((d (make-array 26 :initial-element 0)))
     (loop for l from 0 to 24 do (setf (aref d (1+ l)) (+ (aref d l) (* l (nwords l)))))

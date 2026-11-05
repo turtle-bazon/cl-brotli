@@ -611,7 +611,7 @@ first-match-wins picks stay identical to the cons-list version."
                                                    (+ base (* idx len)))))
                        (at (aref cur b)))
                   (declare (type fixnum b at))
-                  (setf (aref flat at) (logior (ash len 10) idx)
+                  (setf (aref flat at) (logior (ash len 11) idx)
                         (aref cur b) (1+ at))))))
           (setf *dict-flat* flat
                 *dict-bstart* counts)
@@ -754,9 +754,11 @@ are considered so command copy lengths remain the base-word lengths."
           from (1- (aref starts (1+ bucket)))
           downto (aref starts bucket)
           do (let* ((e (aref flat k))
-                    (len (ash e -10))
-                    (idx (logand e #x3FF)))
-               (declare (type fixnum e len idx))
+                    (len (ash e -11))
+                    (idx (logand e #x7FF)))
+               (declare (type (integer 0 #x7FFFFF) e)
+                        (type (integer 0 31) len)
+                        (type (integer 0 2047) idx))
                (when (and (<= len (- n p)) (>= len min-len)
                           (> len best-len))
                  (let ((off (+ (aref +doffset+ len) (* idx len))))
@@ -775,7 +777,8 @@ distance lands just above the decoder's max-distance and is therefore read
 as a dictionary reference."
   (declare (type sb-sys:system-area-pointer sap)
            (type (simple-array (unsigned-byte 8) (*)) data)
-           (type fixnum p n min-len dist-base)
+           (type fixnum p n min-len)
+           (type (integer 0 #x1FFFFFF) dist-base)
            (type (simple-array fixnum (25)) dists)
            (optimize (speed 3) (safety 0)))
   (let* ((key (if (and sap (<= (+ p 4) n))
@@ -795,9 +798,11 @@ as a dictionary reference."
           from (1- (aref starts (1+ bucket)))
           downto (aref starts bucket)
           do (let* ((e (aref flat k))
-                    (len (ash e -10))
-                    (idx (logand e #x3FF)))
-        (declare (type fixnum e len idx))
+                    (len (ash e -11))
+                    (idx (logand e #x7FF)))
+        (declare (type (integer 0 #x7FFFFF) e)
+                 (type (integer 0 31) len)
+                 (type (integer 0 2047) idx))
         (when (and (<= len (- n p)) (>= len min-len)
                    (zerop (aref dists len)))
           (let ((off (+ (aref +doffset+ len) (* idx len)))
@@ -817,8 +822,8 @@ as a dictionary reference."
                 ((>= fpos len)
                  (setf (aref dists len)
                        (+ dist-base 1 idx
-                          (* (the fixnum +dict-tid0+)
-                             (the fixnum (nwords len)))))
+                          (* (the (integer 0 127) +dict-tid0+)
+                             (the (integer 0 2048) (nwords len)))))
                  (incf count))
                 (t
                  ;; KIND 1 (upper-first) only changes the first UTF-8
@@ -836,8 +841,8 @@ as a dictionary reference."
                        (when (%dict-word-match-p data p dict off len kd)
                          (setf (aref dists len)
                                (+ dist-base 1 idx
-                                  (* (the fixnum (car tk))
-                                     (the fixnum (nwords len)))))
+                                  (* (the (integer 0 127) (car tk))
+                                     (the (integer 0 2048) (nwords len)))))
                          (incf count)
                          (return))))))))))))
         count))
@@ -1233,8 +1238,6 @@ prefix sum + analytic command/distance costs (log2(11+i)/log2(20+i))."
       (setf (aref cd i) (float (log (float (+ 20 i) 1.0d0) 2.0d0) 1.0f0)))
     (make-zmodel cc cd prefix (float (log 11.0d0 2.0d0) 1.0f0))))
 
-(defvar *b-max* 0) (defvar *b-push0* 0)
-(defvar *p-minn* 0) (defvar *p-maxmin* 0)
 (declaim (inline encode-postfix postfix-extra))
 (defun encode-postfix (d np nd)
   "Distance D (>=1) -> distance code under NPOSTFIX=NP NDIRECT=ND; inverse
@@ -1409,7 +1412,12 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                (bt-ml (and bt (make-array 128 :element-type 'fixnum)))
                ;; Zopfli DP state (only when BT is active)
                (zmodel (and bt (zopfli-analytic-model data n)))
-               (zcostf (and bt (make-array (1+ n)
+               ;; 64 cells of padding beyond N: ComputeMinimumCopyLength's
+               ;; scan then needs no num_bytes bound check - the +infinity
+               ;; padding stops it at exactly the length C's bound would
+               ;; (nodes[N+1..] are never real nodes for the other users,
+               ;; which all stay <= N).
+               (zcostf (and bt (make-array (+ n 64)
                                 :element-type 'single-float)))
                ;; No :initial-element on the big arrays: z-iterate FILLs
                ;; them before any read (the initial-element form consed a
@@ -1444,6 +1452,11 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                           (make-array n :element-type '(unsigned-byte 32))))
                (cmds '()) (lit-start 0) (p 0) (last (- n min-match))
                (skip 32) (dict-used 0) (last-dist 0)
+               ;; NIL dict-limit means "no limit": folding it into one
+               ;; fixnum local keeps every gate a fixnum compare (the
+               ;; (OR NULL FIXNUM) parameter made SBCL emit GENERIC-<
+               ;; at all three probe gates).
+               (dlim (the fixnum (or dict-limit most-positive-fixnum)))
                (shift (the fixnum (- hbits 64)))
                ;; C score mode (q5+): the CHECKS-entry distance cache with
                ;; PrepareDistanceCache's +-1/2/3 cascade, seeded exactly like
@@ -1789,8 +1802,18 @@ shortcut."
                                      (aref zsc (- pos clen ins))))))))
                    (z-update-node (pos start len len-code dist short dictp cost)
                      "C UpdateZopfliNode plus our explicit dictionary flag."
-                     (declare (type fixnum pos start len len-code dist short
-                                   dictp)
+                     ;; Tight ranges: the DP only runs for inputs <= 2^23
+                     ;; bytes, copy lengths are <= n, distances < 2^26 and
+                     ;; SHORT/DICTP are 5/1-bit fields - so the packed
+                     ;; (len | (modifier << 25)) and (short << 27) writes
+                     ;; provably fit in a fixnum and compile to plain
+                     ;; shifts/logior (the loose FIXNUM declarations made
+                     ;; every node write take the overflow-checked path
+                     ;; with ALLOC-SIGNED-BIGNUM in the disassembly).
+                     (declare (type (integer 0 #x7FFFFF) pos start len len-code)
+                              (type (integer 0 #x3FFFFFF) dist)
+                              (type (integer 0 31) short)
+                              (type (integer 0 1) dictp)
                               (type single-float cost)
                               (optimize (speed 3) (safety 0)))
                      (let ((q (+ pos len)))
@@ -1817,20 +1840,23 @@ when the command path is cheaper than pure literals."
                                   (aref z-dc 0) (aref z-dc 1)
                                   (aref z-dc 2) (aref z-dc 3)))))
                    (z-minlen (start-cost pos)
-                     "C ComputeMinimumCopyLength."
+                     "C ComputeMinimumCopyLength.  A walking index keeps
+the array address in one register instead of recomputing (+ POS LEN)
+twice per iteration (C's loop keeps it in one register too)."
                      (declare (type fixnum pos) (type single-float start-cost))
                      (let ((min-cost start-cost) (len 2)
-                           (bucket 4) (offset 10))
+                           (bucket 4) (offset 10)
+                           (idx (+ pos 2))
+                           (stop (+ pos 10)))
                        (declare (type single-float min-cost)
-                                (type fixnum len bucket offset))
-                       (loop while (and (<= (+ pos len) n)
-                                        (<= (aref zcostf (+ pos len)) min-cost))
-                             do
-                         (incf len)
-                         (when (= len offset)
-                           (incf min-cost 1.0f0)
-                           (incf offset bucket)
-                           (setf bucket (* 2 bucket))))
+                                (type fixnum len bucket offset idx stop))
+                       (loop while (<= (aref zcostf idx) min-cost)
+                             do (incf len)
+                                (incf idx)
+                                (when (= idx stop)
+                                  (incf min-cost 1.0f0)
+                                  (incf stop bucket)
+                                  (setf bucket (ash bucket 1))))
                        len))
                    (z-update (pos dict-p)
                      "C UpdateNodes: evaluate POS, then try short-code,
@@ -2063,8 +2089,7 @@ probing and storing here."
                                  ;; candidate (C appends one match per length).
                                  (when (and use-dict
                                             (< (if (plusp cnt) bt-cbest 0) 24)
-                                            (or (null dict-limit)
-                                                (< dict-used dict-limit)))
+                                            (< dict-used dlim))
                                    (fill z-dmatch 0)
                                    (dict-matches-at sap data i n
                                                     (max 4 (1+
@@ -2174,7 +2199,13 @@ Z-NM[i] counts position I's entries (skip interiors stay 0)."
                      (let ((i 0) (total 0))
                        (declare (type fixnum i total))
                        (labels ((record (dist len dict)
-                                  (declare (type fixnum dist len dict))
+                                  ;; dist < 2^26 (window + dictionary distance),
+                                  ;; len <= 2^25, dict is a flag: the packed
+                                  ;; (dist<<25 | dict<<24 | len) word fits a
+                                  ;; fixnum provably -> no overflow check.
+                                  (declare (type (integer 0 #x3FFFFFF) dist)
+                                           (type (integer 0 #x1FFFFFF) len)
+                                           (type (integer 0 1) dict))
                                   (when (< total (* 4 n))
                                     (setf (aref z-flat total)
                                           (logior (ash dist 25)
@@ -2199,8 +2230,7 @@ Z-NM[i] counts position I's entries (skip interiors stay 0)."
                              ;; when C's minlen would exceed 24).
                              (when (and use-dict
                                         (< bt-cbest 24)
-                                        (or (null dict-limit)
-                                            (< dict-used dict-limit)))
+                                        (< dict-used dlim))
                                (fill z-dmatch 0)
                                (dict-matches-at sap data i n
                                                 (max 4 (1+ bt-cbest))
@@ -2432,7 +2462,7 @@ score rather than length.  Returns (values len dist score)."
                   (declare (type fixnum best-len best-dist best-score))
                   (let ((dict-p nil))
                     (when (and use-dict
-                               (or (null dict-limit) (< dict-used dict-limit)))
+                               (< dict-used dlim))
                       (multiple-value-bind (dict-len dict-idx dict-tid)
                           ;; min-len = best-len + 1 reproduces the outer
                           ;; (> dict-len best-len) guard while pruning the

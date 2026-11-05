@@ -1468,3 +1468,59 @@ bucket ranges verified by construction).
 speed 5/10 - binary 1.69/2.09, html q11 1.07, json q11 1.07,
 source q11 1.25; near: source q10 0.97, text q10 0.97; behind:
 html q10 0.79, json q10 0.78, text q11 0.56.
+
+## Rev 121: generic/bignum elimination + r120 size-shift root cause found
+
+Disassembly of %lz77 (sb-disassembler) found 23 GENERIC-*/BIGNUM
+sites in the hot path - all from range-unknown fixnum packing.  Fixed
+by giving SBCL provable ranges:
+
+1. **z-update-node**: pos/start/len/len-code declared (INTEGER 0
+   #x7FFFFF) (the DP only runs for inputs <= 2^23), dist < 2^26,
+   short 0..31, dictp 0..1 - the packed (len | modifier<<25) and
+   (short<<27) writes are now provably fixnum: no overflow check, no
+   ALLOC-SIGNED-BIGNUM per node write (was 2 sites x every node).
+2. **z-prepass RECORD**: dist/len/dict ranges declared for the packed
+   (dist<<25 | dict<<24 | len) word (q11).
+3. **dict-matches-at**: dist-base (INTEGER 0 #x1FFFFFF); the
+   (tid * nwords) products wrapped in THE (INTEGER 0 127)/(INTEGER 0
+   2048) so the distance fill is a proven fixnum multiply (was
+   GENERIC-* + bignum).
+4. **nwords**: inlined with a tight ftype (INTEGER 0 24) -> (INTEGER
+   0 2048); +ndbits+ retyped as a fixnum array.
+5. **dlim local**: NIL dict-limit folded to most-positive-fixnum once,
+   so all three probe gates are fixnum compares (killed 3 GENERIC-<).
+
+**r120 size-shift root cause (was recorded as "never isolated")**:
+the flat index packed word-index in 10 bits (len<<10 | idx), but
+nwords(6) = nwords(7) = 2^11 = 2048 - idx needs 11 bits.  Words of
+length 6/7 with idx >= 1024 were misread (len came out as len+1 with
+a truncated index), so half of those dictionary words were never
+matched.  Fixed to 11 bits (pack ash len 11, unpack ash e -11 / logand
+#x7FF).  Result: **every size snapped back to exactly the r119
+values** (text q10 10875->10817, binary 285168->285155, source
+84140->84082, html q11 134096->134110) - confirming both the root
+cause and that the r120 flat-index/SAP work is size-neutral as
+claimed.  All ratios back at their r119 values (<=1.10).
+
+Also in this batch (carried uncommitted from the scan work):
+z-minlen rewritten with a walking index (idx/stop instead of
+recomputing (+ POS LEN) twice per iteration), zcostf padded with 64
+infinity cells so the scan drops its num_bytes bound check entirely
+(the padding stops it exactly where C's bound would), and 4 dead
+probe defvars removed.
+
+**Gates (1 MiB vs C 1.0.9 core, idle machine):**
+  ratio <= 1.10: 10/10 (exact r119 sizes; worst binary 1.096, text
+  1.083/1.082).
+  speed >= 1.0x: 5/10 - binary q10 1.73x / q11 2.18x, html q11
+  1.09x, json q11 1.10x, source q11 1.28x.  html q10 0.79->0.81,
+  json q10 0.79->0.80, source q10 0.95->0.97, text q10 0.97->0.99;
+  text q11 0.56 (best-of-5 timing moved 11.8 -> 13.9 MiB/s, sweep
+  median unchanged - treat as ~0.56-0.66).
+  Disassembly after: generic/bignum sites 23 -> 15, remaining ones
+  in cold paths (%hash4-tail fires only for the last 7 positions);
+  GENERIC-+ share of html q10 1.3% -> 0.5%, %SINGLE-FLOAT gone from
+  the profile.
+  q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
+  bt-min 8/8, ramp 325.
