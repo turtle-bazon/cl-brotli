@@ -2780,9 +2780,40 @@ score rather than length.  Returns (values len dist score)."
                                  (setf range-start
                                        (max range-start
                                             (- range-end (ash best-dist 2)))))
-                               (loop for q from range-start below range-end
-                                     do (if bt (bt-do q nil)
-                                            (ins q (hash q))))))
+                               (when (< range-start range-end)
+                                     ;; StoreRange runs 15-51x per command, so every
+                                     ;; per-iteration decision is hoisted: BT and the
+                                     ;; SAP-hash bounds test are loop invariant, and
+                                     ;; INS is inlined (its body is exactly head/prev
+                                     ;; maintenance).  The two hashes are
+                                     ;; interchangeable: %HASH4-SAP uses the low 40
+                                     ;; bits of its 8-byte load (bytes i..i+4), which
+                                     ;; %HASH4-TAIL rebuilds from five byte loads -
+                                     ;; same value, so the whole-range choice cannot
+                                     ;; change output.
+                                     (cond
+                                       (bt
+                                        (loop for q of-type fixnum
+                                              from range-start below range-end
+                                              do (bt-do q nil)))
+                                       ((and sap (<= (+ range-end 8) n))
+                                        (loop for q of-type fixnum
+                                              from range-start below range-end
+                                              do (let* ((h (%hash4-sap sap q shift hmask))
+                                                        (old (aref head h)))
+                                                   (declare (type fixnum h old))
+                                                   (setf (aref head h) q)
+                                                   (when chained
+                                                     (setf (aref prev q) old)))))
+                                       (t
+                                        (loop for q of-type fixnum
+                                              from range-start below range-end
+                                              do (let* ((h (%hash4-tail data q shift hmask))
+                                                        (old (aref head h)))
+                                                   (declare (type fixnum h old))
+                                                   (setf (aref head h) q)
+                                                   (when chained
+                                                     (setf (aref prev q) old)))))))))
                            (setf skip 32)
                            (incf p best-len)
                            (setf lit-start p))
@@ -4686,7 +4717,7 @@ dictionary at q10/q11."
     ;; and selection by BackwardReferenceScore at every level >= 5 - so
     ;; q7-q9 run the score shape with the 10/10/16 cache candidates too
     ;; (they previously ran greedy with a single last-distance check).
-    (7 '(:max-chain 24 :lazy t :use-dict nil :short-dist t :quality 7))
+    (7 '(:max-chain 16 :lazy t :use-dict nil :short-dist t :quality 7))
     (8 '(:max-chain 32 :lazy t :use-dict nil :short-dist t :quality 8))
     (9 '(:max-chain 48 :lazy t :use-dict nil :short-dist t :quality 9))
     (10 '(:max-chain 256 :lazy t :use-dict t :short-dist t :quality 10

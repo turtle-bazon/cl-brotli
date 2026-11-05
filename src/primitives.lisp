@@ -26,7 +26,7 @@
     len))
 
 #+sbcl
-(declaim (inline %hash4-sap))
+(declaim (inline %hash4-sap %hash4-tail))
 #+sbcl
 (declaim (inline %hashf-sap))
 #+sbcl

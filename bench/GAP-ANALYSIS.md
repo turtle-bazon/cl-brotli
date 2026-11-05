@@ -2459,3 +2459,41 @@ ratio to 1.089 - only 0.011 of headroom - so 48 ships for balance.
   Remaining 28 speed fails: q0-q2 = 13 cells (0.30-0.91x), q5-q7 = 15
   cells (0.51-0.84x).  q7 sits closest of those (0.67-0.84).
 Verified: 241/241 tests, bt-min 8/8, repro-split clean.
+
+## Rev 151: StoreRange loop hoist + q7 chain 16 - BOTH GATES 18/45
+
+**StoreRange loop (byte-identical).**  Instrumentation showed the interior
+position store loop runs 15-51x PER COMMAND: text q7 = 166,196 iterations
+for 3,249 commands, html q7 = 944,698 for 52,191, binary q7 = 815,277 for
+55,962.  It was paying three per-iteration decisions that are all loop
+invariant: the BT branch, the SAP-hash bounds test inside the HASH label,
+and a label call to INS.  Now: three hoisted loop variants (BT / SAP-hash /
+tail-hash) with INS inlined (its body is exactly head+prev maintenance).
+Equivalence for the hash hoist: %HASH4-SAP uses the low 40 bits of its
+8-byte load - bytes i..i+4 - and %HASH4-TAIL rebuilds exactly that value
+from five byte loads, so whichever variant runs for a given range the hash
+value is identical.  Verified ALL 45 cell sizes byte-identical against the
+pre-change tree (chain tuning held constant).
+Measured: source q7 +9.0% (73.96 -> 80.64 MiB/s), text q7 +6.5%
+(378.8 -> 403.2), html q5 +3.4% (40.85 -> 42.23), html q7 +1.3%.
+
+**q7 max-chain 24 -> 16** (ratio-gated, output changes): html's ratio goes
+1.062 -> 1.0997 - at the cap, kept because html fails speed either way
+(0.95-0.99x) and the other four corpora have headroom (binary 1.052,
+json 1.025, source 1.022, text 1.028).  Chain 12 was rejected: it would
+push html over 1.10.
+
+**SWEEP (load 1.19 - higher than r150's 0.83, so deltas understate the
+gain): BOTH GATES 18/45 (was 17); RATIO 0 failures (worst html q7 1.0997).**
+  q7: json 0.83 -> 1.00 PASSES; html 0.84 -> 0.95; binary 0.81 -> 0.87;
+  source 0.80 -> 0.82; text 0.67 -> 0.69.
+  Controlled timing2 runs at lighter load put binary q7 1.05x and json q7
+  1.08x, html q7 0.99x - i.e. three of five q7 cells are at/near parity.
+  q10/q11 unchanged and passing; q9 unchanged and passing.
+Verified: 241/241 tests, bt-min 8/8, repro-split clean.
+
+Next queued (byte-identical): INCOMPRESSIBLE-P's `(make-array 256)` is an
+untyped simple-vector, so its 16K-sample loop does boxed read+write per
+byte on every compress call - type it fixnum.  Then the q5/q6 command path
+(emit-normal 13-23% + plan 6-8% + writer 6-8%) and the q0-q2 fragment
+path (structural: one-pass emission per the older notes).
