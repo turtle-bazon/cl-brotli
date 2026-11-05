@@ -1446,7 +1446,8 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                (zsc (and bt (make-array (1+ n) :element-type 'fixnum)))
                (znext (and bt (make-array (1+ n) :element-type 'fixnum)))
                (zq (and bt (make-zpq)))
-               (z-sdc #(4 11 15 16))
+               (z-sdc (make-array 4 :element-type 'fixnum
+                                     :initial-contents '(4 11 15 16)))
                (z-dc (make-array 4 :element-type 'fixnum))
                ;; Dictionary distances are packed (STAMP << 26 | DIST):
                ;; the consumer tests the stamp instead of zero-testing, so
@@ -1520,6 +1521,7 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                    (type (simple-array fixnum (*))
                          zlen zdist zins zsc znext)
                    (type (simple-array fixnum (25)) z-dmatch)
+                   (type (simple-array fixnum (4)) z-sdc)
                    (type (simple-array fixnum (*)) z-nm z-flat)
                    (type zpq zq)
                    (type (simple-array fixnum (4)) z-dc)

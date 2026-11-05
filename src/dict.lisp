@@ -13,9 +13,12 @@ tight ftype so hot callers' distance arithmetic stays in fixnum range."
   (declare (type (integer 0 24) len) (optimize (speed 3) (safety 0)))
   (if (>= len 4) (ash 1 (aref +ndbits+ len)) 0))
 (defparameter +doffset+
-  (let ((d (make-array 26 :initial-element 0)))
+  (let ((d (make-array 26 :element-type 'fixnum :initial-element 0)))
     (loop for l from 0 to 24 do (setf (aref d (1+ l)) (+ (aref d l) (* l (nwords l)))))
     d))
+;; typed: the hot dictionary probe reads (AREF +DOFFSET+ LEN) per
+;; candidate; as a T vector it compiled to a data-vector-ref dispatch.
+(declaim (type (simple-array fixnum (26)) +doffset+))
 
 (defvar *dict* nil)
 (declaim (inline load-dict)

@@ -1802,3 +1802,30 @@ dictionary record - fixed by the stamp guard, then byte-identical.
   html/json q10 now need only +8-10%.
   q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
   bt-min 8/8, ramp 325.
+
+## Rev 130: typed literal vectors (+doffset+, +z-sdc+) - dispatch leaks closed
+
+Post-Rev-129 profile still showed 1.5% VECTOR-HAIRY +
+(OPTIMIZED-DATA-VECTOR-REF T) from two T-typed literal vectors in
+the hot path:
+  - +doffset+ (dictionary word offsets) - read per dictionary
+    candidate in dict-matches-at/dict-match-at and in the index
+    build; as a T vector it compiled to a data-vector-ref dispatch.
+  - +z-sdc+ (the four default shortcut distances) - read four times
+    per z-cache fill.
+Both are now fixnum arrays with declaims.  VECTOR-HAIRY fell 1.5%
+-> 0.3% (remaining sample is the one-time dict-index build); the
+T-vector ref left the profile.
+
+Also attempted and rejected: forcing zq-push inline (SBCL exposes no
+always-inline declaim; plain INLINE is honored only within its size
+budget and the two call sites stay calls - profile share is mostly
+the bubble-loop body, which must run regardless).
+
+**Gates (1 MiB vs C 1.0.9 core, sweep under load ~1.15):**
+  ratio <= 1.10: 10/10, byte-identical sizes.
+  speed >= 1.0x: 7/10, both gates on 7 cells - html q10 0.90,
+  json q10 0.90, source q10 1.08, text q10 1.09, binary q10 2.37x,
+  q11 cells 1.25/1.29/1.46/2.57, text q11 0.63.
+  q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
+  bt-min 8/8, ramp 325.
