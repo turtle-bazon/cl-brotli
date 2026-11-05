@@ -1803,8 +1803,12 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                            (declare (type fixnum old))
                            (setf (aref head h) q)
                            (when chained (setf (aref prev q) old)))))
-                   (probe-ok (cand pos best-len)
-                     (declare (type fixnum cand pos best-len))
+                   (probe-ok (cand best-len psap maxl)
+                     ;; PSAP = SAP+POS and MAXL = N-POS are hoisted once per
+                     ;; search by each caller (loop invariants), so the probe
+                     ;; no longer re-untags POS or recomputes N-POS per candidate.
+                     (declare (type fixnum best-len maxl)
+                              (type sb-sys:system-area-pointer psap))
                      #+(and sbcl x86-64 64-bit little-endian)
                      ;; C's filter (FindLongestMatch): a match LONGER than
                      ;; BEST-LEN needs every byte of [0..BEST-LEN] equal, so
@@ -1819,16 +1823,18 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                      ;; (chain stores are jumped past), so the POS bounds
                      ;; check covers the CAND read too.
                      (if (>= best-len 3)
-                         (if (<= (+ pos best-len 1) n)
-                             (= (sb-sys:sap-ref-8 sap (+ pos best-len))
+                         ;; (< best-len maxl)  ==  (<= (+ pos best-len 1) n)
+                         (if (< best-len maxl)
+                             (= (sb-sys:sap-ref-8 psap best-len)
                                 (sb-sys:sap-ref-8 sap (+ cand best-len)))
                              t)
                          ;; BEST-LEN < 3 keeps the exact old 4-byte window at
                          ;; offset 0: a byte-3-only test would be too weak
                          ;; here, because MLEN could return 1..3 and UPDATE a
                          ;; short BEST-LEN that the old window suppressed.
-                         (if (<= (+ pos 4) n)
-                             (= (sb-sys:sap-ref-32 sap pos)
+                         ;; (>= maxl 4)  ==  (<= (+ pos 4) n)
+                         (if (>= maxl 4)
+                             (= (sb-sys:sap-ref-32 psap 0)
                                 (sb-sys:sap-ref-32 sap cand))
                              t))
                      #-(and sbcl x86-64 64-bit little-endian)
@@ -2631,7 +2637,9 @@ costs from the first iteration's commands
                            (setf z-cands saved)))))
                    (find-match (pos h)
                      (declare (type fixnum pos h))
-                     (let ((cand (aref head h)) (best-len 0) (best-dist 0))
+                     (let ((psap (sb-sys:sap+ sap pos))   ; probe invariants
+                           (maxl (- n pos))
+                           (cand (aref head h)) (best-len 0) (best-dist 0))
                        (declare (type fixnum cand best-len best-dist))
                        ;; C checks the last distance before walking the
                        ;; chain.  A good hit also raises BEST-LEN, which
@@ -2640,7 +2648,7 @@ costs from the first iteration's commands
                          (let ((prev (- pos last-dist)))
                            (declare (type fixnum prev))
                            (when (and (>= prev 0) (<= last-dist window)
-                                      (probe-ok prev pos best-len))
+                                      (probe-ok prev best-len psap maxl))
                              (let ((ml (mlen prev pos)))
                                (declare (type fixnum ml))
                                (when (> ml best-len)
@@ -2650,14 +2658,14 @@ costs from the first iteration's commands
                              (declare (type fixnum chain))
                              (loop while (and (/= cand #xFFFFFFFF) (> chain 0)) do
                                (when (> (- pos cand) window) (return))
-                               (when (probe-ok cand pos best-len)
+                               (when (probe-ok cand best-len psap maxl)
                                  (let ((ml (mlen cand pos)))
                                    (declare (type fixnum ml))
                                    (when (> ml best-len)
                                      (setf best-len ml best-dist (- pos cand)))))
                                (setf cand (the fixnum (aref prev cand))) (decf chain)))
                            (when (and (/= cand #xFFFFFFFF) (<= (- pos cand) window))
-                             (when (probe-ok cand pos best-len)
+                             (when (probe-ok cand best-len psap maxl)
                                (let ((ml (mlen cand pos)))
                                  (declare (type fixnum ml))
                                  (when (> ml best-len)
@@ -2687,7 +2695,9 @@ selection: cache candidates first (i < CHECKS), then the chain walk, best by
 score rather than length.  Returns (values len dist score)."
                      (declare (type fixnum pos h))
 
-                     (let ((cand (aref head h)) (best-len 0) (best-dist 0)
+                     (let ((psap (sb-sys:sap+ sap pos))   ; probe invariants
+                           (maxl (- n pos))
+                           (cand (aref head h)) (best-len 0) (best-dist 0)
                            ;; kMinScore = BROTLI_SCORE_BASE (1920) + 100
                            (best-score 2020))
                        (declare (type fixnum cand best-len best-dist
@@ -2723,7 +2733,7 @@ score rather than length.  Returns (values len dist score)."
                                (let ((d (- pos cand)))
                                  (declare (type fixnum d))
                                  (when (> d window) (return))
-                                 (when (probe-ok cand pos best-len)
+                                 (when (probe-ok cand best-len psap maxl)
                                    (let ((ml (mlen cand pos)))
                                      (declare (type fixnum ml))
                                      (when (>= ml 4)
@@ -2740,7 +2750,7 @@ score rather than length.  Returns (values len dist score)."
                                (decf chain)))
                            (when (and (/= cand #xFFFFFFFF)
                                       (<= (- pos cand) window))
-                             (when (probe-ok cand pos best-len)
+                             (when (probe-ok cand best-len psap maxl)
                                (let ((ml (mlen cand pos)))
                                  (declare (type fixnum ml))
                                  (when (>= ml 4)

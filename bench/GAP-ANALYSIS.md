@@ -2533,3 +2533,35 @@ text q7 +5% (410 -> 431), source q7 +4% (80.64 -> 83.89).
 Remaining 26 speed fails: q0 = 3 (0.31x), q1 = 5 (0.36-0.93),
 q2 = 5 (0.37-0.61), q5 = 5 (0.57-0.69), q6 = 5 (0.55-0.61),
 q7 = 3 (binary 0.91, source 0.90, text 0.73).
+
+## Rev 153: hoist PROBE-OK's per-call invariants (psap/maxl)
+
+PROBE-OK took (CAND POS BEST-LEN) and, on every one of the 7.5M+ chain
+probes per compress, re-derived two loop invariants: the POS-side load
+address (untag POS + add + base) and the bounds check (N - POS).  It now
+takes PSAP = (SAP+ POS) and MAXL = (N - POS), computed ONCE per search by
+FIND-MATCH / FIND-MATCH-SCORE before their loops.  Equivalence (both
+directions, so output cannot change):
+  (< BEST-LEN MAXL)      ==  (<= (+ POS BEST-LEN 1) N)
+  (>= MAXL 4)            ==  (<= (+ POS 4) N)
+  (SAP-REF-8 PSAP B)     ==  (SAP-REF-8 SAP (+ POS B))   ; same address
+  (SAP-REF-32 PSAP 0)    ==  (SAP-REF-32 SAP POS)
+Signature is now (CAND BEST-LEN PSAP MAXL); five call sites updated.
+
+Verified: ALL 45 cell sizes BYTE-IDENTICAL; 241/241 tests; bt-min 8/8;
+repro-split clean; ratio 0 failures.
+Measured: html q9 +3.9% (29.41 -> 30.56 MiB/s), binary q7 +2.8%,
+html q5 +1.9%, html q7 +1.0%, source q7 0% (its cost is the command
+path, not the matcher - consistent with the r152 profile).
+
+Context - fresh profiles that drove this (html): q5 = find-match-score
+43.1% / emit-normal 14.5% / plan-commands 12.2% / writer 11.0%; q7 =
+find-match 53.7% / emit 13.1% / plan 7.7% / writer 7.6%; q2 =
+write-trivial-block-body 37.7% / find-match 24.9% / emit 13.5%.
+Two structural candidates assessed and DEFERRED with numbers: (a)
+command-list -> fixnum-vector refactor (the two passes in
+WRITE-TRIVIAL-BLOCK-BODY and PLAN-COMMANDS pay ~15 loads/command for
+car/cadr/caddr/cadddr/cddddr plus the consing in EMIT-NORMAL; estimated
++6-8% across tiers but a 10+ site change with partition-commands and
+dictp's boolean semantics to preserve); (b) C's score matcher at q7-q9,
+already measured at -29%/-39% in Rev 150.
