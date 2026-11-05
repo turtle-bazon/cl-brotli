@@ -2156,3 +2156,48 @@ returned to exact match.
   best-of-5 stays 22.73 MiB/s = 1.07x of C.
   q0-q9: 150/150 tests byte-exact, repro-split clean, bt-min 8/8,
   ramp 325.
+
+## Rev 144: per-thread scratch pool - GC eliminated, SPEED GATE 10/10
+
+The last text q11 gap was diagnosed as an SBCL GC tax: ~73 MB of
+per-compress large-object arrays (exact structural parity with C's
+72 MB, but C uses GC-free malloc) triggered ~1 GC per compress
+(~3 ms).  Fix - a per-thread scratch pool for the big z-state:
+
+- CL-BROTLI-SCRATCH struct holds the ten big arrays (zlen, zins,
+  zsc, znext, zcostf, bt-buckets, bt-forest, prefix, z-nm, z-flat);
+  ACQUIRE-SCRATCH(N) returns this thread's pooled entry (hash keyed
+  by thread under a short mutex, alist keyed by N, newest-first, max
+  2 entries/thread, per-entry <= 192 MB cap, global entry-count cap
+  against dead-thread leaks).  No shared buffers, no serialization of
+  compress work - concurrent calls stay independent.  Non-SBCL and
+  oversized-N paths allocate fresh as before.
+- z-nm/z-flat are LAZILY added (q10 never needs them).
+- The clears that rode along with :INITIAL-ELEMENT now run at lz77
+  entry (bt-buckets -> #xFFFFFFFF; z-nm -> 0 for hq); z-costf/zlen
+  fills stay per-pass in Z-ITERATE.  All other pooled reads are
+  strictly read-after-write (forest, zins/zsc/znext via the zlen
+  fill, prefix via the in-place estimate) - proven by byte-identical
+  sizes on all 8 corpora + 150/150 tests + a 6-quality x 6-size
+  roundtrip matrix.
+- One bug found by the test suite during construction: for BT-inactive
+  (score path, q5-9) SCRATCH is NIL and the file's safety-0 slot
+  accessors read through it unchecked; all slot refs are now wrapped
+  in (AND SCRATCH ...), restoring the old short-circuit.
+
+Measured: GCs per 12 compresses 16 -> 4 (text q11) and 13 -> 4
+(json q10) - the 4 are the harness's own explicit full-gcs, i.e.
+~0 unscheduled; consing/compress: html q10 48.9 -> 8.5 MB, html q11
+91.5 -> 11.1, text q11 82.5 -> 2.0 (residual = command lists +
+entropy, nursery-sized); text q11 best-of-5 22.73 -> 25.00 MiB/s x3
+stable.
+
+**GATES (1 MiB vs C 1.0.9 core) - ALL TEN CELLS PASS:**
+  ratio <= 1.10: 10/10, byte-identical sizes.
+  speed >= 1.0x: **10/10** - binary q10 2.26x / q11 3.06x, html q10
+  1.06x / q11 1.48x, json q10 1.03x / q11 1.51x, source q10 1.30x /
+  q11 1.84x, text q10 1.52x / **q11 1.16x** (the last cell: 0.70 ->
+  0.84 -> 0.88 -> 0.94 -> 0.97 -> 1.16).
+  BOTH GATES ON 10/10 CELLS.
+  q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
+  bt-min 8/8, ramp 325.

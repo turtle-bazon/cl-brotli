@@ -1300,14 +1300,111 @@ position classification computes exactly the same values."
                (setf (aref costs (1+ i)) (+ (aref costs i) (float cost 1.0f0)))))))))
     costs))
 
-(defun zopfli-analytic-model (data n)
+;;;; ---- per-thread scratch pool for the big z-state arrays ----
+;;;;
+;;;; The z-state arrays are ~72 bytes per input byte (~73 MB at 1 MiB).
+;;;; Allocating them per compress made every call drop ~73 MB of
+;;;; large-object garbage - roughly one SBCL GC per compress (~3 ms of
+;;;; GC tax that C's plain malloc never pays - it was the last remaining
+;;;; gap on text q11).  For a given input length the shapes are fixed,
+;;;; so a per-thread pool reuses them: each thread only ever touches
+;;;; its own entries (lookup under a short mutex), so concurrent
+;;;; COMPRESS calls remain fully independent - no shared buffers, no
+;;;; serialization of the work itself.  Entries are capped
+;;;; (*SCRATCH-MAX-ENTRIES* per thread, *SCRATCH-MAX-BYTES* per entry,
+;;;; and a global entry count) so retention is bounded and a one-off
+;;;; huge input is never pinned.  Fresh arrays behave exactly like
+;;;; today's; pooled arrays are proven safe because every read path is
+;;;; either filled per call (buckets, znm, zcostf, zlen) or strictly
+;;;; read-after-write (forest, zins/zsc/znext via the zlen fill,
+;;;; prefix via the in-place estimate), making outputs byte-identical.
+
+(defstruct (cl-brotli-scratch (:conc-name scr-))
+  "Pooled per-compress arrays; see ACQUIRE-SCRATCH."
+  (zlen nil :type (or null (simple-array fixnum (*))))
+  (zins nil :type (or null (simple-array (unsigned-byte 32) (*))))
+  (zsc nil :type (or null (simple-array (unsigned-byte 32) (*))))
+  (znext nil :type (or null (simple-array (unsigned-byte 32) (*))))
+  (zcostf nil :type (or null (simple-array single-float (*))))
+  (bt-buckets nil :type (or null (simple-array (unsigned-byte 32) (*))))
+  (bt-forest nil :type (or null (simple-array (unsigned-byte 32) (*))))
+  (prefix nil :type (or null (simple-array single-float (*))))
+  (z-nm nil :type (or null (simple-array (unsigned-byte 32) (*))))
+  (z-flat nil :type (or null (simple-array fixnum (*)))))
+
+(defparameter *scratch-max-entries* 2)
+(defparameter *scratch-max-bytes* (* 192 1048576))
+(defvar *scratch-pools* (make-hash-table :test 'eql)
+  "thread -> alist of (n . scratch), newest first.")
+#+sbcl
+(defvar *scratch-lock* (sb-thread:make-mutex :name "cl-brotli scratch pool"))
+
+(defun scratch-estimate-bytes (n)
+  "Approximate retained bytes for an N-sized entry (72/byte + buckets)."
+  (declare (type fixnum n))
+  (+ (* 72 n) 524288))
+
+(defun make-scratch-arrays (n)
+  (declare (type fixnum n))
+  (make-cl-brotli-scratch
+   :zlen (make-array (1+ n) :element-type 'fixnum)
+   :zins (make-array (1+ n) :element-type '(unsigned-byte 32))
+   :zsc (make-array (1+ n) :element-type '(unsigned-byte 32))
+   :znext (make-array (1+ n) :element-type '(unsigned-byte 32))
+   :zcostf (make-array (+ n 64) :element-type 'single-float)
+   :bt-buckets (make-array 131072 :element-type '(unsigned-byte 32))
+   :bt-forest (make-array (* 2 (+ n 8)) :element-type '(unsigned-byte 32))
+   :prefix (make-array (+ n 2) :element-type 'single-float)))
+
+(defun ensure-scratch-z-nm (scratch n)
+  "Lazily add the HQ-only entry-count array (q10 never needs it)."
+  (declare (type cl-brotli-scratch scratch) (type fixnum n))
+  (or (scr-z-nm scratch)
+      (setf (scr-z-nm scratch)
+            (make-array (1+ n) :element-type '(unsigned-byte 32)
+                                   :initial-element 0))))
+
+(defun ensure-scratch-z-flat (scratch n)
+  "Lazily add the HQ-only prepass record array."
+  (declare (type cl-brotli-scratch scratch) (type fixnum n))
+  (or (scr-z-flat scratch)
+      (setf (scr-z-flat scratch)
+            (make-array (* 4 n) :element-type 'fixnum))))
+
+(defun acquire-scratch (n)
+  "Return this thread's pooled arrays for length N (building them on
+first use).  Non-SBCL builds and oversized N allocate fresh every
+call (no pooling, same behavior as before)."
+  (declare (type fixnum n))
+  #+sbcl
+  (let ((thr sb-thread:*current-thread*))
+    (or (sb-thread:with-mutex (*scratch-lock*)
+          (cdr (assoc n (gethash thr *scratch-pools*) :test #'=)))
+        (let ((fresh (make-scratch-arrays n)))
+          (when (<= (scratch-estimate-bytes n) *scratch-max-bytes*)
+            (sb-thread:with-mutex (*scratch-lock*)
+              (let ((entries (cons (cons n fresh)
+                                   (gethash thr *scratch-pools*))))
+                (setf (gethash thr *scratch-pools*)
+                      (if (>= (length entries) *scratch-max-entries*)
+                          (subseq entries 0 *scratch-max-entries*)
+                          entries))
+                ;; bound the hash against entries outliving dead threads
+                (when (> (hash-table-count *scratch-pools*) 64)
+                  (clrhash *scratch-pools*)))))
+          fresh)))
+  #-sbcl (make-scratch-arrays n))
+
+(defun zopfli-analytic-model (data n scratch)
   "C ZopfliCostModelSetFromLiteralCosts: estimated literal costs as a
 prefix sum + analytic command/distance costs (log2(11+i)/log2(20+i))."
   (declare (type (simple-array (unsigned-byte 8) (*)) data)
            (type fixnum n) (optimize (speed 3) (safety 0)))
-  (let* (;; no initial-element: prefix[0] is setf'd, [1..n] written by
-         ;; the in-place estimate, and the fold only reads [0..n]
-         (prefix (make-array (+ n 2) :element-type 'single-float))
+  (declare (type cl-brotli-scratch scratch))
+  (let* (;; pooled: [0] is setf'd, [1..n] written by the in-place
+         ;; estimate, and the fused fold only reads [0..n] - no fill
+         ;; needed, stale contents never survive the writes
+         (prefix (scr-prefix scratch))
          (cc (make-array 704 :element-type 'single-float
                              :initial-element 0.0f0))
          (cd (make-array 64 :element-type 'single-float
@@ -1485,33 +1582,32 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                ;; watermark (positions below BT-NEXT are already stored),
                ;; 128-entry match scratch.  BT is the short-back scan size.
                (bt-short (if (integerp bt) bt 16))
-               (bt-buckets (and bt (make-array 131072
-                                 :element-type '(unsigned-byte 32)
-                                 :initial-element #xFFFFFFFF)))
+               ;; pooled big arrays (see ACQUIRE-SCRATCH); NIL for the
+               ;; score path (BT inactive) - the z-labels never run then
+               (scratch (and bt (acquire-scratch n)))
+               (bt-buckets (and scratch (scr-bt-buckets scratch)))
                ;; No initial fill: like C (Prepare clears buckets only),
                ;; every forest read is preceded by a write - the bucket
                ;; root and every chained prev were written on all of
                ;; their insert's exit paths, and the current node's slots
                ;; are only ever written (termination, >=comp, or branch).
                ;; Saves an 8 MB memset per compress.
-               (bt-forest (and bt (make-array (* 2 (+ n 8))
-                                 :element-type '(unsigned-byte 32))))
+               (bt-forest (and scratch (scr-bt-forest scratch)))
                (bt-next 0) (bt-cnt 0) (bt-cpos -1) (bt-cbest 0)
                (bt-md (and bt (make-array 128 :element-type 'fixnum)))
                (bt-ml (and bt (make-array 128 :element-type 'fixnum)))
                ;; Zopfli DP state (only when BT is active)
-               (zmodel (and bt (zopfli-analytic-model data n)))
+               (zmodel (and bt (zopfli-analytic-model data n scratch)))
                ;; 64 cells of padding beyond N: ComputeMinimumCopyLength's
                ;; scan then needs no num_bytes bound check - the +infinity
                ;; padding stops it at exactly the length C's bound would
                ;; (nodes[N+1..] are never real nodes for the other users,
                ;; which all stay <= N).
-               (zcostf (and bt (make-array (+ n 64)
-                                :element-type 'single-float)))
+               (zcostf (and scratch (scr-zcostf scratch)))
                ;; No :initial-element on the big arrays: z-iterate FILLs
                ;; them before any read (the initial-element form consed a
                ;; second full-array fill per compress).
-               (zlen (and bt (make-array (1+ n) :element-type 'fixnum)))
+               (zlen (and scratch (scr-zlen scratch)))
                ;; u32: ZINS = (short<<27)|insert fits EXACTLY 32 bits
                ;; (short<=31, insert<2^23), ZSC values < 2^23 - halves
                ;; 16 MB of per-compress allocation and doubles cache
@@ -1519,15 +1615,12 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                ;; All reads mask/shift as before (u32 arefs yield the
                ;; same fixnums); stores truncate identically (values
                ;; provably fit).
-               (zins (and bt (make-array (1+ n)
-                                         :element-type '(unsigned-byte 32))))
-               (zsc (and bt (make-array (1+ n)
-                                        :element-type '(unsigned-byte 32))))
+               (zins (and scratch (scr-zins scratch)))
+               (zsc (and scratch (scr-zsc scratch)))
                ;; u32: command lengths (< 2^23) + the reconstruction
                ;; sentinel (#xFFFFFFFF) - halves another 8 MB; the walk
                ;; compares the sentinel explicitly.
-               (znext (and bt (make-array (1+ n)
-                                          :element-type '(unsigned-byte 32))))
+               (znext (and scratch (scr-znext scratch)))
                (zq (and bt (make-zpq)))
                (z-sdc (make-array 4 :element-type 'fixnum
                                      :initial-contents '(4 11 15 16)))
@@ -1540,14 +1633,12 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                                              :initial-element -1)))
                ;; HQ (q11) pre-collected match storage: one packed entry per
                ;; match, (dist << 25) | (dict-flag << 24) | len.
-               (z-nm (and bt (>= bt 64)
-                          (make-array (1+ n)
-                                      :element-type '(unsigned-byte 32)
-                                      :initial-element 0)))
+               (z-nm (and scratch (>= bt 64)
+                           (ensure-scratch-z-nm scratch n)))
                ;; C allocates 4 * num_bytes matches; we clamp at the same
                ;; (4 * n) capacity (measured corpora peak at 3.77/byte).
-               (z-flat (and bt (>= bt 64)
-                            (make-array (* 4 n) :element-type 'fixnum)))
+               (z-flat (and scratch (>= bt 64)
+                             (ensure-scratch-z-flat scratch n)))
                (z-cands (if (and bt (>= bt 64)) 2 1))
                (z-maxlen (if (and bt (>= bt 64)) 325 150))
                ;; Loop invariants for the DP l-loops, bound once: the
@@ -1630,6 +1721,15 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                    (type (or null (simple-array fixnum (*))) dc)
                    (type fixnum p lit-start last skip dict-used last-dist
                             shift min-cop))
+          ;; Pooled arrays: the clears that used to ride along with
+          ;; :INITIAL-ELEMENT now run here, before any bt-do/prepass
+          ;; read (z-costf/zlen are filled per pass in Z-ITERATE as
+          ;; before; forest/zins/zsc/znext/prefix/zflat are strictly
+          ;; read-after-write).
+          (when scratch
+            (fill (scr-bt-buckets scratch) #xFFFFFFFF)
+            (when (>= bt 64)
+              (fill (scr-z-nm scratch) 0)))
           (labels (#+sbcl
                    (hash (i)
                      ;; the 8-byte load in %hash4-sap needs the tail branch
