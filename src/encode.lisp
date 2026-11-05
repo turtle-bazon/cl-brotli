@@ -2355,7 +2355,16 @@ Z-NM[i] counts position I's entries (skip interiors stay 0)."
                                  (let ((mlen (aref bt-ml 0)))
                                    (declare (type fixnum mlen))
                                    ;; StoreRangeH10(pos+1,
-                                   ;; min(pos+mlen, store_end))
+                                   ;; min(pos+mlen, store_end)) - but only
+                                   ;; when a FUTURE full walk can read the
+                                   ;; tree entries: if the skip jumps past
+                                   ;; the last FindAll position (n-4), the
+                                   ;; insertions are provably dead (C never
+                                   ;; sees this case - its 256 KiB chunking
+                                   ;; caps skips inside the chunk; our one
+                                   ;; 1 MiB chunk produced 126,718 dead
+                                   ;; store-walks on text vs C's 28,795).
+                                   (when (<= (+ i mlen) (- n 4))
                                    (let ((beg (1+ i))
                                          (end (min (+ i mlen) (- n 127))))
                                      (declare (type fixnum beg end))
@@ -2369,7 +2378,7 @@ Z-NM[i] counts position I's entries (skip interiors stay 0)."
                                            (incf jj 8)))
                                        (loop while (< ii end) do
                                          (bt-do ii nil)
-                                         (incf ii))))
+                                         (incf ii)))))
                                    (incf i (1- mlen)))
                                  (incf i)))))
                      total))

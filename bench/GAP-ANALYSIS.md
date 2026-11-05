@@ -1991,3 +1991,39 @@ none (z-infinity+ remains only in the once-per-pass fill).
   and both DP passes too).
   q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
   bt-min 8/8, ramp 325.
+
+## Rev 138: dead store-walks after terminal long-copy skips - text q11 0.70 -> 0.84
+
+Instrumented C (phase timers + counters in a patched -pg-free build)
+against our probes, per 1 MiB corpus:
+
+  C text q11:  collection=17.1ms, iterate x2=32.6ms (one 262,144-
+  byte chunk; scan=2,091,068 / iter-positions=35,150 - EXACT matches
+  of ours).  C html q11: collect=284.8ms over 4 chunks, iterate=839ms;
+  walks=1,048,926 / scan=62,565,357 - also exact matches of ours.
+
+  The ONE divergence: our text collection did 126,718 store-walks
+  (bt-do collect=nil) vs C's 28,795 - because our encoder runs lz77
+  over the whole 1 MiB chunk while C's meta-block chunking caps its
+  skip inside 256 KiB.  Our single terminal skip spans ~1,013,744
+  positions (max match ~1M vs C's 226,995-in-chunk), and AFTER the
+  skip the collection loop ends - no future FindAll can ever read the
+  tree insertions: 126,718 store-walks + ~462K tree steps were PROVABLY
+  DEAD work (~30% of the prepass).
+
+Fix: guard the StoreRange with (<= (+ i mlen) (- n 4)) - stores only
+when a future full walk can exist.  Byte-identical by construction
+(dead insertions cannot affect any match); verified exact sizes +
+150/150 + roundtrip.
+
+**Gates (1 MiB vs C 1.0.9 core, sweep under load ~1.0):**
+  ratio <= 1.10: 10/10, byte-identical sizes.
+  speed >= 1.0x: 9/10, both gates on 9 cells.  **TEXT q11 0.70 ->
+  0.84** (best-of-5 20.83 MiB/s = parity with C's 20.8 in isolation;
+  sweep median 17.8); html q10 1.03, json 1.01, source 1.18/1.72,
+  text q10 1.15, binary 2.15/2.96, q11 cells 1.42/1.46.
+  text q11 now needs +19%: the remaining gap is outside the HQ
+  phases (estimate cluster ~11ms vs C's ~6, entropy, alloc/GC ~15ms
+  outside vs C's ~0-5 inside-iter accounting).
+  q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
+  bt-min 8/8, ramp 325.
