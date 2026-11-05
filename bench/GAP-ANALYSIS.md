@@ -2128,3 +2128,31 @@ Continuing the allocation cut (Rev 140: -16MB via zins/zsc):
   shared load).
   q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
   bt-min 8/8, ramp 325.
+
+## Rev 143: single-row estimate three-region split - html/json q10 solidly PASS, text q11 -> 0.97
+
+The single-row estimate path (window 495, taken by every ASCII
+corpus) re-checked two window conditionals and the in-window/liw
+refresh on EVERY byte.  Split the main loop into three regions
+(byte-identical by construction):
+  - [0, r1): original body verbatim (conditions evaluate as before);
+  - [r1, r2) with r1 = min(window,len), r2 = max(r1, len-window) =
+    99.9% of bytes for 1 MiB inputs: remove/add conditions are exactly
+    (i >= r1)/(i < r2) - BOTH always true - and in-window (hence liw)
+    is constant, so the two conditionals, the two track updates and
+    the refresh check all vanish; the prologue bump (i < 2000) stays;
+  - [r2, len): original body verbatim (tail edges).
+One construction bug caught by the byte-identity gate: loop1 kept the
+original `below len` header, so the fused prefix write was computed
+2-3x at region overlaps (sizes moved) - fixed to `below r1`; sizes
+returned to exact match.
+
+**Gates (1 MiB vs C 1.0.9 core, sweep under load ~1.0):**
+  ratio <= 1.10: 10/10, byte-identical sizes.
+  speed >= 1.0x: **9/10** - HTML q10 1.05x, JSON q10 1.04x (both now
+  solidly above the gate, not borderline), html q11 1.44, json q11
+  1.49, source 1.23/1.75, text q10 1.26, binary 2.19/2.99.
+  **TEXT q11 0.94 -> 0.97** (session trend 0.70 -> 0.97); isolated
+  best-of-5 stays 22.73 MiB/s = 1.07x of C.
+  q0-q9: 150/150 tests byte-exact, repro-split clean, bt-min 8/8,
+  ramp 325.

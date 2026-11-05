@@ -1182,7 +1182,13 @@ position classification computes exactly the same values."
                   (type double-float liw))
          (loop for i of-type fixnum from start below (+ start in-window)
                do (incf (aref hist (aref data i))))
-         (loop for i of-type fixnum from 0 below len do
+                  ;; Three-region split (byte-identical): the steady region from
+         ;; R1 to R2 is 99.9% of bytes for 1 MiB inputs; there remove and
+         ;; add are unconditional and in-window - hence liw - is constant.
+         (let ((r1 (min window len))
+               (r2 (max (min window len) (- len window))))
+           (declare (type fixnum r1 r2))
+           (loop for i of-type fixnum from 0 below r1 do
            (let ((p (+ start i)))
              (declare (type fixnum p))
              (when (>= i window)
@@ -1202,7 +1208,45 @@ position classification computes exactly the same values."
                  (setf cost (+ (* 0.5d0 cost) 0.5d0)))
                (when (< i 2000)
                  (incf cost (+ 0.35d0 (* 0.000175d0 i))))
-               (setf (aref costs (1+ i)) (+ (aref costs i) (float cost 1.0f0))))))))
+               (setf (aref costs (1+ i)) (+ (aref costs i) (float cost 1.0f0))))))
+           (loop for i of-type fixnum from r1 below r2 do
+           (let ((p (+ start i)))
+             (declare (type fixnum p))
+             ;; steady window: remove/add conditions are exactly
+             ;; (i >= r1)/(i < r2) - both ALWAYS true here - and
+             ;; in-window is constant, so no refresh (byte-identical)
+             (decf (aref hist (aref data (- p window))))
+             (incf (aref hist (aref data (+ p window))))
+             (let* ((h (max 1 (aref hist (aref data p))))
+                    (cost (+ (- liw (if (< h 2048) (aref fl2tab h) (log (float h 1.0d0) 2.0d0)))
+                             0.029d0)))
+               (declare (type double-float cost))
+               (when (< cost 1.0d0)
+                 (setf cost (+ (* 0.5d0 cost) 0.5d0)))
+               (when (< i 2000)
+                 (incf cost (+ 0.35d0 (* 0.000175d0 i))))
+               (setf (aref costs (1+ i)) (+ (aref costs i) (float cost 1.0f0))))))
+           (loop for i of-type fixnum from r2 below len do
+           (let ((p (+ start i)))
+             (declare (type fixnum p))
+             (when (>= i window)
+               (decf (aref hist (aref data (- p window))))
+               (decf in-window))
+             (when (< (+ i window) len)
+               (incf (aref hist (aref data (+ p window))))
+               (incf in-window))
+             (when (/= in-window iw-last)
+               (setf iw-last in-window
+                     liw (fast-log2 in-window)))
+             (let* ((h (max 1 (aref hist (aref data p))))
+                    (cost (+ (- liw (if (< h 2048) (aref fl2tab h) (log (float h 1.0d0) 2.0d0)))
+                             0.029d0)))
+               (declare (type double-float cost))
+               (when (< cost 1.0d0)
+                 (setf cost (+ (* 0.5d0 cost) 0.5d0)))
+               (when (< i 2000)
+                 (incf cost (+ 0.35d0 (* 0.000175d0 i))))
+               (setf (aref costs (1+ i)) (+ (aref costs i) (float cost 1.0f0)))))))))
       (t
        ;; General UTF8 path: 3x256 position histograms, window 495.
        (let* ((window 495)
