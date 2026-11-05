@@ -2103,3 +2103,28 @@ the run): text q11 0.89 (was 0.84), html q10 0.98 / json 0.97
 (load-band cells that read 1.00-1.03 in quiet windows), rest pass.
 Trend of text q11 across sweeps: 0.84 -> 0.86 -> 0.89 -> isolated
 1.07.
+
+## Rev 142: z-nm/znext as u32 - consing at C parity, SPEED 9/10
+
+Continuing the allocation cut (Rev 140: -16MB via zins/zsc):
+  - ZNEXT (reconstruction back-links): lengths < 2^23 plus an
+    explicit #xFFFFFFFF sentinel (walk condition updated from -1;
+    the sentinel write is explicit, no reliance on store truncation);
+  - Z-NM (prepass entry counts): small counts, initial-element 0.
+  Measured consing/compress now at C parity: text q11 82.5 -> 74.5 MB
+  (C ~72), html q10 48.9 -> 44.9, html q11 91.5 -> 83.5, binary q10
+  54.1 -> 50.1.  Sizes byte-identical (pure storage + sentinel
+  representation).
+
+**Gates (1 MiB vs C 1.0.9 core, sweep under load 0.49 -> 0.95):**
+  ratio <= 1.10: 10/10, byte-identical sizes.
+  speed >= 1.0x: **9/10** - JSON q10 flips to 1.00x; html q10 1.04,
+  html q11 1.46, json q11 1.48, source 1.20/1.76, text q10 1.27,
+  binary 2.11/2.94.
+  **Both gates on 9 cells; the sole failing cell is TEXT q11 at
+  0.94** (sweep trend across the session: 0.70 -> 0.84 -> 0.86 ->
+  0.88 -> 0.89 -> 0.90 -> 0.94; best-of-5 isolation 22.73 MiB/s =
+  1.07x of C's 20.6-21.2 - passes in isolation, median lags under
+  shared load).
+  q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
+  bt-min 8/8, ramp 325.

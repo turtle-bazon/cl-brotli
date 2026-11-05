@@ -1479,7 +1479,11 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                                          :element-type '(unsigned-byte 32))))
                (zsc (and bt (make-array (1+ n)
                                         :element-type '(unsigned-byte 32))))
-               (znext (and bt (make-array (1+ n) :element-type 'fixnum)))
+               ;; u32: command lengths (< 2^23) + the reconstruction
+               ;; sentinel (#xFFFFFFFF) - halves another 8 MB; the walk
+               ;; compares the sentinel explicitly.
+               (znext (and bt (make-array (1+ n)
+                                          :element-type '(unsigned-byte 32))))
                (zq (and bt (make-zpq)))
                (z-sdc (make-array 4 :element-type 'fixnum
                                      :initial-contents '(4 11 15 16)))
@@ -1493,8 +1497,9 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                ;; HQ (q11) pre-collected match storage: one packed entry per
                ;; match, (dist << 25) | (dict-flag << 24) | len.
                (z-nm (and bt (>= bt 64)
-                          (make-array (1+ n) :element-type 'fixnum
-                                             :initial-element 0)))
+                          (make-array (1+ n)
+                                      :element-type '(unsigned-byte 32)
+                                      :initial-element 0)))
                ;; C allocates 4 * num_bytes matches; we clamp at the same
                ;; (4 * n) capacity (measured corpora peak at 3.77/byte).
                (z-flat (and bt (>= bt 64)
@@ -1569,11 +1574,12 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                    (type zmodel zmodel)
                    (type (simple-array single-float (*)) zcostf)
                    (type (simple-array fixnum (*))
-                         zlen znext)
+                         zlen)
                          (type (simple-array (unsigned-byte 32) (*)) zins zsc)
                    (type (simple-array fixnum (25)) z-dmatch)
                    (type (simple-array fixnum (4)) z-sdc)
-                   (type (simple-array fixnum (*)) z-nm z-flat)
+                   (type (simple-array fixnum (*)) z-flat)
+                   (type (simple-array (unsigned-byte 32) (*)) z-nm znext)
                    (type zpq zq)
                    (type (simple-array fixnum (4)) z-dc)
                    (type fixnum z-cands z-maxlen)
@@ -2281,7 +2287,7 @@ probing and storing here."
                        ;; stub test is redundant.
                        (loop while (= (aref zlen index) 1)
                              do (decf index))
-                       (setf (aref znext index) -1)
+                       (setf (aref znext index) #xFFFFFFFF)
                        (loop while (/= index 0) do
                          (let ((len (+ (logand (aref zlen index) #xFFFFFF)
                                        (logand (aref zins index) #x7FFFFFF))))
@@ -2293,7 +2299,7 @@ probing and storing here."
                      ;; num_commands/last_insert_len before each run.
                      (let ((pos 0) (off (aref znext 0)) (out nil))
                        (declare (type fixnum pos off) (type list out))
-                       (loop while (/= off -1) do
+                       (loop while (/= off #xFFFFFFFF) do
                          (let* ((q (+ pos off))
                                 (zv (aref zlen q))
                                 (cpy (logand zv #xFFFFFF))
