@@ -1652,14 +1652,20 @@ returns the cached result."
                               ;; backward distance here (<= 63) can never
                               ;; exceed the window - C's per-iteration
                               ;; max_backward break is dead code we drop.
-                              (let ((pos1 (1+ pos)))
-                                (declare (type fixnum pos1))
+                              ;; POS1/DB0/DB1 are loop-invariant: gcc LICMs
+                              ;; these loads, SBCL does not - hoisting saves
+                              ;; two frame reloads + address computes on each
+                              ;; of the 15.6M scan iterations per MiB.
+                              (let ((pos1 (1+ pos))
+                                    (db0 (aref data pos))
+                                    (db1 (aref data (1+ pos))))
+                                (declare (type fixnum pos1)
+                                         (type (unsigned-byte 8) db0 db1))
                                 (loop for i of-type fixnum
                                         from (1- pos) downto (1+ stop)
                                       while (<= best 2) do
-                                  (when (and (= (aref data pos) (aref data i))
-                                             (= (aref data pos1)
-                                                (aref data (1+ i))))
+                                  (when (and (= db0 (aref data i))
+                                             (= db1 (aref data (1+ i))))
                                   (let ((len (mlen i pos)))
                                     (declare (type fixnum len))
                                     (when (> len best)

@@ -1734,3 +1734,34 @@ hoistable work inside the 15.6M/11.4M/9.2M loops (tree-step and
 match-l bodies were C-faithful on inspection, but the per-iteration
 window/depth guards and address recomputation deserve the same
 scrutiny).
+
+## Rev 128: scan byte hoist kept; tree-block loop split REVERTED
+
+1. **Kept - short-scan byte hoist**: (AREF DATA POS) / (AREF DATA
+   (1+ POS)) are loop-invariant but reloaded on each of the 15.6M
+   scan iterations per MiB (gcc LICMs these, SBCL does not).  Bound
+   once as DB0/DB1 before the loop.  Targeted same-session sweep:
+   text q10 1.07 -> 1.12, html 0.88 -> 0.89, json 0.88 -> 0.87.
+2. **Reverted - tree-block collect/reroot split**: the tree-step
+   loop (11.4M steps/MiB) tests the loop-invariant COLLECT and
+   REROOT flags four times per step, so the block was duplicated
+  under (IF (AND COLLECT (>= MAX-LEN 128))) with the hot copy's
+   tests elided (plus MEND = (+ POS MAX-LEN) hoisted for the mlen2
+   scan end).  Semantics verified byte-identical, but the targeted
+   sweep showed html wash, json 0.87 -> 0.85, text 1.12 -> 1.11 -
+   **the duplicated code costs more than the elided tests save**
+   (second data point after Rev 123's l-loop split: SBCL code
+   duplication appears to lose via I-cache/layout effects even when
+   the instruction count drops).  Reverted surgically via hg cat
+   splice; only the DB0/DB1 hoist remains in the tree.
+
+**Gates (1 MiB vs C 1.0.9 core):**
+  ratio <= 1.10: 10/10, byte-identical sizes.
+  speed >= 1.0x: 7/10, both gates on 7 cells (binary q10 1.83x /
+  q11 2.52x, html q11 1.23x, json q11 1.26x, source q10 1.02x /
+  q11 1.45x, text q10 1.05x).  Full-suite run-to-run band is now
+  +-0.03 on the failing cells (html q10 0.86, json q10 0.84, text
+  q11 0.62 in this load-0.7-0.8 sweep; targeted same-session runs
+  put html/json at 0.85-0.89).
+  q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
+  bt-min 8/8, ramp 325.
