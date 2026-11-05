@@ -4045,9 +4045,9 @@ NTYPES); LENGTHS are in symbol units and may overshoot N at the tail
                     (dotimes (j 2)
                       (declare (type fixnum j))
                       (let ((dst (if (zerop j) scratch0 scratch1))
-                            (src (aref histos (if (zerop j) last-ix0
-                                                  last-ix1)))
-                            (cur (aref histos curr-ix)))
+                            (src (the (simple-array fixnum (*)) (aref histos (if (zerop j) last-ix0
+                                                  last-ix1))))
+                            (cur (the (simple-array fixnum (*)) (aref histos curr-ix))))
                         (declare (type (simple-array fixnum (*)) dst src cur))
                         (dotimes (a alphabet)
                           (declare (type fixnum a))
@@ -4077,7 +4077,7 @@ NTYPES); LENGTHS are in symbol units and may overshoot N at the tail
                        (setf (aref lengths nblocks) bsize
                              (aref types nblocks) (aref types (- nblocks 2)))
                        (rotatef last-ix0 last-ix1)
-                       (replace (aref histos last-ix0) scratch1)
+                       (replace (the (simple-array fixnum (*)) (aref histos last-ix0)) scratch1)
                        (setf last-ent1 last-ent0
                              last-ent0 ce1)
                        (incf nblocks)
@@ -4087,7 +4087,7 @@ NTYPES); LENGTHS are in symbol units and may overshoot N at the tail
                       (t
                        ;; merge with the last block
                        (incf (aref lengths (1- nblocks)) bsize)
-                       (replace (aref histos last-ix0) scratch0)
+                       (replace (the (simple-array fixnum (*)) (aref histos last-ix0)) scratch0)
                        (setf last-ent0 ce0)
                        (when (= ntypes 1) (setf last-ent1 last-ent0))
                        (setf bsize 0)
@@ -4098,7 +4098,7 @@ NTYPES); LENGTHS are in symbol units and may overshoot N at the tail
                )
              (add (sym)
                (declare (type fixnum sym))
-               (incf (aref (aref histos curr-ix) sym))
+               (incf (aref (the (simple-array fixnum (*)) (aref histos curr-ix)) sym))
                (incf bsize)
                (when (= bsize target)
                  (finish nil))))
@@ -4399,8 +4399,8 @@ finds no split the header degrades to the single-type form byte-for-byte."
                           (setf slack 65536)
                           (b:w-ensure w (+ slack cost)))
                         (decf slack cost))
-                      (let ((crc (aref cmd-rcs itype))
-                            (cln (aref cmd-lns itype))
+                      (let ((crc (the (simple-array fixnum (*)) (aref cmd-rcs itype)))
+                            (cln (the (simple-array fixnum (*)) (aref cmd-lns itype)))
                             (csng (aref cmd-sngs itype)))
                         (unless csng
                           (b:%wbits-raw w (aref crc (aref recs (+ b 2)))
@@ -4422,8 +4422,8 @@ finds no split the header degrades to the single-type form byte-for-byte."
                                      (declare (type fixnum sym p1 p2 cid))
                                      (unless (aref lit-sng cid)
                                        (b:%wbits-raw
-                                        w (aref (aref lit-rcl cid) sym)
-                                        (aref (aref lit-lnl cid) sym)))))
+                                        w (aref (the (simple-array fixnum (*)) (aref lit-rcl cid)) sym)
+                                        (aref (the (simple-array fixnum (*)) (aref lit-lnl cid)) sym)))))
                           (unless lit-single
                             ;; Long runs amortize the pin/state setup of the
                             ;; run writer; short runs are cheaper inline.
@@ -4449,8 +4449,8 @@ finds no split the header degrades to the single-type form byte-for-byte."
                                 (write-blen w d-len-tree nl)
                                 (setf dtype nt dleft nl)))
                             (decf dleft))
-                          (let ((drc (aref dist-rcs dtype))
-                                (dln (aref dist-lns dtype))
+                          (let ((drc (the (simple-array fixnum (*)) (aref dist-rcs dtype)))
+                                (dln (the (simple-array fixnum (*)) (aref dist-lns dtype)))
                                 (dsng (aref dist-sngs dtype)))
                             (unless dsng
                               (b:%wbits-raw w (aref drc dcode)
@@ -4644,8 +4644,12 @@ compresses extremely well."
            (optimize (speed 3) (safety 0)))
   (let* ((n (length data))
          (sample (min n 16384))
-         (seen (make-array 256 :initial-element 0))
+         ;; typed fixnum: the untyped simple-vector made every one of the
+         ;; 16K sample iterations do a boxed read + boxed write (this runs
+         ;; on EVERY compress call); same counting, no boxing
+         (seen (make-array 256 :element-type 'fixnum :initial-element 0))
          (unique 0) (maxfreq 0))
+    (declare (type (simple-array fixnum (256)) seen))
     (when (< sample 4) (return-from incompressible-p nil))
     (dotimes (i sample)
       (let* ((b (aref data i)) (c (1+ (aref seen b))))

@@ -2497,3 +2497,39 @@ untyped simple-vector, so its 16K-sample loop does boxed read+write per
 byte on every compress call - type it fixnum.  Then the q5/q6 command path
 (emit-normal 13-23% + plan 6-8% + writer 6-8%) and the q0-q2 fragment
 path (structural: one-pass emission per the older notes).
+
+## Rev 152: kill the remaining generic array dispatch (writer 6->0, split-block 0)
+
+The tree report for html q5 attributed ~5% of samples to
+VECTOR-HAIRY-DATA-VECTOR-REF under WRITE-COMPRESSED-BLOCK-BODY and
+SPLIT-BLOCK.  Root cause: arrays-of-arrays - a SIMPLE-VECTOR holding
+fixnum arrays, so the inner AREF's element type is unknowable and SBCL
+dispatches through the generic accessor on every use:
+
+  (incf (aref (aref histos curr-ix) sym))            ; split-block tally
+  (replace (aref histos last-ix0) scratch)           ; split-block merge x2
+  (aref (aref lit-rcl cid) sym) / lit-lnl            ; literal codes/lengths
+  (aref crc ...) where crc = (aref cmd-rcs itype)    ; command codes/lengths
+  (aref drc ...) where drc = (aref dist-rcs dtype)   ; distance codes/lengths
+
+All eleven sites now carry (THE (SIMPLE-ARRAY FIXNUM (*)) ...) - every one
+of those arrays is a fixnum array (REVERSE-CODES returns fixnum, the histos
+are :ELEMENT-TYPE 'FIXNUM, +EMPTY-FIXNUMS+ is declared), so the assertion
+is always true and merely teaches the compiler.  Also INCOMPRESSIBLE-P's
+`seen` histogram: an untyped simple-vector made all 16K sample iterations
+do a boxed read + boxed write; now a fixnum array (same counting).
+
+Verified: writer hairy 6 -> 0, split-block -> 0 (disassembly); ALL 45 cell
+sizes BYTE-IDENTICAL; 241/241 tests; bt-min 8/8; repro-split clean.
+
+Measured (timing2, controlled): html q5 +7.6% (42.23 -> 45.45 MiB/s),
+html q7 +5.5% (40.19 -> 42.81), binary q7 +4.2% (36.13 -> 37.65),
+text q7 +5% (410 -> 431), source q7 +4% (80.64 -> 83.89).
+
+**SWEEP (load 0.79): BOTH GATES 19/45 (was 18); RATIO 0 failures.**
+  html q7 0.95 -> 1.01 PASSES (with json q7 1.10) - q7 now 2/5.
+  q5 improves across the board (json +0.07, source +0.04) but still
+  0.57-0.69x.  q10/q11 unchanged and passing (binary q11 3.10 -> 3.27).
+Remaining 26 speed fails: q0 = 3 (0.31x), q1 = 5 (0.36-0.93),
+q2 = 5 (0.37-0.61), q5 = 5 (0.57-0.69), q6 = 5 (0.55-0.61),
+q7 = 3 (binary 0.91, source 0.90, text 0.73).
