@@ -2408,3 +2408,54 @@ Why this matters beyond its own gain: the probe filter's strength is what
 keeps MLEN rare (3.6% of chain probes at q9).  Adopting C's cheaper 1-byte
 probe makes MLEN run far more often - affordable only once MLEN is cheap,
 which is what this VOP provides.  SIMD first, then C's selection.
+
+## Rev 150: C-style probe + chain-depth tuning - q9 flips to passing (17/45)
+
+Three changes, each measured:
+
+**1. C-style probe (byte-identical).** PROBE-OK now tests the single byte
+at MAX(BEST-LEN, 3) for BEST-LEN >= 3 - C's FindLongestMatch filter -
+instead of the old 4/8-byte window.  Equivalence argument: both filters are
+necessary conditions for an improving match, so a candidate rejected by the
+old window has MLEN <= BEST-LEN anyway and could never update; the weaker
+filter only permits more MLEN calls, whose results are identical.  The
+BEST-LEN < 3 branch keeps the exact old 4-byte window, because a byte-3-only
+test there WOULD change outcomes (MLEN could return 1..3 and update a short
+BEST-LEN the old window suppressed).  Verified: ALL 45 cell sizes identical.
+Measured alone: a wash - it nearly doubles MLEN at q9 (272,664 -> 487,105),
+canceling the ~10 instructions/probe it saves (html q5 +1.6%, q6 -4.7%,
+q9 -4.3%).  Kept because it is C's shape and pays off together with SIMD
+MLEN (Rev 149) once BEST-LEN runs high.
+
+**2. C's score matcher at q7-q9: IMPLEMENTED, MEASURED, REJECTED for
+speed.**  quality-params for q7/q8/q9 gained :score-p t with
+:checks 10/10/16 - exactly ChooseHasher's num_last_distances_to_check for
+H6 (our gate = lgwin 22 + 1 MiB).  Result: ratio improved (binary q7/q9
+1.051 -> 1.014, source q9 1.006 -> 0.992, html q7 1.062 -> 1.055) but speed
+collapsed -29% (q7: 37.76 -> 26.77) and -39% (q9: 18.74 -> 11.44), matching
+this file's old warning.  Composition measured at q9: 136,964 searches
+(1.8/position - the lazy delay loop is already C-faithful), 1.74x the
+probes, 2x the MLEN calls (272,664 -> 529,067), find-match-score = 84.3% of
+runtime.  C affords the same structure because its per-probe is ~2x cheaper;
+ours needs the codegen pass first.  Reverted to greedy at q7-q9 pending
+that work - recorded here so the next session does not re-derive it.
+
+**3. Chain depth at q9: 128 -> 48 (the lever that flips the cell).**
+Greedy + chain48 measured on all five corpora (ours vs C core):
+  binary 30.34/22.7 = 1.34x, ratio 1.051
+  html   29.55/23.5 = 1.26x, ratio 1.064
+  json   27.35/21.6 = 1.27x, ratio 1.015
+  source 59.81/49.2 = 1.22x, ratio 1.014
+  text  367.6/171.8 = 2.14x, ratio 1.025
+Speed swept at chain 32 was higher still (html 1.48x) but pushed html's
+ratio to 1.089 - only 0.011 of headroom - so 48 ships for balance.
+
+**SWEEP (ground truth, load 0.83): BOTH GATES 17/45 (was 13).**
+  q9: ALL FIVE PASS both gates - html 0.69 -> 1.06, json 0.72 -> 1.06,
+  source 0.88 -> 1.14, binary 0.96 -> 1.21, text 2.17 -> 2.26.
+  q10/q11: all pass, improved again (binary q11 2.98 -> 3.09, html q11
+  1.45 -> 1.50, json 1.48 -> 1.53).
+  RATIO: 0 failures across all 45 cells (worst binary q10 1.096).
+  Remaining 28 speed fails: q0-q2 = 13 cells (0.30-0.91x), q5-q7 = 15
+  cells (0.51-0.84x).  q7 sits closest of those (0.67-0.84).
+Verified: 241/241 tests, bt-min 8/8, repro-split clean.

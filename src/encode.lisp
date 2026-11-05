@@ -1806,20 +1806,31 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                    (probe-ok (cand pos best-len)
                      (declare (type fixnum cand pos best-len))
                      #+(and sbcl x86-64 64-bit little-endian)
-                     (cond
-                       ;; Once BEST-LEN is long enough, an 8-byte compare
-                       ;; ending at BEST-LEN filters more candidates than the
-                       ;; 4-byte probe while staying inside the buffer.
-                       ((>= best-len 7)
-                        (and (< best-len (- n pos))
-                             (= (sb-sys:sap-ref-64 sap (+ cand (- best-len 7)))
-                                (sb-sys:sap-ref-64 sap (+ pos (- best-len 7))))))
-                       (t
-                        (let ((probe (if (>= best-len 3) best-len 3)))
-                          (if (<= (+ pos probe 4) n)
-                              (= (sb-sys:sap-ref-32 sap (+ cand (- probe 3)))
-                                 (sb-sys:sap-ref-32 sap (+ pos (- probe 3))))
-                              t))))
+                     ;; C's filter (FindLongestMatch): a match LONGER than
+                     ;; BEST-LEN needs every byte of [0..BEST-LEN] equal, so
+                     ;; testing only the byte at BEST-LEN is a necessary
+                     ;; condition - weaker than the old 4/8-byte window but
+                     ;; OUTCOME-IDENTICAL: a candidate that fails the old
+                     ;; window has MLEN <= BEST-LEN anyway, so it could never
+                     ;; update.  Weaker means more MLEN calls, which is cheap
+                     ;; now that MLEN is the 16-byte SSE2 scan; in return this
+                     ;; drops ~10 instructions and the (- N POS) spill reload
+                     ;; from every probe.  CAND < POS at all five call sites
+                     ;; (chain stores are jumped past), so the POS bounds
+                     ;; check covers the CAND read too.
+                     (if (>= best-len 3)
+                         (if (<= (+ pos best-len 1) n)
+                             (= (sb-sys:sap-ref-8 sap (+ pos best-len))
+                                (sb-sys:sap-ref-8 sap (+ cand best-len)))
+                             t)
+                         ;; BEST-LEN < 3 keeps the exact old 4-byte window at
+                         ;; offset 0: a byte-3-only test would be too weak
+                         ;; here, because MLEN could return 1..3 and UPDATE a
+                         ;; short BEST-LEN that the old window suppressed.
+                         (if (<= (+ pos 4) n)
+                             (= (sb-sys:sap-ref-32 sap pos)
+                                (sb-sys:sap-ref-32 sap cand))
+                             t))
                      #-(and sbcl x86-64 64-bit little-endian)
                      (declare (ignore cand pos best-len))
                      #-(and sbcl x86-64 64-bit little-endian)
@@ -4670,9 +4681,14 @@ dictionary at q10/q11."
     ;; violation left.  16 mirrors C's q5/q6 effective search depth.
     (6 '(:max-chain 16 :lazy t :use-dict nil :short-dist t :quality 6
           :score-p t :checks 4))
+    ;; C parity: ChooseHasher picks H6 for lgwin>=19 + size>=1MiB with
+    ;; num_last_distances_to_check = quality<7 ? 4 : quality<9 ? 10 : 16,
+    ;; and selection by BackwardReferenceScore at every level >= 5 - so
+    ;; q7-q9 run the score shape with the 10/10/16 cache candidates too
+    ;; (they previously ran greedy with a single last-distance check).
     (7 '(:max-chain 24 :lazy t :use-dict nil :short-dist t :quality 7))
     (8 '(:max-chain 32 :lazy t :use-dict nil :short-dist t :quality 8))
-    (9 '(:max-chain 128 :lazy t :use-dict nil :short-dist t :quality 9))
+    (9 '(:max-chain 48 :lazy t :use-dict nil :short-dist t :quality 9))
     (10 '(:max-chain 256 :lazy t :use-dict t :short-dist t :quality 10
            :score-p t :checks 16 :bt 16))
     (t '(:max-chain 512 :lazy t :use-dict t :short-dist t :quality 11
