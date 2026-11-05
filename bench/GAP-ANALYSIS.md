@@ -2267,3 +2267,37 @@ Gate impact: the speed gate currently measures plain COMPRESS, which no
 longer pools and will pay the GC tax again (expected: 9/10, text q11
 ~0.97).  Rev 147 switches the bench to the make-compressor context - the
 production pattern for a server - and records both numbers honestly.
+
+## Rev 146: multi-threaded tests (241/241)
+
+Four tests added to brotli-suite (91 new checks; suite total 241/241,
+2.2 s wall, user 3.1 s = real parallelism):
+
+- lisp-plain-compress-threaded: 8 threads x plain COMPRESS (2 calls each
+  +1 asserted) on 256 KiB of text-like data at q11 -> every output
+  byte-equal to the single-thread reference + roundtrip.  Exercises the
+  dictionary path (DICT-MATCHES-AT) concurrently.
+- lisp-make-compressor-threaded: 8 threads, each with its OWN
+  MAKE-COMPRESSOR, alternating two different corpora of the SAME length
+  (text -> dictionary on, patterned bytes -> off) so both reuse one
+  pooled scratch entry with different content; 3 calls each, all
+  byte-equal to their references.  This is the direct check that pooled
+  arrays are neither shared across threads nor stale across calls.
+- lisp-make-compressor-identical-to-plain: closure == plain COMPRESS
+  byte-for-byte at q0/5/10/11 on both corpora (stored, score, BT paths).
+- lisp-dictionary-first-use-threaded: drops *DICT* and *DICT-INDEX* and
+  races 8 threads through the very first load + index build, at q11
+  (DICT-MATCHES-AT) and q5 (DICT-MATCH-AT) - the r145 one-word
+  publication is what makes this safe; every result must still match the
+  single-thread reference.
+
+Harness notes: workers only compute (FIVEAM assertions stay on the main
+thread - a worker's *TEST* context is not ours); results are collected
+as (:ok ...) / (:error ...) so a worker failure reports as a failed check
+rather than aborting the run; DOTIMES' loop variable is ONE binding, so
+each worker gets its own fresh index via an inner LET (the first draft
+hit "invalid index 8" from all 8 closures sharing the final i); the
+local flet may not be named RUN (fiveam exports RUN -> package-lock
+violation); SBCL reader conditionals guard SB-THREAD:MAKE-THREAD with a
+sequential #-SBCL fallback.  A 1 MiB variant of the same test needs
+--dynamic-space-size 4096 (8 x ~150 MB peak > the ~1 GB default heap).

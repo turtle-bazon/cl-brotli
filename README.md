@@ -25,8 +25,9 @@ License: GPL-3.0
 (asdf:test-system "cl-brotli")
 ```
 
-The suite passes on Roswell SBCL 2.6.9 (150/150 checks). Benchmarks are run on
-Roswell SBCL 2.6.9 via `bench/run.sh`.
+The suite passes on Roswell SBCL 2.6.9 (241/241 checks, including
+multi-threaded tests). Benchmarks are run on Roswell SBCL 2.6.9 via
+`bench/run.sh`.
 
 ## Usage
 ```lisp

@@ -174,3 +174,131 @@
       (dolist (q '(0 5)) (roundtrip data q) (overflows data q)))
     ;; Empty input.
     (roundtrip (make-array 0 :element-type '(unsigned-byte 8)) 5)))
+
+;;;; ---- multi-threaded coverage ----
+;;;;
+;;;; The codec is used from a concurrent HTTP server: no shared mutable
+;;;; state between threads, one compressor per thread, and a cold-start
+;;;; dictionary build that must survive concurrent first use.  Workers
+;;;; only COMPUTE - every FIVEAM assertion runs on the main thread (a
+;;;; worker's *TEST* context is not ours).
+
+(defun mt-text (n)
+  "Deterministic N-byte printable-ASCII corpus: text-like, so the
+static dictionary path is taken."
+  (let* ((unit (octets "The quick brown fox jumps over the lazy dog. Brotli mt test. "))
+         (ulen (length unit))
+         (data (make-array n :element-type '(unsigned-byte 8))))
+    (dotimes (i n) (setf (aref data i) (aref unit (mod i ulen))))
+    data))
+
+(defun mt-bytes (n)
+  "Deterministic N-byte patterned corpus: not text-like (dictionary
+off) and the same length as MT-TEXT, so both share one pooled scratch
+entry - reusing it across different content is what must not leak."
+  (let ((data (make-array n :element-type '(unsigned-byte 8))))
+    (dotimes (i n) (setf (aref data i) (mod (+ (* i 131) (ash i -8)) 251)))
+    data))
+
+(defun mt-map (n fn)
+  "Run (FN i) for i in 0..N-1 in N fresh threads, collecting results in
+order as (:ok VALUE-LIST) or (:error CONDITION).  Sequential fallback
+where no thread implementation is available."
+  (let ((results (make-array n :initial-element nil))
+        (threads '()))
+    (flet ((call-worker (idx)
+             (handler-case
+                 (setf (aref results idx) (list :ok (funcall fn idx)))
+               (error (e) (setf (aref results idx) (list :error e))))))
+      #+sbcl
+      (progn
+        (dotimes (i n)
+          ;; fresh binding per iteration: DOTIMES' variable is ONE binding
+          (let ((idx i))
+            (push (sb-thread:make-thread
+                   (lambda () (call-worker idx))
+                   :name (format nil "cl-brotli-mt-~D" idx))
+                  threads)))
+        (dolist (th threads) (sb-thread:join-thread th)))
+      #-sbcl
+      (dotimes (i n) (call-worker i)))
+    results))
+
+(defun mt-check (results references)
+  "Each worker returned a list of compressed buffers; position J of
+every worker's list must be byte-equal to (ELT REFERENCES J)."
+  (loop for r across results
+        for i from 0
+        do (is (eq (first r) :ok)
+               "worker ~D failed: ~A" i
+               (if (eq (first r) :ok) "output differs" (second r)))
+           (when (eq (first r) :ok)
+             (loop for v in (second r)
+                   for ref in references
+                   for j from 0
+                   do (is (equalp v ref)
+                          "worker ~D call ~D differs from reference" i j)))))
+
+(test lisp-plain-compress-threaded
+  ;; Stateless COMPRESS from 8 threads must match the single-thread
+  ;; reference exactly (twice each, so stale-state bugs have a chance
+  ;; to show) and roundtrip.
+  (let* ((n 262144)
+         (data (mt-text n))
+         (reference (cl-brotli:compress data :quality 11))
+         (results (mt-map 8 (lambda (i)
+                              (declare (ignore i))
+                              (dotimes (k 2) (cl-brotli:compress data :quality 11))
+                              (list (cl-brotli:compress data :quality 11))))))
+    (mt-check results (list reference))
+    (is (equalp (cl-brotli:decompress reference) data))))
+
+(test lisp-make-compressor-threaded
+  ;; One private compressor per thread, several calls each, alternating
+  ;; two different corpora of the SAME length: the pooled arrays are
+  ;; reused across calls (same pool entry) but must never be shared
+  ;; between threads nor carry one corpus's bytes into the other.
+  (let* ((n 262144)
+         (text (mt-text n))
+         (bytes (mt-bytes n))
+         (ref-text (cl-brotli:compress text :quality 11))
+         (ref-bytes (cl-brotli:compress bytes :quality 11))
+         (results (mt-map 8
+                          (lambda (i)
+                            (declare (ignore i))
+                            (let ((c (cl-brotli:make-compressor)))
+                              (list (funcall c text :quality 11)
+                                    (funcall c bytes :quality 11)
+                                    (funcall c text :quality 11)))))))
+    (mt-check results (list ref-text ref-bytes ref-text))
+    (is (equalp (cl-brotli:decompress ref-text) text))
+    (is (equalp (cl-brotli:decompress ref-bytes) bytes))))
+
+(test lisp-make-compressor-identical-to-plain
+  ;; The pooled closure path must be byte-identical to plain COMPRESS
+  ;; at every quality that touches the pooled arrays (0: stored, 5:
+  ;; score path, 10/11: BT path).
+  (dolist (data (list (mt-text 65536) (mt-bytes 65536)))
+    (let ((c (cl-brotli:make-compressor)))
+      (dolist (q '(0 5 10 11))
+        (is (equalp (funcall c data :quality q)
+                    (cl-brotli:compress data :quality q))
+            "compressor differs from plain at q~D" q)))))
+
+(test lisp-dictionary-first-use-threaded
+  ;; Cold start: drop the dictionary globals and let 8 threads race the
+  ;; very first load + index build, at both the BT quality (DICT-MATCHES-
+  ;; AT) and the score quality (DICT-MATCH-AT).  The index is published
+  ;; as one word, so no thread may observe a torn (flat . bstart) pair.
+  (let* ((data (mt-text 262144))
+         (reset (lambda ()
+                  (setf cl-brotli.lisp::*dict* nil
+                        cl-brotli.lisp::*dict-index* nil))))
+    (dolist (q '(11 5))
+      (funcall reset)
+      (let ((reference (cl-brotli:compress data :quality q)))
+        (funcall reset)
+        (mt-check (mt-map 8 (lambda (i)
+                              (declare (ignore i))
+                              (list (cl-brotli:compress data :quality q))))
+                  (list reference))))))
