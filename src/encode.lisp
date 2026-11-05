@@ -525,11 +525,15 @@ The loop-free form partitions D by NBITS = INTEGER-LENGTH(D+4)-2."
 (defun special-distance-code (rb d)
   "If D is one of the short distance-ring codes, return (values CODE 0 0).
 RB is the 4-slot ring plus a write index in slot 4."
-  (flet ((try (code offset delta)
-           (let ((candidate (+ (aref rb (logand (+ (aref rb 4) offset) 3))
-                               delta)))
-             (when (and (> candidate 0) (= candidate d))
-               (return-from special-distance-code (values code 0 0))))))
+  ;; MACROLET, not FLET: the local TRY stayed a real function (15 calls
+  ;; per invocation showed up in the profile as FLET TRY); the checks are
+  ;; literal arguments at every site, so they expand inline.
+  (macrolet ((try (code offset delta)
+               `(let ((candidate (+ (aref rb (logand (+ (aref rb 4) ,offset) 3))
+                                    ,delta)))
+                  (when (and (> candidate 0) (= candidate d))
+                    (return-from special-distance-code
+                      (values ,code 0 0))))))
     (try 1 2 0)                       ; second-to-last
     (try 2 1 0)                       ; third-to-last
     (try 3 0 0)                       ; fourth-to-last

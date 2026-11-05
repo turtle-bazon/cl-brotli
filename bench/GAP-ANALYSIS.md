@@ -1894,3 +1894,22 @@ left the sb-sprof profile entirely.
   html q10 now needs +6%; json +10%.
   q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
   bt-min 8/8, ramp 325.
+
+## Rev 134: special-distance-code TRY macrolet - FLET call overhead gone
+
+SPECIAL-DISTANCE-CODE's15 ring probes were written as a local FLET
+(TRY ...) - SBCL kept TRY as a real local function, so each
+invocation paid 15 local calls (the FLET TRY frame sat in the html
+q10 profile at 0.9%).  All arguments are literal at every site, so a
+MACROLET expands the checks inline; the FLET entry is gone from the
+profile.
+
+**Gates (1 MiB vs C 1.0.9 core, sweep under load ~1.1):**
+  ratio <= 1.10: 10/10, byte-identical sizes.
+  speed >= 1.0x: 7/10, both gates on 7 cells - html q10 0.94,
+  json q10 0.91 -> 0.93, source 1.12, text 1.10, binary 2.03/2.56,
+  q11 cells 1.27/1.30/1.48, text q11 0.66.
+  Quiet-machine runs of the near-flip cells: html q10 0.96,
+  json 0.94, text q10 1.17 (load 0.24 window).
+  q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
+  bt-min 8/8, ramp 325.
