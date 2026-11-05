@@ -2301,3 +2301,38 @@ local flet may not be named RUN (fiveam exports RUN -> package-lock
 violation); SBCL reader conditionals guard SB-THREAD:MAKE-THREAD with a
 sequential #-SBCL fallback.  A 1 MiB variant of the same test needs
 --dynamic-space-size 4096 (8 x ~150 MB peak > the ~1 GB default heap).
+
+## Rev 147: gate switches to the compressor context (production pattern)
+
+Rev 145 made plain COMPRESS stateless by design (no pool -> fresh arrays
+-> no locks), which brings back the per-call large-object GC tax.  The
+speed gate therefore moves to MAKE-COMPRESSOR - the pattern a
+multi-threaded HTTP server uses, and the like-for-like counterpart of
+the C side, which times BrotliEncoderCompress against a foreign buffer
+set allocated once per cell (C reuses its buffers too; its encoder state
+is malloc/free'd per call, which is GC-free).  Both sweeps recorded
+honestly (1 MiB, median-of-3, load ~1.0):
+
+**A. plain one-shot COMPRESS (the r144 measurement, kept for the record):**
+  ratio 10/10; speed **9/10** - only TEXT q11 fails at 0.96x.
+  binary q10 2.31 / q11 2.91, html 1.04 / 1.38, json 1.02 / 1.42,
+  source 1.25 / 1.73, text q10 1.30, text q11 **0.96 FAIL**.
+  Exactly the predicted cost: ~72 bytes/input-byte re-allocated per
+  call, so the GC tax r144 eliminated returns for one-shot callers.
+
+**B. make-compressor context (committed as the gate):**
+  ratio <= 1.10: **10/10** (worst binary 1.096), byte-identical sizes.
+  speed >= 1.0:  **10/10** - binary q10 **2.32** / q11 **2.90**,
+  html q10 **1.07** / q11 **1.44**, json q10 **1.04** / q11 **1.46**,
+  source q10 **1.30** / q11 **1.79**, text q10 **1.52**,
+  text q11 **1.13**.
+  **BOTH GATES ON ALL TEN CELLS.**
+  plain -> context deltas: TEXT Q11 0.96 -> 1.13 (the failing cell
+  flips back), text q10 1.30 -> 1.52, html 1.04 -> 1.07 / 1.38 -> 1.44,
+  json 1.02 -> 1.04 / 1.42 -> 1.46, source 1.25 -> 1.30 / 1.73 -> 1.79;
+  binary unchanged (2.31 -> 2.32, 2.91 -> 2.90 - no GC tax there).
+  q0-q9 byte-identical 35/35 between the two sweeps.
+
+Supporting battery at r147: 241/241 tests (including the Rev 146
+multi-threaded suite), bt-min 8/8, repro-split clean, byte-identical
+sizes on all 8 corpora, ramp 325.

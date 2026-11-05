@@ -9,6 +9,10 @@
 ;;;; The harness measures the same input through:
 ;;;;
 ;;;;   * cl-brotli:compress / decompress          -- the public Lisp API
+;;;;     via make-compressor: a per-cell compressor context whose
+;;;;     private pool keeps the encoder's big arrays across reps (the
+;;;;     steady-state pattern a server sees, and the like-for-like
+;;;;     counterpart of C's reused preallocated buffers)
 ;;;;   * C core BrotliEncoderCompress / BrotliDecoderDecompress
 ;;;;     with preallocated foreign buffers        -- library cost without
 ;;;;                                                 Lisp allocation/copying
@@ -689,7 +693,16 @@ included; this is mostly useful for the lisp Lisp side and the CFFI wrapper."
     ;; its stream, timing, and decode pair are reused across C mode/window
     ;; variants instead of being recomputed for every cell.
     (dolist (level (getf options :levels))
-      (let* ((lisp-compressed (cl-brotli:compress data :quality level))
+      ;; One compressor per cell: its closure keeps the encoder's big
+      ;; arrays across calls, so the timing measures steady-state
+      ;; compression (the production pattern for a multi-threaded
+      ;; server) instead of paying the per-call large-object GC tax
+      ;; that the plain one-shot COMPRESS pays.  Output is byte-
+      ;; identical to plain COMPRESS (tested), so sizes and validation
+      ;; are unaffected; the plain numbers are recorded in
+      ;; bench/GAP-ANALYSIS.md (Rev 147).
+      (let* ((lisp-press (cl-brotli:make-compressor))
+             (lisp-compressed (funcall lisp-press data :quality level))
              (lisp-size (length lisp-compressed))
              (lisp-comp-time nil)
              (lisp-comp-consed nil)
@@ -697,14 +710,14 @@ included; this is mostly useful for the lisp Lisp side and the CFFI wrapper."
              (lisp-stream-lisp-time nil))
         (validate-lisp-stream data lisp-compressed)
         (multiple-value-bind (median best reps)
-            (measure (lambda () (cl-brotli:compress data :quality level))
+            (measure (lambda () (funcall lisp-press data :quality level))
                      :target target :samples samples)
           (declare (ignore best reps))
           (setf lisp-comp-time median))
         (when consing
           (setf lisp-comp-consed
                 (measure-consing
-                 (lambda () (cl-brotli:compress data :quality level)))))
+                 (lambda () (funcall lisp-press data :quality level)))))
         ;; Decode the lisp stream with both decoders once per level.
         (let ((lcd (make-c-decompressor lisp-compressed n)))
           (unwind-protect
