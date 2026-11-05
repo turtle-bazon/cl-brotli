@@ -1855,3 +1855,24 @@ distance 0 exactly like C's zero-initialized stub.
   15.6 MiB/s.
   q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
   bt-min 8/8, ramp 325.
+
+## Rev 132: top-level INLINE for zq-push - the labels declare never reached it
+
+ZQ-PUSH was the last static-fn call inside the DP hot path (2-3% of
+html q10).  Root cause: the (DECLARE (INLINE ... ZQ-PUSH ...))
+sitting inside %LZ77 is positioned AFTER the label definitions that
+call it (z-eval at line ~1878 vs the declare at ~2518), so z-eval's
+body was compiled without ever seeing it - the other names in that
+list still inline because their USE sites (the dispatch at the end)
+are after the declare.  A top-level (DECLAIM (INLINE ZQ-PUSH))
+before the defun fixes it: zq-push vanished from the sb-sprof
+profile, best-of-5 text q11 15.6 -> 16.7 MiB/s (+7%; q11 pays the
+queue twice), json q10 2.14 -> 2.19.
+
+**Gates (1 MiB vs C 1.0.9 core, load ~1.0):**
+  ratio <= 1.10: 10/10, byte-identical sizes.
+  speed >= 1.0x: 7/10, both gates on 7 cells - html q10 0.90,
+  json q10 0.90, source 1.06, text q10 1.08, binary 1.94/2.53,
+  q11 cells 1.23/1.27/1.43, text q11 0.66.
+  q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
+  bt-min 8/8, ramp 325.

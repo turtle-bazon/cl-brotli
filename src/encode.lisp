@@ -919,6 +919,10 @@ dictionary is worth consulting."
   (declare (type zpq q) (optimize (speed 3) (safety 0)))
   (min (the fixnum (zpq-idx q)) 8))
 
+;; Top-level: the labels-scoped (DECLARE (INLINE ZQ-PUSH)) inside %LZ77
+;; sits after the label definitions that call it, so Z-EVAL's body never
+;; saw it and every queue push was a full static-fn call.
+(declaim (inline zq-push))
 (defun zq-push (q pos cost costdiff dc0 dc1 dc2 dc3)
   "C StartPosQueuePush: insert at the ring offset and bubble into sorted
 costdiff order."
