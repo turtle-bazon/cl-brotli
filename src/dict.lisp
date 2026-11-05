@@ -18,14 +18,20 @@ tight ftype so hot callers' distance arithmetic stays in fixnum range."
     d))
 
 (defvar *dict* nil)
-(declaim (inline load-dict))
+(declaim (inline load-dict)
+         (ftype (function () (simple-array (unsigned-byte 8) (*))) load-dict))
 (defun load-dict ()
-  (or *dict*
-      (setf *dict*
-            (let ((p (asdf:system-relative-pathname "cl-brotli" "data/dictionary.bin")))
-              (with-open-file (s p :element-type '(unsigned-byte 8))
-                (let ((v (make-array (file-length s) :element-type '(unsigned-byte 8))))
-                  (read-sequence v s) v))))))
+  ;; THE: (OR *DICT* ...) derives (OR NULL ARRAY) - the NIL case takes the
+  ;; SETF branch and always returns the vector, but SBCL cannot correlate
+  ;; that, and the derived NULL made every hot (AREF DICT ...) a hairy
+  ;; dispatch with a null check (VECTOR-HAIRY in the dictionary probe).
+  (the (simple-array (unsigned-byte 8) (*))
+       (or *dict*
+           (setf *dict*
+                 (let ((p (asdf:system-relative-pathname "cl-brotli" "data/dictionary.bin")))
+                   (with-open-file (s p :element-type '(unsigned-byte 8))
+                     (let ((v (make-array (file-length s) :element-type '(unsigned-byte 8))))
+                       (read-sequence v s) v)))))))
 
 ;;; word transforms
 (defun %ferment-at (w pos len)

@@ -1672,3 +1672,35 @@ input, and one score-path compare - both cold).
   2.03 -> 2.07 MiB/s, source 4.72 -> 4.81).
   q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
   bt-min 8/8, ramp 325.
+
+## Rev 126: load-dict THE + ftype - dictionary-probe hairy aref gone
+
+LOAD-DICT derived (OR NULL ARRAY) from (OR *DICT* (SETF ...)) - the
+NIL case always takes the SETF branch and returns the vector, but
+SBCL cannot correlate that, so every (AREF DICT ...) in the hot
+probe path compiled as VECTOR-HAIRY-DATA-VECTOR-REF with a null
+check (1.4% of html q10).  Fixed with THE on the body plus an ftype
+declaim; the inlined call sites now derive the bare array type.
+
+Measured: VECTOR-HAIRY gone from the sb-sprof top list; speed neutral
+within the machine's load band (targeted sweep: html q10 0.87 -> 0.87,
+json 0.86 -> 0.86, source 1.02 -> 1.03).
+
+**Gates (1 MiB vs C 1.0.9 core):**
+  ratio <= 1.10: 10/10, byte-identical sizes (all 8 corpora-checked).
+  speed >= 1.0x: 7/10, both gates on 7 cells (binary q10 1.78x /
+  q11 2.47x, html q11 1.20x, json q11 1.22x, source q10 1.00x /
+  q11 1.41x, text q10 1.04x).  html q10 0.84, json q10 0.83, text
+  q11 0.61 in this (load ~0.9) sweep; the r125 idle-ish sweep had
+  0.87/0.86/0.60.
+  q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
+  bt-min 8/8, ramp 325.
+
+Also recorded this round: two attempted micros judged neutral-to-
+negative and REVERTED rather than committed - (a) walking pidx +
+dist0 loop split in the short/match l-loops (targeted sweep: html
+q10 0.87 -> 0.86, json 0.86 -> 0.85), (b) the earlier review of C
+constants confirmed MaxZopfliCandidates = 1 (q10) / 5 (q11),
+MaxZopfliLen = 150/325, LONG_COPY_QUICK_STEP = 16384 - all already
+faithful in our port (q11's z-cands 2/1 remains the recorded
+deliberate deviation).
