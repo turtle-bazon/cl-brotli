@@ -717,6 +717,11 @@ beyond the bytes that transform can change.  No temporary vectors."
                          (incf i 3)))))))))
 
 #+(and sbcl x86-64 64-bit little-endian)
+;; Top-level inline: this is a ~15-instruction helper called per
+;; dictionary candidate; without the declaim every kind0 compare was a
+;; static-fn call.
+(declaim (inline %dict-match0-sap))
+#+(and sbcl x86-64 64-bit little-endian)
 (defun %dict-match0-sap (data-sap dict-sap p off len)
   "Word-at-a-time identity compare of DATA[P..P+LEN) against
 DICT[OFF..OFF+LEN) across the two pinned arrays; returns the first

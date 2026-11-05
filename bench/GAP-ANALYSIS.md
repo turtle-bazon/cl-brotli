@@ -1876,3 +1876,21 @@ queue twice), json q10 2.14 -> 2.19.
   q11 cells 1.23/1.27/1.43, text q11 0.66.
   q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
   bt-min 8/8, ramp 325.
+
+## Rev 133: inline %dict-match0-sap - html q10 to 0.94
+
+Same missing-declaim class as Rev 132: %DICT-MATCH0-SAP (the ~15-
+instruction word-xor kind0 compare) had no top-level INLINE, so
+every dictionary-candidate identity compare was a static-fn call -
+it sat in the profile at 1.5-3.5%.  Declaimed inline: the entry
+left the sb-sprof profile entirely.
+
+**Gates (1 MiB vs C 1.0.9 core, sweep under load ~1.0):**
+  ratio <= 1.10: 10/10, byte-identical sizes.
+  speed >= 1.0x: 7/10, both gates on 7 cells.  **html q10 0.90 ->
+  0.94** (best-of-5 2.27 MiB/s = 0.99x of C's 2.3), json 0.90 ->
+  0.91, source q10 1.06 -> 1.10, text q10 1.08 -> 1.11, binary
+  2.03/2.57, q11 cells 1.27/1.30/1.49, text q11 0.67.
+  html q10 now needs +6%; json +10%.
+  q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
+  bt-min 8/8, ramp 325.
