@@ -457,16 +457,19 @@ LENGTH-CODE was ~20% of low-quality compression time."
   "Copy-length extra bits as single-float for the hot DP loops.")
 (declaim (type (simple-array single-float (*)) +ins-xbits-f+ +cpy-xbits-f+))
 (declaim (inline length-code-f))
-(defun length-code-f (len code xval xbits-f base bits)
+(defun length-code-f (len code code-n xbits-f base bits)
   "Like LENGTH-CODE but returns the extra bit count as a single-float
 (from XBITS-F in the tabled range, converted in the canonical
-fallback); the extra value is not returned."
-  (declare (type (simple-array fixnum (*)) code xval)
+fallback); the extra value is not returned.  CODE-N is (LENGTH CODE),
+bound by the caller: recomputing it per l-loop iteration reloaded the
+table object's header tens of millions of times."
+  (declare (type (simple-array fixnum (*)) code)
+           (type fixnum code-n)
            (type simple-vector base bits)
            (type (simple-array single-float (*)) xbits-f)
            (type fixnum len)
            (optimize (speed 3) (safety 0)))
-  (if (< len (length code))
+  (if (< len code-n)
       (values (aref code len) (aref xbits-f len))
       (loop for c from (1- (length base)) downto 0
             when (>= len (aref base c))
@@ -1442,6 +1445,13 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                             (make-array (* 4 n) :element-type 'fixnum)))
                (z-cands (if (and bt (>= bt 64)) 2 1))
                (z-maxlen (if (and bt (>= bt 64)) 325 150))
+               ;; Loop invariants for the DP l-loops, bound once: the
+               ;; table length was re-read (symbol + array header) and
+               ;; cmd-symbol re-multiplied (icode * 24) on every one of
+               ;; the 25-50M length iterations per MiB.
+               (cpy-n (length +cpy-code+))
+               (ins-n (length +ins-code+))
+               (cmd-tab +cmd-symbol-table+)
                (head (make-array (ash 1 hbits)
                                  :element-type '(unsigned-byte 32)
                                  :initial-element #xFFFFFFFF))
@@ -1890,12 +1900,14 @@ position.  Returns the longest newly-reached copy length."
                                   (start (aref pos-a ki)))
                              (declare (type fixnum ki start))
                              (multiple-value-bind (icode ixbf)
-                                 (length-code-f (- pos start) +ins-code+ +ins-xval+ +ins-xbits-f+
-                                              +ins-base+ +ins-bits+)
+                                 (length-code-f (- pos start) +ins-code+ ins-n
+                                              +ins-xbits-f+ +ins-base+ +ins-bits+)
                                (let ((base (+ (aref cd-a ki)
                                               ixbf
-                                              (aref prefix pos))))
-                                 (declare (type fixnum icode)
+                                              (aref prefix pos)))
+                                       (cmd-base (* icode 24))
+                                       (icode8 (* icode 8)))
+                                 (declare (type fixnum icode cmd-base icode8)
                                           (type single-float base))
                                  ;; --- 16 short-distance candidates ---
                                  (let ((best (1- min-len)) (j 0)
@@ -1928,22 +1940,29 @@ position.  Returns the longest newly-reached copy length."
                                            (when (> len best)
                                              (let ((l (1+ best))
                                                    (dist-add
-                                                     (aref dst-a (1- j))))
+                                                     (aref dst-a (1- j)))
+                                                   ;; invariant across the
+                                                   ;; l-loop (j and icode fixed)
+                                                   (dist0 (and (= j 1)
+                                                               (< icode 8))))
                                                (declare (type fixnum l)
                                                         (type single-float
-                                                               dist-add))
+                                                               dist-add)
+                                                        (type boolean dist0))
                                                (loop while (<= l len) do
                                                  (progn
                                                  (multiple-value-bind (cc cxbf)
-                                                     (length-code-f l +cpy-code+ +cpy-xval+ +cpy-xbits-f+
+                                                     (length-code-f l +cpy-code+ cpy-n +cpy-xbits-f+
                                                                     +cpy-base+
                                                                     +cpy-bits+)
                                                    (let* ((cmdc
-                                                            (if (and (= j 1)
-                                                                     (< icode 8)
+                                                            (if (and dist0
                                                                      (< cc 16))
-                                                                (cmd-symbol-dist0 icode cc)
-                                                                (cmd-symbol icode cc)))
+                                                                (+ (* (ash cc -3) 64)
+                                                                   icode8
+                                                                   (logand cc 7))
+                                                                (aref cmd-tab
+                                                                      (+ cmd-base cc))))
                                                      (cost
                                                        (+ (if (< cmdc 128)
                                                               base
@@ -2010,10 +2029,11 @@ position.  Returns the longest newly-reached copy length."
                                                              dist-cost))
                                              (loop while (<= len max-m) do
                                                (multiple-value-bind (cc cxbf)
-                                                   (length-code-f len +cpy-code+ +cpy-xval+ +cpy-xbits-f+
+                                                   (length-code-f len +cpy-code+ cpy-n +cpy-xbits-f+
                                                                   +cpy-base+
                                                                   +cpy-bits+)
-                                                 (let* ((cmdc (cmd-symbol icode cc))
+                                                 (let* ((cmdc (aref cmd-tab
+                                                                    (+ cmd-base cc)))
                                                         (cost (+ dist-cost
                                                                  cxbf
                                                                  (aref cmd-a cmdc))))

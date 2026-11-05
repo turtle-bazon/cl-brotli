@@ -1580,3 +1580,36 @@ Next: the C profile says the DP (z-iterate self ~50% vs C 23%) is
 the only remaining structural deficit; further gains need per-loop
 instruction-count work in the l-loops (length-code/cost/compare
 chain) or accepting the plateau on html/json q10.
+
+## Rev 123: l-loop invariant hoists - html/json q10 +9%, source q10 at 0.99
+
+Instruction-count work on the DP l-loops (the deficit identified by
+the Rev 122 C profile), all pure hoists - sizes byte-identical:
+
+1. **length-code-f gains CODE-N**: the function re-derived
+   (LENGTH CODE) on every call - inside the l-loops that is a
+   symbol-value load + array-header load on each of the 25-50M
+   length iterations per MiB.  CODE-N is now bound once per compress
+   in %lz77 (cpy-n/ins-n); the unused XVAL parameter was dropped.
+2. **cmd-symbol hoisted**: the match loop re-multiplied (* ICODE 24)
+   and reloaded the table object every iteration.  ICODE * 24 is now
+   bound per k (cmd-base), the table reference once per compress
+   (cmd-tab) - the hot path is aref + add only.
+3. **short-loop dist0 invariant**: (AND (= J 1) (< ICODE 8)) was
+   re-tested per l-iteration; bound per j (dist0), and the dist0
+   branch's (* ICODE 8) hoisted (icode8).
+
+**Gates (1 MiB vs C 1.0.9 core, machine load ~0.78):**
+  ratio <= 1.10: 10/10, byte-identical sizes throughout.
+  speed >= 1.0x: 6/10, both gates on 6 cells (binary q10 1.79x /
+  q11 2.30x, html q11 1.14x, json q11 1.16x, source q11 1.34x,
+  text q10 1.03x).  q10 movement (prev sweep in parens): html
+  0.77 -> 0.84 (0.76-0.81 band), json 0.76 -> 0.83, source
+  0.92 -> 0.99 (0.92-0.97 band) - **source q10 is now one rounding
+  from flipping**; text q11 0.57.
+  html/json q10 remain the hard cells: need +19% more; per the C
+  profile the DP share is still ~2x C's UpdateNodes share, so the
+  next increment has to come from more of the same (short-loop trip
+  reduction or cost-chain surgery) rather than a single silver bullet.
+  q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
+  bt-min 8/8, ramp 325.
