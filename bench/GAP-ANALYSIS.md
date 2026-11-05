@@ -2201,3 +2201,69 @@ stable.
   BOTH GATES ON 10/10 CELLS.
   q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
   bt-min 8/8, ramp 325.
+
+## Rev 145: portable thread-safety redesign - no implementation-specific code
+
+Target: an HTTP web server.  Requirements: thread safe, no CL-implementation
+-specific code in the concurrency layer, globals captured in closures, and
+multi-threaded tests (Rev 146).  The r144 global pool keyed by
+SB-THREAD:*CURRENT-THREAD* under an SB-THREAD mutex, and the r120-era
+dictionary globals, are replaced by ANSI-only mechanisms:
+
+**A. Scratch pool -> closure + dynamic binding (sb-thread deleted from src/).**
+  - *SCRATCH-POOL* is a special variable, default NIL.  Dynamic bindings
+    are thread-local in EVERY Common Lisp - that is the portable "one pool
+    per thread" primitive, so no mutex, no thread registry, no sb-thread.
+  - MAKE-COMPRESSOR returns (lambda (input &rest args) (let
+    ((*scratch-pool* pool)) (apply #'compress input args))) where POOL is
+    a hash table in the closure's lexical environment.  Each closure owns
+    its pool exclusively; two compressors share nothing.
+  - ACQUIRE-SCRATCH: pool bound -> gethash on it (build on miss, cap at
+    +SCRATCH-MAX-ENTRIES+ = 2 entries by clearing rather than growing,
+    +SCRATCH-MAX-BYTES+ = 192 MB per entry); pool NIL (plain COMPRESS) or
+    oversized N -> fresh arrays, never retained, i.e. exactly the
+    pre-pooling behavior.  The r144 global entry-count cap (dead-thread
+    leak defense) is gone - a pool dies with its closure.
+  - Contract (documented in README + docstring): like a zlib stream /
+    BrotliEncoderState, ONE compressor is not shareable between two
+    threads at once; one per thread/connection.  Plain COMPRESS is
+    stateless and fully concurrent.
+
+**B. Dictionary: one-word publication, arguments instead of globals.**
+  - *DICT-FLAT* + *DICT-BSTART* (two separate stores - a real first-use
+    tear risk) collapse into ONE *DICT-INDEX* cons cell (flat . bstart)
+    published with a single SETF.  Racing builders each keep their own
+    self-consistent pair; the contents are deterministic, so which pair a
+    reader gets is irrelevant.  Readers destructure one snapshot.
+  - *DICT-SAP* global DELETED: LZ77 snapshots the vector and (inside its
+    pinned region) its SAP once per run and passes them down - %LZ77
+    gained DICTV/DICTSAP parameters; DICT-MATCH-AT and DICT-MATCHES-AT
+    take (idx dict) / (idx dict dsap) and read no globals at all.  The
+    hot probe paths now take their tables from lexicals passed in, which
+    is also faster (no symbol-value loads).
+  - No locks anywhere: dictionary + pool correctness rests on single-word
+    publication and per-closure ownership only.
+  - Incidental fix: %LZ77 on SBCL without x86-64 now falls back to the
+    generic path instead of silently returning NIL (the old reader
+    conditional left the pin body with no call form there).
+
+Validated: byte-identical sizes on all 8 corpora (140522/134110/10817/
+10493/285155/269651/84082/152157), ramp 325, 6-quality x 6-size roundtrip
+matrix, bt-min 8/8, 150/150 tests, repro-split clean.  GCs per 12
+compresses (harness reports GCs inside its own full-gcs): PLAIN text q11
+16 / json q10 13 (the r143 tax is back by design - no pool) vs CLOSURE
+text q11 4 / json q10 4 (~0 unscheduled), with byte-identical sizes
+between the two paths.  Multi-thread smoke: 8 threads plain compress and
+8 threads x own-compressor x 4 calls both byte-equal to the single-thread
+reference; roundtrip OK.
+
+Known sizing fact (not a regression): quality 10/11 working set is ~72
+bytes/input byte (~75 MB at 1 MiB), so 8 concurrent 1 MiB compresses need
+~1.2 GB - above SBCL's ~1 GB default dynamic space; run the 1 MiB
+multi-thread test with --dynamic-space-size 4096 (the box has 62 GB).
+C brotli allocates the same working set via malloc.
+
+Gate impact: the speed gate currently measures plain COMPRESS, which no
+longer pools and will pay the GC tax again (expected: 9/10, text q11
+~0.97).  Rev 147 switches the bench to the make-compressor context - the
+production pattern for a server - and records both numbers honestly.

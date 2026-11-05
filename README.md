@@ -25,7 +25,7 @@ License: GPL-3.0
 (asdf:test-system "cl-brotli")
 ```
 
-The suite passes on Roswell SBCL 2.6.9 (94/94 checks). Benchmarks are run on
+The suite passes on Roswell SBCL 2.6.9 (150/150 checks). Benchmarks are run on
 Roswell SBCL 2.6.9 via `bench/run.sh`.
 
 ## Usage
@@ -38,6 +38,40 @@ Roswell SBCL 2.6.9 via `bench/run.sh`.
 `quality` ranges from 0 (fast greedy matching) to 11 (lazy matching, a
 512-deep hash chain, and dictionary-assisted matches). The stored fallback is
 still selected automatically when entropy coding would expand the input.
+
+## Reusable compressor (GC-free steady state)
+
+```lisp
+(defvar *compressor* (cl-brotli:make-compressor))
+(funcall *compressor* *data* :quality 11)           ; => octets, as compress
+```
+
+`make-compressor` returns a function with `compress`'s call shape that keeps a
+private pool of the encoder's large working arrays, so steady-state
+compression allocates almost nothing and triggers no GC. Plain `compress`
+re-allocates ~72 bytes per input byte on every call (one GC per call at
+quality 11 on 1 MiB). Output is byte-identical to `compress`.
+
+### Threading
+
+The library creates no threads, takes no locks, and uses no
+implementation-specific primitives; all shared state is published as single
+words or passed down as arguments.
+
+- `compress` / `decompress` are stateless: any number of threads may call them
+  concurrently.
+- Each `make-compressor` closure owns its pool, bound dynamically only for the
+  duration of a call (dynamic bindings are thread-local in every Common Lisp),
+  so distinct compressors share nothing. Like a zlib stream or a
+  `BrotliEncoderState`, one compressor must not be driven by two threads at
+  once — use one per thread or per connection.
+- The static dictionary index is built on first use and published as one word;
+  concurrent first use is safe (racing builders each keep a self-consistent
+  copy).
+
+Memory note: quality 10/11 keeps ~72 bytes per input byte of working set
+(~75 MB at 1 MiB, the same as C brotli), so budget roughly that per
+concurrently-running compressor.
 
 ## Allocation-free API
 

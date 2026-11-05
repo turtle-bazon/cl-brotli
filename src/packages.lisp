@@ -12,4 +12,5 @@
   (:local-nicknames (#:b #:cl-brotli.lisp.bitio))
   (:export #:decompress #:compress #:brotli-error
              #:compress-into #:decompress-into #:max-compressed-size
+             #:make-compressor
              #:brotli-output-overflow))

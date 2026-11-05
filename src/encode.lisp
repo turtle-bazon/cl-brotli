@@ -562,15 +562,19 @@ RB is the 4-slot ring plus a write index in slot 4."
 ;; word-index - in a single array, with bucket start offsets.  The old
 ;; cons-per-word hash buckets made every probe chase scattered cons
 ;; cells (~8% of html q10 in sb-sprof).
-(declaim (type (or null (simple-array fixnum (*))) *dict-flat*)
-         (type (or null (simple-array fixnum (65537))) *dict-bstart*)
-         (type (or null sb-sys:system-area-pointer) *dict-sap*))
-(defvar *dict-flat* nil)
-(defvar *dict-bstart* nil)
-;; SAP of the dictionary vector, set inside LZ77's pinned region (the
-;; dictionary is loaded before the pin when use-dict, so the pointer is
-;; stable for the whole match search).
-(defvar *dict-sap* nil)
+;; The whole dictionary index is ONE global word: a (flat . bstart)
+;; cons cell published with a single SETF.  Readers therefore can never
+;; observe one half without the other (the old *DICT-FLAT* +
+;; *DICT-BSTART* pair was two separate stores, so a first concurrent
+;; use could tear), and two racing builders each publish their own
+;; self-consistent pair - the contents are deterministic, so which
+;; pair a reader gets is irrelevant.  The dictionary VECTOR and its SAP
+;; are not globals at all: they are snapshotted once per LZ77 run and
+;; passed down as arguments (see LZ77).
+(declaim (type (or null (cons (simple-array fixnum (*))
+                              (simple-array fixnum (65537))))
+               *dict-index*))
+(defvar *dict-index* nil)
 
 (declaim (inline dict-key4))
 (defun dict-key4 (vec pos)
@@ -588,11 +592,14 @@ collisions are safe: dict-match-at verifies the full word against input."
   (logand (logxor key (ash key -16)) #xFFFF))
 
 (defun dict-index ()
-  "Ensure the flat dictionary index is built; returns the packed word
-array.  Words are scattered in (len, idx) ascending order - the old
-builder's push order - and each bucket range is read back reversed, so
-first-match-wins picks stay identical to the cons-list version."
-  (or *dict-flat*
+  "Ensure the flat dictionary index is built; returns the whole index
+as one self-consistent (flat . bstart) snapshot - a single cons cell
+published with one SETF, so any reader (including one racing the very
+first build) always sees a complete pair.  Words are scattered in
+(len, idx) ascending order - the old builder's push order - and each
+bucket range is read back reversed, so first-match-wins picks stay
+identical to the cons-list version."
+  (or *dict-index*
       (let* ((dict (load-dict))
              (counts (make-array 65537 :element-type 'fixnum
                                             :initial-element 0))
@@ -630,9 +637,9 @@ first-match-wins picks stay identical to the cons-list version."
                   (declare (type fixnum b at))
                   (setf (aref flat at) (logior (ash len 11) idx)
                         (aref cur b) (1+ at))))))
-          (setf *dict-flat* flat
-                *dict-bstart* counts)
-          flat))))
+          ;; One word, one store: publish the pair atomically so a
+          ;; concurrent reader never sees a half-built index.
+          (setf *dict-index* (cons flat counts))))))
 
 (defparameter +dict-transforms+
   (loop for tid from 0 below (length +transforms+)
@@ -760,17 +767,23 @@ as %MATCH-LEN-SAP, but across two different arrays."
           do (incf i))
     i))
 
-(defun dict-match-at (data p n min-len)
+(defun dict-match-at (data p n min-len idx dict)
   "Longest dictionary word starting at DATA[P] with length >= MIN-CLOP,
 as \(values length index transform-id).  Only length-preserving transforms
-are considered so command copy lengths remain the base-word lengths."
-  (declare (type fixnum p n min-len))
+are considered so command copy lengths remain the base-word lengths.
+IDX is a self-consistent index snapshot from DICT-INDEX (car = packed
+word array, cdr = bucket starts) and DICT the dictionary vector; both
+come from the caller's one-per-run snapshot, so this function reads no
+global state at all."
+  (declare (type fixnum p n min-len)
+           (type (cons (simple-array fixnum (*))
+                       (simple-array fixnum (65537))) idx)
+           (type (simple-array (unsigned-byte 8) (*)) dict))
   (let* ((doff +doffset+) (tkinds +dict-transform-kinds+)
          (bucket (dict-bucket (dict-key4 data p)))
-         (flat (dict-index))
-         (starts *dict-bstart*)
-         (best-len 0) (best-idx nil) (best-tid 0)
-         (dict (load-dict)))
+         (flat (car idx))
+         (starts (cdr idx))
+         (best-len 0) (best-idx nil) (best-tid 0))
     (declare (type (simple-array fixnum (*)) flat)
              (type (simple-array fixnum (65537)) starts))
     (loop for k of-type fixnum
@@ -791,19 +804,26 @@ are considered so command copy lengths remain the base-word lengths."
                        (return)))))))
     (values best-len best-idx best-tid)))
 
-(defun dict-matches-at (sap data p n min-len dist-base dists stamp)
+(defun dict-matches-at (sap data p n min-len dist-base dists stamp
+                        idx dict dsap)
   "C BrotliFindAllStaticDictionaryMatches (length-preserving transforms
 only): for every dictionary word of length LEN in [MIN-LEN, 24] that
 matches DATA[P..), set DISTS[LEN] to its backward distance and return the
 number of lengths filled.  DIST-BASE = min(window, position), so every
 distance lands just above the decoder's max-distance and is therefore read
-as a dictionary reference."
+as a dictionary reference.  IDX (index snapshot from DICT-INDEX), DICT
+(the dictionary vector) and DSAP (its SAP, or NIL) are the caller's
+one-per-run snapshot - no globals are read here."
   (declare (type sb-sys:system-area-pointer sap)
            (type (simple-array (unsigned-byte 8) (*)) data)
            (type fixnum p n min-len)
            (type (integer 0 #x1FFFFFF) dist-base)
            (type (simple-array fixnum (25)) dists)
            (type (integer 0 #x7FFFFF) stamp)
+           (type (cons (simple-array fixnum (*))
+                       (simple-array fixnum (65537))) idx)
+           (type (simple-array (unsigned-byte 8) (*)) dict)
+           (type (or null sb-sys:system-area-pointer) dsap)
            (optimize (speed 3) (safety 0)))
   (let* ((key (if (and sap (<= (+ p 4) n))
                   (sb-sys:sap-ref-32 sap p)
@@ -813,10 +833,8 @@ as a dictionary reference."
          (doff +doffset+) (tid0 +dict-tid0+)
          (tkinds +dict-transform-kinds+)
          (bucket (dict-bucket key))
-         (flat (dict-index))
-         (starts *dict-bstart*)
-         (dsap *dict-sap*)
-         (dict (load-dict))
+         (flat (car idx))
+         (starts (cdr idx))
          (count 0))
     (declare (type (simple-array fixnum (*)) flat)
              (type (simple-array fixnum (65537)) starts)
@@ -1300,24 +1318,28 @@ position classification computes exactly the same values."
                (setf (aref costs (1+ i)) (+ (aref costs i) (float cost 1.0f0)))))))))
     costs))
 
-;;;; ---- per-thread scratch pool for the big z-state arrays ----
+;;;; ---- per-compressor scratch pool for the big z-state arrays ----
 ;;;;
 ;;;; The z-state arrays are ~72 bytes per input byte (~73 MB at 1 MiB).
 ;;;; Allocating them per compress made every call drop ~73 MB of
 ;;;; large-object garbage - roughly one SBCL GC per compress (~3 ms of
 ;;;; GC tax that C's plain malloc never pays - it was the last remaining
 ;;;; gap on text q11).  For a given input length the shapes are fixed,
-;;;; so a per-thread pool reuses them: each thread only ever touches
-;;;; its own entries (lookup under a short mutex), so concurrent
-;;;; COMPRESS calls remain fully independent - no shared buffers, no
-;;;; serialization of the work itself.  Entries are capped
-;;;; (*SCRATCH-MAX-ENTRIES* per thread, *SCRATCH-MAX-BYTES* per entry,
-;;;; and a global entry count) so retention is bounded and a one-off
-;;;; huge input is never pinned.  Fresh arrays behave exactly like
-;;;; today's; pooled arrays are proven safe because every read path is
-;;;; either filled per call (buckets, znm, zcostf, zlen) or strictly
-;;;; read-after-write (forest, zins/zsc/znext via the zlen fill,
-;;;; prefix via the in-place estimate), making outputs byte-identical.
+;;;; so a pool reuses them across calls.  The pool is a hash table
+;;;; CAPTURED IN A CLOSURE (see MAKE-COMPRESSOR) and bound to the
+;;;; dynamic variable *SCRATCH-POOL* around each call: dynamic bindings
+;;;; are thread-local in every Common Lisp, so each compressor's pool
+;;;; is private to the thread currently inside that closure.  No locks,
+;;;; no shared mutable state, no implementation-specific threading
+;;;; primitives - concurrent COMPRESS calls remain fully independent
+;;;; with no serialization of the work itself.  Entries are capped
+;;;; (+SCRATCH-MAX-ENTRIES+ per pool, +SCRATCH-MAX-BYTES+ per entry)
+;;;; so retention is bounded and a one-off huge input is never pinned.
+;;;; Fresh arrays behave exactly like unpooled ones; pooled arrays are
+;;;; proven safe because every read path is either filled per call
+;;;; (buckets, znm, zcostf, zlen) or strictly read-after-write
+;;;; (forest, zins/zsc/znext via the zlen fill, prefix via the
+;;;; in-place estimate), making outputs byte-identical.
 
 (defstruct (cl-brotli-scratch (:conc-name scr-))
   "Pooled per-compress arrays; see ACQUIRE-SCRATCH."
@@ -1332,12 +1354,21 @@ position classification computes exactly the same values."
   (z-nm nil :type (or null (simple-array (unsigned-byte 32) (*))))
   (z-flat nil :type (or null (simple-array fixnum (*)))))
 
-(defparameter *scratch-max-entries* 2)
-(defparameter *scratch-max-bytes* (* 192 1048576))
-(defvar *scratch-pools* (make-hash-table :test 'eql)
-  "thread -> alist of (n . scratch), newest first.")
-#+sbcl
-(defvar *scratch-lock* (sb-thread:make-mutex :name "cl-brotli scratch pool"))
+;; Retention caps: how many distinct input lengths one pool keeps, and
+;; the largest entry worth pinning (72 bytes/input-byte + buckets).
+;; Constants, not parameters: they bound a cache, they are not tuning
+;; knobs for callers.
+(defconstant +scratch-max-entries+ 2)
+(defconstant +scratch-max-bytes+ (* 192 1048576))
+
+(defvar *scratch-pool* nil
+  "Per-compressor scratch pool: a hash table mapping input length N to
+a reusable CL-BROTLI-SCRATCH entry, or NIL for no pooling (fresh
+arrays every call - what plain COMPRESS does).  This variable is only
+ever let-bound around a single call by a MAKE-COMPRESSOR closure;
+dynamic bindings are thread-local in every Common Lisp, so a pool is
+private to the thread running that closure.  Never set it globally and
+never share one pool between threads.")
 
 (defun scratch-estimate-bytes (n)
   "Approximate retained bytes for an N-sized entry (72/byte + buckets)."
@@ -1372,28 +1403,28 @@ position classification computes exactly the same values."
             (make-array (* 4 n) :element-type 'fixnum))))
 
 (defun acquire-scratch (n)
-  "Return this thread's pooled arrays for length N (building them on
-first use).  Non-SBCL builds and oversized N allocate fresh every
-call (no pooling, same behavior as before)."
+  "Scratch arrays for an input of length N.  When *SCRATCH-POOL* is
+bound (a MAKE-COMPRESSOR closure) the arrays come from that pool and
+are reused across calls; without a pool, or for oversized N, fresh
+arrays are returned and never retained - identical to the unpooled
+behavior.  Because a pool belongs to exactly one closure, callers never
+share it, so no locking is needed and concurrent compresses cannot see
+each other's buffers.  The pool holds at most +SCRATCH-MAX-ENTRIES+
+entries of at most +SCRATCH-MAX-BYTES+ each (once full it is cleared
+rather than grown), so retention is bounded per compressor."
   (declare (type fixnum n))
-  #+sbcl
-  (let ((thr sb-thread:*current-thread*))
-    (or (sb-thread:with-mutex (*scratch-lock*)
-          (cdr (assoc n (gethash thr *scratch-pools*) :test #'=)))
-        (let ((fresh (make-scratch-arrays n)))
-          (when (<= (scratch-estimate-bytes n) *scratch-max-bytes*)
-            (sb-thread:with-mutex (*scratch-lock*)
-              (let ((entries (cons (cons n fresh)
-                                   (gethash thr *scratch-pools*))))
-                (setf (gethash thr *scratch-pools*)
-                      (if (>= (length entries) *scratch-max-entries*)
-                          (subseq entries 0 *scratch-max-entries*)
-                          entries))
-                ;; bound the hash against entries outliving dead threads
-                (when (> (hash-table-count *scratch-pools*) 64)
-                  (clrhash *scratch-pools*)))))
-          fresh)))
-  #-sbcl (make-scratch-arrays n))
+  (let ((pool *scratch-pool*))
+    (if (null pool)
+        (make-scratch-arrays n)
+        (or (gethash n pool)
+            (when (<= (scratch-estimate-bytes n) +scratch-max-bytes+)
+              ;; bounded retention: this pool is private to one
+              ;; compressor, so dropping it wholesale is safe (the
+              ;; arrays are only ever referenced from here)
+              (when (>= (hash-table-count pool) +scratch-max-entries+)
+                (clrhash pool))
+              (setf (gethash n pool) (make-scratch-arrays n)))
+            (make-scratch-arrays n)))))
 
 (defun zopfli-analytic-model (data n scratch)
   "C ZopfliCostModelSetFromLiteralCosts: estimated literal costs as a
@@ -1554,18 +1585,24 @@ The final insert-only trailing command is not part of C's command stream
               (+ (aref prefix i) (aref ct (aref data i))))))
     model))
 
-(defun %lz77 (data sap window use-dict dict-limit base-pos max-chain lazy
-              skip-match insert-interior &optional (score-p nil) (checks 1)
+(defun %lz77 (data sap dictv dictsap window use-dict dict-limit base-pos
+              max-chain lazy skip-match insert-interior
+              &optional (score-p nil) (checks 1)
               (bt nil))
   "Implementation of LZ77.  SAP is a system-area pointer for DATA on SBCL,
-or NIL on other implementations.  With SCORE-P (q5+), match selection uses
+or NIL on other implementations.  DICTV is the dictionary vector (NIL when
+the dictionary is off) and DICTSAP its SAP: one snapshot taken by LZ77
+inside its pinned region and passed down as arguments, so concurrent runs
+share no dictionary state.  With SCORE-P (q5+), match selection uses
 C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
 (4/10/16); otherwise the legacy length-maximizing search runs byte-exact."
   (declare (type (simple-array (unsigned-byte 8) (*)) data)
+           (type (or null (simple-array (unsigned-byte 8) (*))) dictv)
            (type fixnum window base-pos max-chain checks)
            (type boolean score-p)
            (optimize (speed 3) (safety 0)))
-  #+sbcl (declare (type sb-sys:system-area-pointer sap))
+  #+sbcl (declare (type sb-sys:system-area-pointer sap)
+                  (type (or null sb-sys:system-area-pointer) dictsap))
   #-sbcl (declare (ignore sap))
   (let* ((n (length data)) (min-match 4)
          ;; Zopfli DP node arrays are whole-input sized (~52 bytes/byte of
@@ -1677,6 +1714,11 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                ;; (OR NULL FIXNUM) parameter made SBCL emit GENERIC-<
                ;; at all three probe gates).
                (dlim (the fixnum (or dict-limit most-positive-fixnum)))
+               ;; One dictionary-index snapshot for the whole run (NIL
+               ;; when the dictionary is off): read once here, passed
+               ;; down as an argument - the hot paths never touch a
+               ;; global.
+               (dictidx (and use-dict (dict-index)))
                (shift (the fixnum (- hbits 64)))
                ;; C score mode (q5+): the CHECKS-entry distance cache with
                ;; PrepareDistanceCache's +-1/2/3 cascade, seeded exactly like
@@ -1702,6 +1744,11 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                          bt-buckets bt-forest)
                    (type (or null (simple-array fixnum (128))) bt-md bt-ml)
                    (type fixnum bt-short bt-next bt-cnt bt-cpos bt-cbest)
+                   ;; NIL when the dictionary is off; the two dict probe
+                   ;; sites only run under USE-DICT, i.e. with a pair.
+                   (type (or null (cons (simple-array fixnum (*))
+                                        (simple-array fixnum (65537))))
+                         dictidx)
                    ;; Plain (non-null) types: the z-state is only ever
                    ;; touched from the z-labels, which run iff BT is active;
                    ;; the (or null ...) form forced a hairy type check on
@@ -2373,7 +2420,8 @@ probing and storing here."
                                                             (if (plusp cnt)
                                                                 bt-cbest 0)))
                                                     (min window (+ base-pos i))
-                                                    z-dmatch i)
+                                                    z-dmatch i
+                                                    dictidx dictv dictsap)
                                    (setf dok t))
                                  ;; C: only the longest match survives when
                                  ;; it exceeds MaxZopfliLen.
@@ -2512,7 +2560,8 @@ Z-NM[i] counts position I's entries (skip interiors stay 0)."
                                (dict-matches-at sap data i n
                                                 (max 4 (1+ bt-cbest))
                                                 (min window (+ base-pos i))
-                                                z-dmatch i)
+                                                z-dmatch i
+                                                dictidx dictv dictsap)
                                (loop for l of-type fixnum from 4 to 24 do
                                  (let ((d (aref z-dmatch l)))
                                    (declare (type fixnum d))
@@ -2754,7 +2803,8 @@ score rather than length.  Returns (values len dist score)."
                           ;; min-len = best-len + 1 reproduces the outer
                           ;; (> dict-len best-len) guard while pruning the
                           ;; candidate scan (C: minlen = max(4, best_len+1)).
-                          (dict-match-at data p n (1+ best-len))
+                          (dict-match-at data p n (1+ best-len)
+                                         dictidx dictv)
                         ;; DICT-IDX is NIL only when no word matched, which
                         ;; the DICT-LEN >= 9 guard excludes; typing the three
                         ;; keeps the compares/arith in fixnum registers.
@@ -3309,22 +3359,30 @@ marks a trailing insert-only command.  BASE-POS is the number of bytes already
 produced before DATA; it is needed to encode dictionary distances correctly
 when DATA is one chunk of a multi-meta-block stream.  MAX-CHAIN and LAZY trade
 compression ratio for encoder throughput."
-  #+sbcl
-  (sb-sys:with-pinned-objects (data (if use-dict (load-dict) data))
-    ;; Stable SAP for the word-at-a-time dictionary compare; refreshed
-    ;; on every call (and cleared for dictionary-less runs).
-    (setf *dict-sap*
-          (and use-dict (sb-sys:vector-sap (load-dict))))
-    #+(and sbcl x86-64 64-bit little-endian)
-    (if (and skip-match (not lazy) (not use-dict) (<= max-chain 2))
-        (%lz77-fragment data (sb-sys:vector-sap data) window
-                        (if (<= max-chain 1) 15 17) one-pass)
-        (%lz77 data (sb-sys:vector-sap data) window use-dict dict-limit
-               base-pos max-chain lazy skip-match insert-interior
-               score-p checks bt)))
-  #-sbcl
-  (%lz77 data nil window use-dict dict-limit base-pos max-chain lazy
-         skip-match insert-interior score-p checks bt))
+  ;; One dictionary snapshot per run: the vector, and its SAP taken
+  ;; inside the pinned region, travel down as arguments.  No global is
+  ;; written or read (the old *DICT-SAP* store is gone), so concurrent
+  ;; runs - including two racing the first dictionary build - cannot
+  ;; observe each other's state.
+  (let ((dictv (and use-dict (load-dict))))
+    #+sbcl
+    (sb-sys:with-pinned-objects (data (or dictv data))
+      (let ((dictsap (and dictv (sb-sys:vector-sap dictv))))
+        #+(and sbcl x86-64 64-bit little-endian)
+        (if (and skip-match (not lazy) (not use-dict) (<= max-chain 2))
+            (%lz77-fragment data (sb-sys:vector-sap data) window
+                            (if (<= max-chain 1) 15 17) one-pass)
+            (%lz77 data (sb-sys:vector-sap data) dictv dictsap window
+                   use-dict dict-limit base-pos max-chain lazy skip-match
+                   insert-interior score-p checks bt))
+        ;; generic SBCL (no x86-64 fragment/VOP fast paths)
+        #-(and sbcl x86-64 64-bit little-endian)
+        (%lz77 data (sb-sys:vector-sap data) dictv dictsap window
+               use-dict dict-limit base-pos max-chain lazy skip-match
+               insert-interior score-p checks bt)))
+    #-sbcl
+    (%lz77 data nil dictv nil window use-dict dict-limit base-pos
+           max-chain lazy skip-match insert-interior score-p checks bt)))
 
 ;;; A "trivial" entropy path for q2-q4: one literal/command/distance tree,
 ;;; no context maps, no block splits.  Unlike PLAN-COMMANDS it does not
@@ -4700,6 +4758,28 @@ entropy-coded candidates are not already smaller than the input."
          (n (length data))
          (params (quality-params quality)))
     (%compress-bytes data n params)))
+
+(defun make-compressor ()
+  "Return a reusable compressor: a function with COMPRESS's call shape
+\(INPUT &key QUALITY) that keeps a private scratch pool for the big
+encoder arrays across calls, so steady-state compression allocates
+almost nothing and triggers no GC (plain COMPRESS re-allocates ~72
+bytes per input byte on every call).
+
+Thread safety - no locks, no implementation-specific threading code:
+the pool is captured in the closure's lexical environment and bound to
+the dynamic variable *SCRATCH-POOL* only for the duration of each call.
+Dynamic bindings are thread-local in every Common Lisp, so each
+compressor's pool is visible only to the thread currently inside that
+closure, and two compressors share nothing at all.  Like a zlib stream
+or BrotliEncoderState, a single compressor must not be driven by two
+threads simultaneously: use one per thread (or per connection).
+Separate compressors - and plain COMPRESS - are fully concurrent and
+produce byte-identical output."
+  (let ((pool (make-hash-table :test 'eql)))
+    (lambda (input &rest args)
+      (let ((*scratch-pool* pool))
+        (apply #'compress input args)))))
 
 (defun compress-into (input output &key (start 0) (end (length output))
                                      (quality 11))

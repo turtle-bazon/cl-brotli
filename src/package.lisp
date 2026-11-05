@@ -7,6 +7,7 @@
                 #:compress-into
                 #:decompress-into
                 #:max-compressed-size
+                #:make-compressor
                 #:brotli-output-overflow)
   (:export #:compress
            #:decompress
@@ -14,6 +15,7 @@
            #:compress-into
            #:decompress-into
            #:max-compressed-size
+           #:make-compressor
            #:brotli-output-overflow))
 
 ;;; The %MATCH-LEN-SAP VOP replaces calls compiled after src/vops.lisp; this
