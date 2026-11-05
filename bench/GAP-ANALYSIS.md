@@ -1969,3 +1969,25 @@ Session trajectory (r121 -> r136): speed 5/10 -> **9/10**, both-
 gate cells 5 -> 9, html q10 0.79 -> 1.01, json 0.79 -> 1.01,
 source 0.95 -> 1.18 (flip), text q10 0.97 -> 1.13 (flip),
 text q11 0.56 -> 0.65.
+
+## Rev 137: remaining hot defparameters bound as lexicals (zdc-jo, dict tables)
+
+Continuation of the Rev 136 finding (SBCL never hoists symbol-value
+loads out of loops), sweeping the rest of the hot spans:
+  - +zdc-jo+ bound in %lz77: the short loop read it through symbol
+    indirection 16x per position;
+  - dict-matches-at binds +doffset+ / +dict-tid0+ /
+    +dict-transform-kinds+ once per probe instead of per candidate;
+  - dict-match-at same treatment.
+Audit of all remaining literal refs in the hot spans after this:
+none (z-infinity+ remains only in the once-per-pass fill).
+
+**Gates (1 MiB vs C 1.0.9 core, sweep under load ~1.0):**
+  ratio <= 1.10: 10/10, byte-identical sizes.
+  speed >= 1.0x: 9/10, both gates on 9 cells - html q10 1.02,
+  json q10 1.00, source q10 1.18 (best-of-5 5.95 MiB/s = 1.35x C),
+  html q11 1.41, source q11 1.63, binary 2.09/2.91, text q10 1.13;
+  **text q11 0.65 -> 0.70** (dict-table lexicals reach q11's prepass
+  and both DP passes too).
+  q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
+  bt-min 8/8, ramp 325.

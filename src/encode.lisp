@@ -755,7 +755,8 @@ as %MATCH-LEN-SAP, but across two different arrays."
 as \(values length index transform-id).  Only length-preserving transforms
 are considered so command copy lengths remain the base-word lengths."
   (declare (type fixnum p n min-len))
-  (let* ((bucket (dict-bucket (dict-key4 data p)))
+  (let* ((doff +doffset+) (tkinds +dict-transform-kinds+)
+         (bucket (dict-bucket (dict-key4 data p)))
          (flat (dict-index))
          (starts *dict-bstart*)
          (best-len 0) (best-idx nil) (best-tid 0)
@@ -773,8 +774,8 @@ are considered so command copy lengths remain the base-word lengths."
                         (type (integer 0 2047) idx))
                (when (and (<= len (- n p)) (>= len min-len)
                           (> len best-len))
-                 (let ((off (+ (aref +doffset+ len) (* idx len))))
-                   (dolist (tk +dict-transform-kinds+)
+                 (let ((off (+ (aref doff len) (* idx len))))
+                   (dolist (tk tkinds)
                      (when (%dict-word-match-p data p dict off len (cdr tk))
                        (setf best-len len best-idx idx best-tid (car tk))
                        (return)))))))
@@ -797,6 +798,10 @@ as a dictionary reference."
   (let* ((key (if (and sap (<= (+ p 4) n))
                   (sb-sys:sap-ref-32 sap p)
                   (dict-key4 data p)))
+         ;; lexicals: as literal refs each table went through symbol
+         ;; indirection on every candidate/probe
+         (doff +doffset+) (tid0 +dict-tid0+)
+         (tkinds +dict-transform-kinds+)
          (bucket (dict-bucket key))
          (flat (dict-index))
          (starts *dict-bstart*)
@@ -820,7 +825,7 @@ as a dictionary reference."
                    ;; not yet filled by THIS call (stamps replace the
                    ;; per-call clear the old zero-test relied on)
                    (/= (ash (aref dists len) -26) stamp))
-          (let ((off (+ (aref +doffset+ len) (* idx len)))
+          (let ((off (+ (aref doff len) (* idx len)))
                 (skip1 nil))
             (declare (type boolean skip1))
             ;; KIND 0 (identity): word-at-a-time compare across the two
@@ -838,7 +843,7 @@ as a dictionary reference."
                  (setf (aref dists len)
                        (logior (ash stamp 26)
                                (+ dist-base 1 idx
-                                  (* (the (integer 0 127) +dict-tid0+)
+                                  (* (the (integer 0 127) tid0)
                                      (the (integer 0 2048) (nwords len))))))
                  (incf count))
                 (t
@@ -849,7 +854,7 @@ as a dictionary reference."
                                   (if (< c 192) 1
                                       (if (< c 224) 2 3))))
                    (setf skip1 t))
-                 (dolist (tk +dict-transform-kinds+)
+                 (dolist (tk tkinds)
                    (let ((kd (cdr tk)))
                      (declare (type fixnum kd))
                      (when (and (/= kd 0)
@@ -1497,6 +1502,9 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                (cpy-bs +cpy-base+) (cpy-bt +cpy-bits+)
                (ins-c +ins-code+) (ins-xf +ins-xbits-f+)
                (ins-bs +ins-base+) (ins-bt +ins-bits+)
+               ;; same symbol-indirection reason: the short loop reads
+               ;; this table 16x per position
+               (zdc-jo +zdc-jo+)
                (head (make-array (ash 1 hbits)
                                  :element-type '(unsigned-byte 32)
                                  :initial-element #xFFFFFFFF))
@@ -1999,7 +2007,7 @@ position.  Returns the longest newly-reached copy length."
                                             (type (unsigned-byte 8) left))
                                    (loop while (and (< j 16) (< best max-len))
                                          do
-                                     (let* ((jo (aref +zdc-jo+ j))
+                                     (let* ((jo (aref zdc-jo j))
                                             (back (+ (aref dc-a
                                                        (+ dc0 (ash jo -4)))
                                                      (- (logand jo #xF) 8))))
