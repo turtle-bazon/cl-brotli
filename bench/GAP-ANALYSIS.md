@@ -1524,3 +1524,59 @@ probe defvars removed.
   the profile.
   q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
   bt-min 8/8, ramp 325.
+
+## Rev 122: gprof of C + ZDICT packed into ZLEN - speed 5/10 -> 6/10
+
+**C profile (new tooling)**: built brotli 1.0.9 CLI with -pg and
+profiled the same 1 MiB html corpus (q10).  C's split:
+  BrotliZopfliComputeShortestPath self 39.5% (FindAllMatches /
+  StoreAndFindMatches are static INLINE -> the tree walk lives here),
+  UpdateNodes 23.3%, dictionary 14.0%, ZopfliCostModelSetFromLiteral
+  Costs 9.3%, BrotliSplitBlock 9.3%, misc 5%.
+Ours (sb-sprof, same corpus): bt-do 31% ~= C's tree walk share,
+dictionary 9% < C's 14%, estimate+analytic 1.8% < C's 9.3%, split
+cheap - and z-iterate self ~50% vs C's UpdateNodes 23%: **the DP
+inner loops are the one place we run behind C (the rest we are at or
+ahead of C's share)**.  Structure was line-diffed against C this
+round: short-scan bounds, StoreRange stride-8, long-copy skip,
+k>=2 match-candidate cutoff, zq-push bubble - all faithful.
+
+**Phase timing (temporary probes, removed before commit)**:
+  text q11: prepass ~25 ms, pass1 ~15, model ~0, pass2 ~10, ~18 ms
+  outside (estimate/utf8/allocs) of a ~68 ms run.
+  html q11: prepass ~34, pass1 ~42, pass2 ~24 of ~203 ms (the rest
+  is estimate + setup + entropy, matching the profile).
+
+**ZDICT eliminated (this round's change)**: zlen's packed modifier
+(bits 25+, C's len_code field) turned out to be WRITE-ONLY in our
+port - every reader masks to 25 bits and we recompute length codes
+downstream (valid: our length-preserving transforms make len_code ==
+copy length always).  So:
+  - zlen write: (logior len (ash dictp 24)) - dictionary flag moved
+    into ZLEN bit 24 (readers' masks widened #x1FFFFFF -> #xFFFFFF,
+    5 sites); the modifier arithmetic (add/sub/ash 25/logior) dropped
+    from the hottest write in the l-loops.
+  - the separate ZDICT array (8 MB per compress) is gone; both read
+    sites (z-shortcut, path reconstruction) already had ZLEN in hand
+    - now ONE array read instead of two (better cache behavior on
+    dict-heavy corpora).
+  - z-update-node lost its LEN-CODE parameter (always equal to LEN).
+Measured: text q11 13.9 -> 14.7 MiB/s best (+6%), source q10 +2%;
+sizes byte-identical on every corpus (the change is a pure repack).
+
+**Gates (1 MiB vs C 1.0.9 core):**
+  ratio <= 1.10: 10/10 unchanged (exact r119 sizes).
+  speed >= 1.0x: **6/10** (was 5/10) - text q10 flipped: 0.97 ->
+  1.00-1.04 across runs (dict-heavy: the second-array-read saving
+  lands exactly where the flag was read).  Both gates now on 6 cells:
+  binary q10/q11, html q11, json q11, source q11, text q10.
+  html q10 0.77-0.81, json q10 0.76-0.80, source q10 0.92-0.97,
+  text q11 0.58 - all within this shared machine's +-4% load band
+  (load average 0.14 -> 0.88 across today's sweeps; re-runs recorded).
+  q0-q9 byte-identical 35/35, 150/150 tests, repro-split clean,
+  bt-min 8/8, ramp 325.
+
+Next: the C profile says the DP (z-iterate self ~50% vs C 23%) is
+the only remaining structural deficit; further gains need per-loop
+instruction-count work in the l-loops (length-code/cost/compare
+chain) or accepting the plateau on html/json q10.

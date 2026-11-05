@@ -1427,7 +1427,6 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                (zins (and bt (make-array (1+ n) :element-type 'fixnum)))
                (zsc (and bt (make-array (1+ n) :element-type 'fixnum)))
                (znext (and bt (make-array (1+ n) :element-type 'fixnum)))
-               (zdict (and bt (make-array (1+ n) :element-type 'fixnum)))
                (zq (and bt (make-zpq)))
                (z-sdc #(4 11 15 16))
                (z-dc (make-array 4 :element-type 'fixnum))
@@ -1489,7 +1488,7 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                    (type zmodel zmodel)
                    (type (simple-array single-float (*)) zcostf)
                    (type (simple-array fixnum (*))
-                         zlen zdist zins zsc znext zdict)
+                         zlen zdist zins zsc znext)
                    (type (simple-array fixnum (25)) z-dmatch)
                    (type (simple-array fixnum (*)) z-nm z-flat)
                    (type zpq zq)
@@ -1757,7 +1756,7 @@ following the shortcut chain, then the stream-starting cache."
                      (let ((idx 0) (p (aref zsc pos)))
                        (declare (type fixnum idx p))
                        (loop while (and (< idx 4) (> p 0)) do
-                         (let ((clen (logand (aref zlen p) #x1FFFFFF)))
+                         (let ((clen (logand (aref zlen p) #xFFFFFF)))
                            (declare (type fixnum clen))
                            (if (= clen 1)
                                ;; stub: C's initialized distance is 0 and
@@ -1781,10 +1780,11 @@ shortcut."
                      (declare (type fixnum pos))
                      (if (zerop pos)
                          0
-                         (let ((clen (logand (aref zlen pos) #x1FFFFFF)))
-                           (declare (type fixnum clen))
+                         (let* ((zv (aref zlen pos))
+                                (clen (logand zv #xFFFFFF)))
+                           (declare (type fixnum zv clen))
                            (if (= clen 1)
-                               ;; stub / unwritten: zins = 0, zdict = 0
+                               ;; stub / unwritten: zins = 0, dictp bit clear
                                pos
                                (let* ((ins (logand (aref zins pos) #x7FFFFFF))
                                       (short (ash (aref zins pos) -27)))
@@ -1796,21 +1796,24 @@ shortcut."
                                  ;; last); codes 1..15 (our short 2..16) DO
                                  ;; push and must land on POS, not on the
                                  ;; predecessor.
-                                 (if (and (zerop (aref zdict pos))
+                                 (if (and (zerop (logand zv #x1000000))
                                           (/= short 1))
                                      pos
                                      (aref zsc (- pos clen ins))))))))
-                   (z-update-node (pos start len len-code dist short dictp cost)
-                     "C UpdateZopfliNode plus our explicit dictionary flag."
+                   (z-update-node (pos start len dist short dictp cost)
+                     "C UpdateZopfliNode plus our dictionary flag packed
+into ZLEN bit 24 (our length code always equals the copy length - the
+length-preserving transforms - so C's packed len_code modifier at bits
+25+ was write-only dead weight, and the separate ZDICT array is gone:
+both readers already had ZLEN in hand)."
                      ;; Tight ranges: the DP only runs for inputs <= 2^23
-                     ;; bytes, copy lengths are <= n, distances < 2^26 and
-                     ;; SHORT/DICTP are 5/1-bit fields - so the packed
-                     ;; (len | (modifier << 25)) and (short << 27) writes
-                     ;; provably fit in a fixnum and compile to plain
-                     ;; shifts/logior (the loose FIXNUM declarations made
-                     ;; every node write take the overflow-checked path
-                     ;; with ALLOC-SIGNED-BIGNUM in the disassembly).
-                     (declare (type (integer 0 #x7FFFFF) pos start len len-code)
+                     ;; bytes, distances < 2^26 and SHORT/DICTP are 5/1-bit
+                     ;; fields - so the packed writes provably fit a fixnum
+                     ;; and compile to plain shifts/logior (loose FIXNUM
+                     ;; declarations made every node write take the
+                     ;; overflow-checked path with ALLOC-SIGNED-BIGNUM).
+                     (declare (type (integer 0 #x7FFFFF) pos start)
+                              (type (integer 0 #xFFFFFF) len)
                               (type (integer 0 #x3FFFFFF) dist)
                               (type (integer 0 31) short)
                               (type (integer 0 1) dictp)
@@ -1818,12 +1821,10 @@ shortcut."
                               (optimize (speed 3) (safety 0)))
                      (let ((q (+ pos len)))
                        (declare (type fixnum q))
-                       (setf (aref zlen q)
-                             (logior len (ash (+ len 9 (- len-code)) 25))
+                       (setf (aref zlen q) (logior len (ash dictp 24))
                              (aref zdist q) dist
                              (aref zins q) (logior (ash short 27)
                                                    (- pos start))
-                             (aref zdict q) dictp
                              (aref zcostf q) cost)))
                    (z-eval (pos)
                      "C EvaluateNode: record the shortcut, and queue POS
@@ -1952,7 +1953,7 @@ position.  Returns the longest newly-reached copy length."
                                                      (declare (type fixnum cmdc)
                                                               (type single-float cost))
                                                      (when (< cost (aref zcostf (+ pos l)))
-                                                       (z-update-node pos start l l back j 0 cost)
+                                                       (z-update-node pos start l back j 0 cost)
                                                        (when (> l result)
                                                          (setf result l)))))
                                              (setf best l)
@@ -2020,7 +2021,7 @@ position.  Returns the longest newly-reached copy length."
                                                             (type single-float
                                                                    cost))
                                                    (when (< cost (aref zcostf (+ pos len)))
-                                                     (z-update-node pos start len len dist 0 isdict cost)
+                                                     (z-update-node pos start len dist 0 isdict cost)
                                                      (when (> len result)
                                                        (setf result len)))))
                                                (incf len))))))))))))
@@ -2034,7 +2035,7 @@ probing and storing here."
                      (declare (type boolean hq))
                      (fill zcostf +z-infinity+)
                      (fill zlen 1)
-                     ;; No fill for zdist/zins/zdict/zsc/znext: an
+                     ;; No fill for zdist/zins/zsc/znext: an
                      ;; unwritten node is exactly ZLEN = 1 (written nodes
                      ;; have copy length >= 2, node 0 has 0), and every
                      ;; reader tests ZLEN first (z-shortcut/z-cache stub
@@ -2156,7 +2157,7 @@ probing and storing here."
                              do (decf index))
                        (setf (aref znext index) -1)
                        (loop while (/= index 0) do
-                         (let ((len (+ (logand (aref zlen index) #x1FFFFFF)
+                         (let ((len (+ (logand (aref zlen index) #xFFFFFF)
                                        (logand (aref zins index) #x7FFFFFF))))
                            (declare (type fixnum len))
                            (decf index len)
@@ -2168,12 +2169,13 @@ probing and storing here."
                        (declare (type fixnum pos off) (type list out))
                        (loop while (/= off -1) do
                          (let* ((q (+ pos off))
-                                (cpy (logand (aref zlen q) #x1FFFFFF))
+                                (zv (aref zlen q))
+                                (cpy (logand zv #xFFFFFF))
                                 (ins (logand (aref zins q) #x7FFFFFF))
                                 (dist (aref zdist q))
-                                (dictp (aref zdict q))
+                                (dictp (if (logbitp 24 zv) 1 0))
                                 (lit-start pos))
-                           (declare (type fixnum q cpy ins dist dictp
+                           (declare (type fixnum q zv cpy ins dist dictp
                                           lit-start))
                            (incf pos ins)
                            (when (plusp dictp) (incf dict-used))
