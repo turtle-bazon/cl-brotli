@@ -3236,8 +3236,10 @@ decisions; used only when W is non-nil."
                  (decf slack cost))
                (flet ((cmd-bits (cc)
                         (unless cmd-1p-single
-                          (b:%wbits-raw-pm w (aref cmd-rc-1p (aref +q0-cmd-map+ cc))
-                                           (aref cmd-ln-1p (aref +q0-cmd-map+ cc)))))
+                          ;; one map lookup, not two
+                          (let ((mc (aref +q0-cmd-map+ cc)))
+                            (b:%wbits-raw-pm w (aref cmd-rc-1p mc)
+                                             (aref cmd-ln-1p mc)))))
                       (dist0-bits ()
                         (unless dist-1p-single
                           (b:%wbits-raw w (aref dist-rc-1p 0)
@@ -3253,6 +3255,10 @@ decisions; used only when W is non-nil."
                                          (b:%wbits-raw-pm
                                           w (aref lit-rc-1p sym)
                                           (aref lit-ln-1p sym))))))))
+                 ;; these three run per command/literal; without this they
+                 ;; stay separate local functions (CMD-BITS 12.0% and LITS
+                 ;; 6.4% of q0 samples as their own profile entries)
+                 (declare (inline cmd-bits dist0-bits lits))
                  (cond
                    ((and (plusp insert) (plusp cpy))
                     (multiple-value-bind (cc e nb) (q0-insert-len insert)

@@ -2608,3 +2608,29 @@ load alone.  Both r154 sweeps agreed on **18/45 with 0 ratio failures**
 (the passing set differed from r152 only by html q7 at the boundary).
 Recorded per-level medians above so future comparisons use them rather
 than single cells.
+
+## Rev 155: inline EMIT-ONE's local flets + single +Q0-CMD-MAP+ lookup (q0 +4-17%)
+
+The q0 profile showed CMD-BITS (12.0%) and LITS (6.4%) as their OWN
+profile entries - i.e. the three local flets inside %LZ77-FRAGMENT's
+EMIT-ONE (CMD-BITS / DIST0-BITS / LITS) were never inlined, so every
+command paid a local-function call (plus argument marshalling) on top of
+the bit writes.  Two changes, both byte-identical:
+
+1. (DECLARE (INLINE CMD-BITS DIST0-BITS LITS)) as the first form of the
+   flet body - the bit-writers themselves (%WBITS-RAW / %WBITS-RAW-PM)
+   were already declaimed inline in bitio.lisp, so the flet boundary was
+   the only thing left preventing the compiler from seeing through it.
+2. CMD-BITS looked up (AREF +Q0-CMD-MAP+ CC) TWICE (once for the code
+   array, once for the length array); now bound once.
+
+Verified: ALL 45 cell sizes byte-identical; 241/241 tests; bt-min 8/8;
+repro-split clean; ratio 0 failures.
+Measured (timing2): html q0 183.82 -> 198.41 MiB/s (+7.9%), json q0
+223.21 -> 260.42 (+16.7%), binary q0 171.23 -> 178.57 (+4.3%).
+q1 is unaffected (its emit path is WRITE-FAST-BLOCK-BODY, not EMIT-ONE).
+
+Also recorded: timing2 itself shows +/-8% run variance on boundary cells
+(source q1 read 0.996x, then 1.075x, then 1.05x on three consecutive
+runs of identical code) - so single-cell timing claims need either the
+controlled A/B (both orders) or the sweep per-level medians.
