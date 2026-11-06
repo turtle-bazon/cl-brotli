@@ -2970,3 +2970,44 @@ bt-min 8/8; repro-split; ratio45 0 failures.
 
 CORRECTION to Rev 161: the r160 sweep was 20/45, not 19 (45 cells -
 25 speed fails = 20; the entry miscounted).  r163 = 18/45.
+
+## Rev 165: hoist hot DEFPARAMETER tables + fragment trawl check reorder
+
+Three byte-identical changes, each from a measurement:
+
+1. LENGTH-CODE GLOBAL HOIST (q2 +2.4%): LENGTH-CODE is inline, but its
+   five table args (+INS-CODE+ etc.) are DEFPARAMETERS - every call
+   re-reads them from global cells (the zopfli path already bound them
+   once; plan-commands and write-trivial did not - 4 calls x 5 globals
+   = 20 re-reads per command in the trivial writer).  Bound once into
+   lexicals in PLAN-COMMANDS, WRITE-TRIVIL-BLOCK-BODY, and (for
+   +LUT0+/+LUT1+, read per literal) in WRITE-COMPRESSED-BLOCK-BODY's
+   per-command binding.
+
+2. FRAGMENT TRAWL REORDER (q1 +3.4%, q0 +0.8%): C checks the copy
+   distance ONCE, after a prefix-match succeeds; we tested the window
+   on EVERY trawl iteration.  Reordered the pure predicates so the
+   window check runs only on a match, and dropped two provably
+   redundant guards: (< c2 p) (the table only ever holds positions <
+   the current p: stores are at the current p or interior q<p, p is
+   monotone, the #xFFFFFFFF sentinel is excluded first) and (>= ld 0)
+   (last-dist was a distance at some earlier p' <= p, monotone p; the
+   (> last-dist 0) guard excludes the -1 initial).  All predicates are
+   pure, so the accept/reject set cannot change.
+
+3. EMIT-ONE CPY-ONLY LITS REMOVED: clause 2 of the cond guarantees
+   insert=0, so (LITS) ran a zero-iteration loop + two tests on 78% of
+   html q0 emits (70,846/90,483).  Writes nothing either way.
+
+Verified: ALL 45 BYTE-IDENTICAL; 241/241; bt-min 8/8; repro-split;
+ratio45 0 failures.  Controlled A/Bs (interleaved):
+  hoist vs r164:        html q2 84.5/86.2 -> 88.7/87.4  (+2.4%)
+  full vs hoist-only:   html q1 150.6/150.6 -> 158.2/156.3 (+4.3%)
+                        binary q1 142.1/143.7 -> 145.4/147.1 (+2.4%)
+                        html q0 +0.8%, html q2 +0.4%
+
+Context: the r164 sweep is 19/45 both gates, 0 gate ratio failures
+(TEXT q7 back in at 1.25x; html q7 boundary at 0.97 - it read 1.01 at
+r160 and r154b read 0.99, so this cell is ±load noise per the Rev 161
+caveat).  Sparse corpora fully recovered by the r164 alloc fix
+(DICT/PATTERN/PERIODIC/UTF8/ZEROS q2 +0.13..0.21 each).

@@ -3418,10 +3418,12 @@ decisions; used only when W is non-nil."
                         (when (>= (aref +q0-cmd-map+ cc) 128)
                           (dist0-bits))))
                      ((plusp cpy)
+                      ;; INSERT is 0 in this clause (clause 1 caught both
+                      ;; positive), so LITS would run a zero-iteration
+                      ;; loop - skipped entirely.
                       (multiple-value-bind (cc e nb) (q0-copy-len cpy)
                         (cmd-bits cc)
                         (when (plusp nb) (wr-raw w acc nbits pos e nb)))
-                      (lits)
                       (multiple-value-bind (cc e nb) (q0-distance dist)
                         (unless dist-1p-single
                           (wr-raw w acc nbits pos (aref dist-rc-1p (- cc 64))
@@ -3471,16 +3473,18 @@ decisions; used only when W is non-nil."
                       ;; C checks the previous distance before the table.
                       (when (> last-dist 0)
                         (let ((ld (- p last-dist)))
-                          (when (and (>= ld 0) (prefix-match p ld))
+                          (when (prefix-match p ld)
                             (setf (aref table h) p
                                   cand ld)
                             (return-from trawl nil))))
                       (let ((c2 (aref table h)))
                         (setf (aref table h) p)
+                        ;; C checks the distance only once, after a
+                        ;; prefix-match succeeds; the two guards dropped
+                        ;; here are invariants of the table (see GAP 165).
                         (when (and (/= c2 #xFFFFFFFF)
-                                   (< c2 p)
-                                   (<= (- p c2) window)
-                                   (prefix-match p c2))
+                                   (prefix-match p c2)
+                                   (<= (- p c2) window))
                           (setf cand c2)
                           (return-from trawl nil))))))
                 ;; Step 2: emit the found match plus the pending literals.
@@ -3602,7 +3606,14 @@ compression ratio for encoder throughput."
   (let* ((litf (make-array 256 :element-type 'fixnum :initial-element 0))
          (cmdf (make-array 704 :element-type 'fixnum :initial-element 0))
          (distf (make-array 64 :element-type 'fixnum :initial-element 0))
-         (probe-rb (copy-seq rb)))
+         (probe-rb (copy-seq rb))
+         ;; LENGTH-CODE's five table args are DEFPARAMETERS; bound once
+         ;; (4 calls per command across the two passes re-read 20 globals
+         ;; otherwise).
+         (ins-c +ins-code+) (ins-x +ins-xval+) (ins-xb +ins-xbits+)
+         (ins-b +ins-base+) (ins-bt +ins-bits+)
+         (cpy-c +cpy-code+) (cpy-x +cpy-xval+) (cpy-xb +cpy-xbits+)
+         (cpy-b +cpy-base+) (cpy-bt +cpy-bits+))
     (declare (type (simple-array fixnum (256)) litf)
              (type (simple-array fixnum (*)) cmdf distf probe-rb))
     ;; Pass 1: histograms only.  CMDS is a flat 5-fixnum vector; DICTP is 0/1.
@@ -3615,11 +3626,11 @@ compression ratio for encoder throughput."
         (loop for i from lit-start below (+ lit-start ins)
               do (incf (aref litf (aref data i))))
         (multiple-value-bind (icode ixv ixb)
-            (length-code ins +ins-code+ +ins-xval+ +ins-xbits+ +ins-base+ +ins-bits+)
+            (length-code ins ins-c ins-x ins-xb ins-b ins-bt)
           (declare (ignore ixv ixb))
           (multiple-value-bind (ccode cxv cxb)
               (if (plusp cpy)
-                  (length-code cpy +cpy-code+ +cpy-xval+ +cpy-xbits+ +cpy-base+ +cpy-bits+)
+                  (length-code cpy cpy-c cpy-x cpy-xb cpy-b cpy-bt)
                   (values 0 0 0))
             (declare (ignore cxv cxb))
             (let* ((ring-pos (aref probe-rb 4))
@@ -3687,10 +3698,10 @@ compression ratio for encoder throughput."
               (b:w-ensure w (+ slack cost)))
             (decf slack cost))
           (multiple-value-bind (icode ixv ixb)
-              (length-code ins +ins-code+ +ins-xval+ +ins-xbits+ +ins-base+ +ins-bits+)
+              (length-code ins ins-c ins-x ins-xb ins-b ins-bt)
             (multiple-value-bind (ccode cxv cxb)
                 (if (plusp cpy)
-                    (length-code cpy +cpy-code+ +cpy-xval+ +cpy-xbits+ +cpy-base+ +cpy-bits+)
+                    (length-code cpy cpy-c cpy-x cpy-xb cpy-b cpy-bt)
                     (values 0 0 0))
               (let* ((ring-pos (aref rb 4))
                      (repeat (and (plusp cpy) (zerop dictp)
@@ -3869,7 +3880,15 @@ per command."
          (litfreq (make-array (* lit-k 256) :element-type 'fixnum
                                             :initial-element 0))
          (cmdfreq (make-array 704 :element-type 'fixnum :initial-element 0))
-         (distfreq (make-array 64 :element-type 'fixnum :initial-element 0)))
+         (distfreq (make-array 64 :element-type 'fixnum :initial-element 0))
+         ;; LENGTH-CODE is inline, but its five table args are
+         ;; DEFPARAMETERS: every call re-reads them from global cells.
+         ;; Bound once here (the zopfli path already does this).
+         (ins-c +ins-code+) (ins-x +ins-xval+) (ins-xb +ins-xbits+)
+         (ins-b +ins-base+) (ins-bt +ins-bits+)
+         (cpy-c +cpy-code+) (cpy-x +cpy-xval+) (cpy-xb +cpy-xbits+)
+         (cpy-b +cpy-base+) (cpy-bt +cpy-bits+)
+         (lut0 +lut0+) (lut1 +lut1+))
     (declare (type fixnum ri)
              (type (simple-array (unsigned-byte 8) (*)) data)
              (type (simple-array fixnum (*)) recs litfreq cmdfreq distfreq
@@ -3891,12 +3910,12 @@ per command."
              (ring-pos (aref rb 4)))
         (declare (type fixnum ins lit-start cpy dist dictp ring-pos))
         (multiple-value-bind (icode ixv ixb)
-            (length-code ins +ins-code+ +ins-xval+ +ins-xbits+ +ins-base+ +ins-bits+)
+            (length-code ins ins-c ins-x ins-xb ins-b ins-bt)
           (declare (type fixnum icode ixv ixb))
           (let ((copyp (plusp cpy)))
             (multiple-value-bind (ccode cxv cxb)
                 (if copyp
-                    (length-code cpy +cpy-code+ +cpy-xval+ +cpy-xbits+ +cpy-base+ +cpy-bits+)
+                    (length-code cpy cpy-c cpy-x cpy-xb cpy-b cpy-bt)
                     (values 0 0 0))
               (declare (type fixnum ccode cxv cxb))
               (let* ((repeat (and copyp (zerop dictp)
@@ -3916,8 +3935,8 @@ per command."
                                     (p1 (if (plusp i) (aref data (1- i)) 0))
                                     (p2 (if (> i 1) (aref data (- i 2)) 0))
                                     (cid (aref lit-cmap
-                                               (logior (aref +lut0+ p1)
-                                                       (aref +lut1+ p2)))))
+                                               (logior (aref lut0 p1)
+                                                       (aref lut1 p2)))))
                                (declare (type fixnum sym p1 p2 cid))
                                (incf (aref litfreq (+ (* cid 256) sym))))))
                 (when copyp
@@ -4556,7 +4575,8 @@ finds no split the header degrades to the single-type form byte-for-byte."
                           (setf itype nt ileft nl)))
                       (decf ileft))
                     (let ((ins (aref recs b))
-                          (ls (aref recs (+ b 1))))
+                          (ls (aref recs (+ b 1)))
+                          (lut0 +lut0+) (lut1 +lut1+))
                       (declare (type fixnum ins ls))
                       ;; One capacity check covers every bit this command can
                       ;; emit: at most ~13 bytes of command/distance overhead
@@ -4586,8 +4606,8 @@ finds no split the header degrades to the single-type form byte-for-byte."
                                           (p2 (if (> i 1)
                                                   (aref data (- i 2)) 0))
                                           (cid (aref lit-cmap
-                                                     (logior (aref +lut0+ p1)
-                                                             (aref +lut1+ p2)))))
+                                                     (logior (aref lut0 p1)
+                                                             (aref lut1 p2)))))
                                      (declare (type fixnum sym p1 p2 cid))
                                      (unless (aref lit-sng cid)
                                        (b:%wbits-raw
