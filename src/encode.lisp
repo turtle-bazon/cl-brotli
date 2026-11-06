@@ -1663,6 +1663,25 @@ The final insert-only trailing command is not part of C's command stream
         (setf (aref prefix (1+ i))
               (+ (aref prefix i) (aref ct (aref data i))))))
     model))
+(defun %chain-store-range (sap head prev start end shift hmask chained)
+  "C StoreRange for %LZ77's hash chains (H5/H6-like): insert START..END.
+Its own function so the per-position loop gets the registers; inside the
+matcher's frame it reloaded its operands from stack slots."
+  (declare (type ptr sap)
+           (type (simple-array (unsigned-byte 32) (*)) head prev)
+           (type fixnum start end hmask)
+           (type (integer -63 -1) shift)
+           (type boolean chained)
+           (optimize (speed 3) (safety 0)))
+  (if chained
+      (loop for q of-type fixnum from start below end do
+        (let* ((h (%hash4-sap sap q shift hmask)) (old (aref head h)))
+          (declare (type fixnum h old))
+          (setf (aref head h) q (aref prev q) old)))
+      (loop for q of-type fixnum from start below end do
+        (setf (aref head (%hash4-sap sap q shift hmask)) q))))
+(declaim (notinline %chain-store-range))
+
 (defun %lz77 (data sap dictv dictsap window use-dict dict-limit base-pos
               max-chain lazy skip-match insert-interior
               &optional (score-p nil) (checks 1)
@@ -2936,14 +2955,10 @@ score rather than length.  Returns (values len dist score)."
                                               from range-start below range-end
                                               do (bt-do q nil)))
                                        ((and sap (<= (+ range-end 8) n))
-                                        (loop for q of-type fixnum
-                                              from range-start below range-end
-                                              do (let* ((h (%hash4-sap sap q shift hmask))
-                                                        (old (aref head h)))
-                                                   (declare (type fixnum h old))
-                                                   (setf (aref head h) q)
-                                                   (when chained
-                                                     (setf (aref prev q) old)))))
+                                        ;; out of line: in this function the
+                                        ;; loop had no free registers
+                                        (%chain-store-range sap head prev range-start
+                                                            range-end shift hmask chained))
                                        (t
                                         (loop for q of-type fixnum
                                               from range-start below range-end
@@ -3131,13 +3146,39 @@ compressor like ACQUIRE-HEADPREV."
 ;; HASH_LEN are compile-time constants in C, and as runtime arguments here
 ;; every store reloaded them from stack slots and branched on them.
 (defmacro define-quick-matcher (name bits sweep hash-len)
-  `(defun ,name (data sap window)
-     (declare (type (simple-array (unsigned-byte 8) (*)) data)
-              (type ptr sap)
-              (type fixnum window)
-              (optimize (speed 3) (safety 0)))
-     (symbol-macrolet ((bits ,bits) (sweep ,sweep) (hash-len ,hash-len))
-       (%lz77-quick-body))))
+  (let ((sr (intern (format nil "~A-STORE-RANGE" (symbol-name name)))))
+    `(progn
+       ;; C StoreRange as its own function: inside the matcher it ran out of
+       ;; registers (SAP and BUCKETS reloaded from the stack per position,
+       ;; 13 instructions, ~half of q2's matcher time); here the loop has
+       ;; them all.  One call per match.
+       (defun ,sr (sap buckets start end)
+         (declare (type ptr sap)
+                  (type (simple-array (unsigned-byte 32) (*)) buckets)
+                  (type fixnum start end)
+                  (optimize (speed 3) (safety 0)))
+         (loop for i of-type fixnum from start below end do
+           (let* ((w (ptr-u64 sap i))
+                  (x ,(if (= hash-len 5)
+                          '(logand (ash w 24) #xFFFFFFFFFFFFFFFF)
+                          '(logand (ash w 8) #xFFFFFFFFFFFFFFFF)))
+                  (key (ash (logand (* x #x1FE35A7BD3579BD3) #xFFFFFFFFFFFFFFFF)
+                            ,(- bits 64))))
+             (declare (type (unsigned-byte 64) w x) (type fixnum key))
+             (setf (aref buckets ,(if (= sweep 1)
+                                      'key
+                                      `(+ key (logand (ash i -3) ,(1- sweep)))))
+                   i))))
+       (declaim (notinline ,sr))
+       (defun ,name (data sap window)
+         (declare (type (simple-array (unsigned-byte 8) (*)) data)
+                  (type ptr sap)
+                  (type fixnum window)
+                  (optimize (speed 3) (safety 0)))
+         (symbol-macrolet ((bits ,bits) (sweep ,sweep) (hash-len ,hash-len))
+           (macrolet ((%store-range (sap buckets start end)
+                        (list ',sr sap buckets start end)))
+             (%lz77-quick-body)))))))
 
 (defmacro %lz77-quick-body ()
   ;; the body of every DEFINE-QUICK-MATCHER instance; BITS, SWEEP and
@@ -3299,7 +3340,7 @@ compressor like ACQUIRE-HEADPREV."
                   (declare (type fixnum rs re))
                   (when (< dist (ash len -2))
                     (setf rs (min re (max rs (- (+ pos len) (ash (the (integer 0 #.(ash 1 40)) dist) 2))))))
-                  (loop for i of-type fixnum from rs below re do (store i)))
+                  (when (< rs re) (%store-range sap buckets rs re)))
                 (incf pos len))
               (progn
                 (incf insert) (incf pos)
@@ -3320,10 +3361,224 @@ compressor like ACQUIRE-HEADPREV."
       ;; (values CMDS USED): only CMDS[0..USED) is this input's commands.
       (values cmds (* 5 ncmd)))))
 
+;; C's H6 (hash_longest_match64_inc.h) for q5-q9 on >= 1 MiB inputs with
+;; lgwin >= 19 (ChooseHasher): 2^15 keys, a ring of 2^BLOCK-BITS candidates
+;; per key (BLOCK-BITS = quality - 1), the 5-byte 64-bit hash, NDIST distance
+;; cache candidates (4 / 10 / 16).  Same driver as DEFINE-QUICK-MATCHER
+;; (BrotliCreateBackwardReferences) with q >= 5's lazy search.  No static
+;; dictionary.
+(defmacro define-h6-matcher (name block-bits ndist)
+  (let ((sr (intern (format nil "~A-STORE-RANGE" (symbol-name name))))
+        (bsize (ash 1 block-bits)) (bmask (1- (ash 1 block-bits))))
+    `(progn
+       (defun ,sr (sap buckets num start end)
+         (declare (type ptr sap)
+                  (type (simple-array (unsigned-byte 32) (*)) buckets num)
+                  (type fixnum start end)
+                  (optimize (speed 3) (safety 0)))
+         (loop for i of-type fixnum from start below end do
+           (let* ((key (ash (logand (* (logand (ptr-u64 sap i) #xFFFFFFFFFF)
+                                       #x1FE35A7BD3579BD3)
+                                    #xFFFFFFFFFFFFFFFF)
+                            -49))
+                  (nk (aref num key)))
+             (declare (type fixnum key nk))
+             (setf (aref buckets (+ (ash key ,block-bits) (logand nk ,bmask))) i
+                   (aref num key) (logand (1+ nk) #xFFFF)))))
+       (declaim (notinline ,sr))
+       (defun ,name (data sap window)
+         (declare (type (simple-array (unsigned-byte 8) (*)) data)
+                  (type ptr sap)
+                  (type fixnum window)
+                  (optimize (speed 3) (safety 0)))
+         (let* ((n (length data))
+                (buckets (pooled-u32 ,(intern (format nil "H6-BUCKETS-~D" block-bits) :keyword)
+                                     ,(ash 1 (+ 15 block-bits)) nil))
+                (num (pooled-u32 :h6-num 32768 0))
+                (cmds (let ((pool *scratch-pool*) (want (* 5 (max 4096 (ash n -5)))))
+                        (or (and pool
+                                 (let ((v (gethash :quick-cmds pool)))
+                                   (and v (>= (length (the (simple-array fixnum (*)) v)) want) v)))
+                            (let ((v (make-array want :element-type 'fixnum)))
+                              (when pool (setf (gethash :quick-cmds pool) v))
+                              v))))
+                (ncmd 0)
+                (dc (make-array 16 :element-type 'fixnum :initial-element 0))
+                (store-end (if (>= n 8) (- n 7) 0))
+                (pos 0) (insert 0)
+                (rh-window ,(if (< block-bits 8) 64 512))  ; q < 9 : 64
+                (apply-rh 0)
+                (kmin 2020))
+           (declare (type (simple-array (unsigned-byte 32) (*)) buckets num)
+                    (type (simple-array fixnum (*)) cmds)
+                    (type (simple-array fixnum (16)) dc)
+                    (type (integer 0 #.(ash 1 40)) ncmd)
+                    (type fixnum store-end pos insert rh-window apply-rh kmin))
+           (setf (aref dc 0) 4 (aref dc 1) 11 (aref dc 2) 15 (aref dc 3) 16
+                 apply-rh rh-window)
+           (labels ((hash (i)
+                      (declare (type fixnum i))
+                      (the fixnum
+                           (ash (logand (* (logand (ptr-u64 sap i) #xFFFFFFFFFF)
+                                           #x1FE35A7BD3579BD3)
+                                        #xFFFFFFFFFFFFFFFF)
+                                -49)))
+                    (store (i)
+                      (declare (type fixnum i))
+                      (let* ((key (hash i)) (nk (aref num key)))
+                        (declare (type fixnum key nk))
+                        (setf (aref buckets (+ (ash key ,block-bits) (logand nk ,bmask))) i
+                              (aref num key) (logand (1+ nk) #xFFFF))))
+                    (prepare-dc ()
+                      ,@(when (> ndist 4)
+                          `((let ((d0 (aref dc 0)))
+                              (declare (type fixnum d0))
+                              (setf (aref dc 4) (- d0 1) (aref dc 5) (+ d0 1)
+                                    (aref dc 6) (- d0 2) (aref dc 7) (+ d0 2)
+                                    (aref dc 8) (- d0 3) (aref dc 9) (+ d0 3)))))
+                      ,@(when (> ndist 10)
+                          `((let ((d1 (aref dc 1)))
+                              (declare (type fixnum d1))
+                              (setf (aref dc 10) (- d1 1) (aref dc 11) (+ d1 1)
+                                    (aref dc 12) (- d1 2) (aref dc 13) (+ d1 2)
+                                    (aref dc 14) (- d1 3) (aref dc 15) (+ d1 3)))))
+                      nil)
+                    (push-cmd (ins ls cpy dist)
+                      (declare (type fixnum ins ls cpy dist))
+                      (when (>= (* 5 (1+ ncmd)) (length cmds))
+                        (let ((new (make-array (* 2 (length cmds)) :element-type 'fixnum)))
+                          (replace new cmds)
+                          (when *scratch-pool* (setf (gethash :quick-cmds *scratch-pool*) new))
+                          (setf cmds new)))
+                      (let ((b (* 5 ncmd)))
+                        (declare (type fixnum b))
+                        (setf (aref cmds b) ins (aref cmds (+ b 1)) ls
+                              (aref cmds (+ b 2)) cpy (aref cmds (+ b 3)) dist
+                              (aref cmds (+ b 4)) 0))
+                      (incf ncmd))
+                    (find-longest (cur)
+                      ;; C FindLongestMatch (H6): (values len distance score)
+                      (declare (type fixnum cur))
+                      (let ((maxb (min cur window))
+                            (best-len 0) (best-score kmin)
+                            (out-len 0) (out-dist 0) (out-score kmin))
+                        (declare (type fixnum maxb best-len best-score out-len out-dist out-score))
+                        ;; distance cache first
+                        (loop for i of-type fixnum below ,ndist do
+                          (let* ((backward (aref dc i))
+                                 (prev (- cur backward)))
+                            (declare (type fixnum backward prev))
+                            (when (and (> backward 0) (<= backward maxb)
+                                       (< (+ cur best-len) n)
+                                       (= (aref data (+ cur best-len))
+                                          (aref data (+ prev best-len))))
+                              (let ((len (%match-len-sap sap prev cur n)))
+                                (declare (type fixnum len))   ; not narrower (VOP)
+                                (when (or (>= len 3) (and (= len 2) (< i 2)))
+                                  (let ((score (+ 1935 (* 135 (the (integer 0 #.(ash 1 40)) len)))))
+                                    (declare (type fixnum score))
+                                    (when (< best-score score)
+                                      (unless (zerop i)
+                                        (decf score (+ 39 (logand (ash #x1CA10 (- (logand i #xE))) #xE))))
+                                      (when (< best-score score)
+                                        (setf best-score score best-len len
+                                              out-len len out-dist backward out-score score)))))))))
+                        ;; then the bucket ring, newest first
+                        (let* ((key (hash cur))
+                               (base (ash key ,block-bits))
+                               (nk (aref num key))
+                               (down (if (> nk ,bsize) (- nk ,bsize) 0))
+                               (first4 (ptr-u32 sap cur))
+                               (i nk))
+                          (declare (type fixnum key base nk down i)
+                                   (type (unsigned-byte 32) first4))
+                          (loop while (> i down) do
+                            (decf i)
+                            (let* ((prev (aref buckets (+ base (logand i ,bmask))))
+                                   (backward (- cur prev)))
+                              (declare (type fixnum prev backward))
+                              ;; (also stops on a stale entry from an earlier
+                              ;; input: the pooled buckets are not cleared)
+                              (when (or (<= backward 0) (> backward maxb)) (return))
+                              (when (and (< (+ cur best-len) n)
+                                         (= (aref data (+ cur best-len))
+                                            (aref data (+ prev best-len)))
+                                         (= first4 (ptr-u32 sap prev)))
+                                (let ((len (%match-len-sap sap prev cur n)))
+                                  (declare (type fixnum len))
+                                  (let ((score (- (+ 1920 (* 135 (the (integer 0 #.(ash 1 40)) len)))
+                                                  (* 30 (1- (integer-length backward))))))
+                                    (declare (type fixnum score))
+                                    (when (< best-score score)
+                                      (setf best-score score best-len len
+                                            out-len len out-dist backward out-score score)))))))
+                          (setf (aref buckets (+ base (logand nk ,bmask))) cur
+                                (aref num key) (logand (1+ nk) #xFFFF)))
+                        (values out-len out-dist out-score))))
+             (declare (inline hash store prepare-dc find-longest))
+             (prepare-dc)
+             (loop while (< (+ pos 8) n) do
+               (multiple-value-bind (len dist score) (find-longest pos)
+                 (declare (type fixnum len dist score))
+                 (if (> score kmin)
+                     (let ((delayed 0))
+                       (declare (type fixnum delayed))
+                       (loop
+                         (multiple-value-bind (l2 d2 s2) (find-longest (1+ pos))
+                           (declare (type fixnum l2 d2 s2))
+                           (if (>= s2 (+ score 175))
+                               (progn
+                                 (incf pos) (incf insert)
+                                 (setf len l2 dist d2 score s2)
+                                 (unless (and (< (incf delayed) 4) (< (+ pos 8) n))
+                                   (return)))
+                               (return))))
+                       (setf apply-rh (+ pos (* 2 len) rh-window))
+                       (when (/= dist (aref dc 0))
+                         (setf (aref dc 3) (aref dc 2) (aref dc 2) (aref dc 1)
+                               (aref dc 1) (aref dc 0) (aref dc 0) dist)
+                         (prepare-dc))
+                       (push-cmd insert (- pos insert) len dist)
+                       (setf insert 0)
+                       (let ((rs (+ pos 2)) (re (min (+ pos len) store-end)))
+                         (declare (type fixnum rs re))
+                         (when (< dist (ash len -2))
+                           (setf rs (min re (max rs (- (+ pos len) (ash (the (integer 0 #.(ash 1 40)) dist) 2))))))
+                         (when (< rs re) (,sr sap buckets num rs re)))
+                       (incf pos len))
+                     (progn
+                       (incf insert) (incf pos)
+                       (when (> pos apply-rh)
+                         (if (> pos (+ apply-rh (* 4 rh-window)))
+                             (let ((jump (min (+ pos 16) (- n 7))))
+                               (declare (type fixnum jump))
+                               (loop while (< pos jump) do
+                                 (store pos) (incf insert 4) (incf pos 4)))
+                             (let ((jump (min (+ pos 8) (- n 7))))
+                               (declare (type fixnum jump))
+                               (loop while (< pos jump) do
+                                 (store pos) (incf insert 2) (incf pos 2)))))))))
+             (incf insert (- n pos))
+             (when (plusp insert)
+               (push-cmd insert (- n insert) 0 0))
+             (values cmds (* 5 ncmd))))))))
+
+(define-h6-matcher %lz77-h6-q5 4 4)
+(define-h6-matcher %lz77-h6-q6 5 4)
+(define-h6-matcher %lz77-h6-q7 6 10)
+(define-h6-matcher %lz77-h6-q8 7 10)
+(define-h6-matcher %lz77-h6-q9 8 16)
+
 (define-quick-matcher %lz77-quick-h2 16 1 5)
 (define-quick-matcher %lz77-quick-h3 16 2 5)
 (define-quick-matcher %lz77-quick-h4 17 4 5)
 (define-quick-matcher %lz77-quick-h54 20 4 7)
+
+(defun %lz77-h6 (data sap window quality)
+  (case quality
+    (5 (%lz77-h6-q5 data sap window)) (6 (%lz77-h6-q6 data sap window))
+    (7 (%lz77-h6-q7 data sap window)) (8 (%lz77-h6-q8 data sap window))
+    (t (%lz77-h6-q9 data sap window))))
 
 (defun %lz77-quick (data sap window bits sweep hash-len)
   "C BrotliCreateBackwardReferences with HashLongestMatchQuickly
@@ -4045,6 +4300,8 @@ compression ratio for encoder throughput."
   (let ((dictv (and use-dict (load-dict))))
     (with-ptrs ((sap data) (dictsap dictv))
       (cond
+        ((and quick (eq (first quick) :h6))
+         (%lz77-h6 data sap window (second quick)))
         (quick
          (%lz77-quick data sap window (first quick) (second quick) (third quick)))
         (fast-fragment
@@ -4964,6 +5221,7 @@ of the decoder's READ-BLK-HEADER - for a category with >= 2 block types."
                                       (score-p nil) (checks 1)
                                       (quality 5)
                                       (bt nil)
+                                      (quick nil)
                                       cmds)
   "Write the NBLTYPES/trees/commands part of a compressed meta-block.  The
 MLEN header must already have been written.  RB is the stream-wide distance
@@ -4981,11 +5239,15 @@ finds no split the header degrades to the single-type form byte-for-byte."
         (plan-commands
          data
          (or cmds
-             (lz77 data window :use-dict use-dict :dict-limit dict-limit
-                            :base-pos base-pos :max-chain max-chain :lazy lazy
-                            :skip-match skip-match
-                            :insert-interior insert-interior
-                            :score-p score-p :checks checks :bt bt))
+             (multiple-value-bind (v used)
+                 (lz77 data window :use-dict use-dict :dict-limit dict-limit
+                                   :base-pos base-pos :max-chain max-chain :lazy lazy
+                                   :skip-match skip-match
+                                   :insert-interior insert-interior
+                                   :score-p score-p :checks checks :bt bt
+                                   :quick quick)
+               ;; the quick/H6 matchers return a pooled, untrimmed vector
+               (if (and used (/= used (length v))) (subseq v 0 used) v)))
          rb :short-dist short-dist :quality quality)
     (declare (type (simple-array fixnum (*)) recs litf cmdf distf)
              (type fixnum ncmd lit-k)
@@ -5436,7 +5698,10 @@ meta-block."
          ;; C ChooseHasher for q2-q4: H2, H3, then H4 below 1 MiB / H54.
          (quick (case quick
                   (2 '(16 1 5)) (3 '(16 2 5))
-                  (4 (if (>= n #.(ash 1 20)) '(20 4 7) '(17 4 5))))))
+                  (4 (if (>= n #.(ash 1 20)) '(20 4 7) '(17 4 5)))
+                  ;; H6's tables are 2-32 MiB: small inputs keep the chain
+                  ;; matcher (C also picks smaller hashers for them)
+                  ((5 6 7 8 9) (and (>= n 65536) (list :h6 quick))))))
     (write-wbits w wbits)
     (cond
       ((zerop n)
@@ -5476,7 +5741,8 @@ meta-block."
                                        :skip-match skip-match
                                        :insert-interior insert-interior
                                        :score-p score-p :checks checks
-                                       :quality quality :bt bt))))
+                                       :quality quality :bt bt
+                                       :quick quick))))
       (t
        (let* ((mb-chain (if fast-fragment 32 max-chain))
               (mb-lazy (if fast-fragment t lazy))
@@ -5593,7 +5859,11 @@ dictionary at q10/q11."
     ;; -1.0% at q9 (json q9 even grew 477 B), outside the recorded 5-15%
     ;; envelope at levels whose sizes are already inside the cap.
     ;; See GAP-ANALYSIS for the full per-level table.
-    (5 '(:max-chain 6 :lazy t :use-dict nil :short-dist t :quality 5
+    ;; q5: C's own matcher (H6, see DEFINE-H6-MATCHER) - C's ratio (html
+    ;; 0.998 of C's size vs 1.025 for the chain) at equal or better speed
+    ;; (libc 0.38 -> 0.56x of C).  q6-q9 keep the chain matcher: there it is
+    ;; already faster than C (1.04-2.2x) at a similar ratio, H6 is not.
+    (5 '(:quick 5 :max-chain 6 :lazy t :use-dict nil :short-dist t :quality 5
           :score-p t :checks 4))
     ;; q6 was under-chained relative to C's bucket (block_bits 5 = 32
     ;; entries vs our 8): html q6 measured 1.121 vs C, the only cap

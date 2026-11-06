@@ -44,6 +44,19 @@
                (aref +reverse-byte+ (logand (ash value -8) #xff)))
        (- bits 16)))
 
+(defun make-single-huff (sym n)
+  "The one-symbol code for SYM in an N-symbol alphabet: a real table of
+zero-length entries (8-bit root for literal-sized alphabets, like every
+literal tree), so the readers need no single-tree branch.  COUNT stays NIL,
+which READ-HUFF uses to tell this case apart near the end of the input."
+  (declare (type fixnum sym n))
+  (let ((tb (if (<= n 256) +lit-root-bits+ 1)))
+    (make-huff :single sym
+               :table (make-array (ash 1 tb) :element-type '(unsigned-byte 16)
+                                             :initial-element (ash sym 4))
+               :table-bits tb :mask (1- (ash 1 tb))
+               :subtables #())))
+
 (defun build-huff (lengths n)
   "Canonical Huffman from code LENGTHS[0:n-1] (0 = absent), Mark-Adler style.
 Builds a 10-bit primary table plus one 32-entry secondary table per long
@@ -68,10 +81,17 @@ reject anything else), so every table entry is written."
           (setf last s)
           (when (> l maxlen) (setf maxlen l)))))
     (when (<= nonzero 1)
-      (return-from build-huff (make-huff :single last)))
-    (let* ((table-bits (min (if (<= n 256) +lit-root-bits+ +other-root-bits+)
-                            maxlen))
-           (sub-bits (- maxlen table-bits))
+      ;; A real table of zero-length entries (C does the same): readers need
+      ;; no single-tree branch.  COUNT stays NIL, which READ-HUFF uses to
+      ;; tell this case apart near the end of the input.
+      (return-from build-huff (make-single-huff last n)))
+    ;; Literal trees (n <= 256) always get exactly an 8-bit root - shorter
+    ;; codes are replicated - so the literal loops can use constant mask
+    ;; and width.
+    (let* ((table-bits (if (<= n 256)
+                           +lit-root-bits+
+                           (min +other-root-bits+ maxlen)))
+           (sub-bits (max 0 (- maxlen table-bits)))
            (sub-size (ash 1 sub-bits))
            (tsize (ash 1 table-bits))
            (table (make-array tsize :element-type '(unsigned-byte 16)
@@ -123,7 +143,10 @@ reject anything else), so every table entry is written."
                                               :initial-element 0)))
                                     (setf (svref subtables nsub) new)
                                     (incf nsub)
-                                    (setf (aref table rev-prefix) (ash nsub 4))
+                                    ;; marker: length field 15 (root
+                                    ;; lengths are <= 10, so 15 is free)
+                                    (setf (aref table rev-prefix)
+                                          (logior (ash nsub 4) 15))
                                     new)
                                   (svref subtables (1- (ash marker -4)))))
                          (entry (logior (ash sym 4) rem))
@@ -195,7 +218,9 @@ reject anything else), so every table entry is written."
 the reservoir or signals end-of-input, so the old BITS-AVAILABLE guards are
 redundant on the fast path."
   (declare (type huff h))
-  (unless (huff-table h) (return-from read-huff (huff-single h)))
+  ;; single-symbol trees (no COUNT; their table is all zero-length
+  ;; entries) need no input at all - also at the very end of the stream
+  (unless (huff-count h) (return-from read-huff (huff-single h)))
   (let ((table (huff-table h)) (table-bits (huff-table-bits h)))
     (declare (type (simple-array (unsigned-byte 16) (*)) table)
              (type fixnum table-bits))
@@ -211,12 +236,12 @@ redundant on the fast path."
                               (logand (b:brd-acc r) (huff-mask h))))))
           (declare (type fixnum entry))
           (cond
-            ((plusp (logand entry 15))
+            ((/= (logand entry 15) 15)            ; direct hit
              (let ((len (logand entry 15)))
                (declare (type fixnum len))
                (consume-bits r len)
                (ash entry -4)))
-            ((plusp entry)
+            (t                                    ; length 15: subtable marker
              (if (or (>= (b:brd-nbits r) (+ table-bits (huff-sub-bits h)))
                      (>= (b:bits-available r) (+ table-bits (huff-sub-bits h))))
                  (progn
@@ -237,8 +262,7 @@ redundant on the fast path."
                            (consume-bits r rem)
                            (ash entry2 -4))
                          (berr "invalid prefix code"))))
-                 (read-huff-slow r h)))
-            (t (read-huff-slow r h))))
+                 (read-huff-slow r h)))))
         (read-huff-slow r h))))
 
 ;; Straight-line groups of reads (command symbol + its two extras; distance
@@ -345,10 +369,10 @@ refill loop and a +WIDE-MASKS+ symbol-value fetch to every call site)."
                              (declare (type (integer 1 10) tbits)
                                       (type (unsigned-byte 16) entry)
                                       (type (integer 0 15) len))
-                             (when (plusp len)
+                             (when (/= len 15)            ; direct hit
                                (setf ,',acc (ash ,',acc (- len)) ,',nb (- ,',nb len))
                                (return-from lsym (ash entry -4)))
-                             (when (plusp entry)
+                             (progn                       ; subtable marker
                                (let* ((sub (svref (the simple-vector (huff-subtables ,tr))
                                                   (1- (ash entry -4))))
                                       (e2 (aref (the (simple-array (unsigned-byte 16) (*)) sub)
@@ -383,12 +407,11 @@ refill loop and a +WIDE-MASKS+ symbol-value fetch to every call site)."
                                  (declare (type (unsigned-byte 16) entry)
                                           (type (integer 0 15) len))
                                  (cond
-                                   ((plusp len)
+                                   ((/= len 15)                 ; direct hit
                                     (setf ,',acc (ash ,',acc (- len))
                                           ,',nb (- ,',nb len))
                                     (return-from lsym (ash entry -4)))
-                                   ((and (plusp entry)
-                                         (>= ,',nb (+ tbits (huff-sub-bits ,tr))))
+                                   ((>= ,',nb (+ tbits (huff-sub-bits ,tr)))  ; marker
                                     (let* ((sub (svref (the simple-vector (huff-subtables ,tr))
                                                        (1- (ash entry -4))))
                                            (e2 (aref (the (simple-array (unsigned-byte 16) (*)) sub)
@@ -489,7 +512,7 @@ refill loop and a +WIDE-MASKS+ symbol-value fetch to every call site)."
                   (cl-brotli.lisp::berr "duplicate symbol in simple prefix code")))
               (setf (aref syms i) v)))
           (if (= nsym 1)
-              (make-huff :single (aref syms 0))
+              (make-single-huff (aref syms 0) alphabet-size)
               (let ((lengths (make-array alphabet-size
                                   :element-type '(unsigned-byte 8)
                                   :initial-element 0)))

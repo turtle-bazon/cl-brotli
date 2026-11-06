@@ -415,137 +415,6 @@ caller has already validated DISTANCE."
     (replace (outbuf-data out) v :start1 fp)
     (setf (outbuf-pos out) (+ fp n))))
 
-
-(defun %decode-lit-run (r out pos count tree)
-  "Decode COUNT literals from R into OUT at POS using the single literal
-TREE, keeping the bit reservoir, bit count, read position, and output
-position in locals for the whole run.  The caller has reserved POS+COUNT
-bytes of capacity.  Returns the position after the last literal."
-  (declare (type b:brd r)
-           (type (simple-array (unsigned-byte 8) (*)) out)
-           (type fixnum pos count)
-           (type huff tree)
-           (optimize (speed 3) (safety 0)))
-  (let ((table (huff-table tree)) (mask (huff-mask tree))
-        (tbits (huff-table-bits tree))
-        (sbits (huff-sub-bits tree)) (smask (huff-sub-mask tree))
-        (subs (huff-subtables tree))
-        (acc (b:brd-acc r)) (nbits (b:brd-nbits r)) (p (b:brd-pos r))
-        #+cl-brotli-sap (sap (b:brd-sap r)) #-cl-brotli-sap (sap nil)
-        (end (b:brd-end r)))
-    (declare (type (or null (simple-array (unsigned-byte 16) (*))) table)
-             (type fixnum mask tbits acc nbits p end smask)
-             (type (integer 0 15) sbits)
-             (type (or null simple-vector) subs)
-             #+cl-brotli-sap (type (or null sb-sys:system-area-pointer) sap)
-             #-cl-brotli-sap (type null sap)
-             )
-    (when (null table)
-      ;; Single-symbol tree: every literal is the same byte.
-      (let ((sym (huff-single tree)))
-        (declare (type fixnum sym))
-        (dotimes (k count) (setf (aref out pos) sym) (incf pos))
-        (setf (b:brd-acc r) acc (b:brd-nbits r) nbits (b:brd-pos r) p)
-        (return-from %decode-lit-run pos)))
-    (let ((tbl (the (simple-array (unsigned-byte 16) (*)) table))
-          (subvec (the simple-vector (or subs #()))))
-      (declare (type (simple-array (unsigned-byte 16) (*)) tbl)
-               (type simple-vector subvec))
-    (macrolet ((refill (need)
-                 `(unless (>= nbits ,need)
-                    #+cl-brotli-sap
-                    (when (and sap (<= (+ p 8) end))
-                      (let* ((bytes (min 7 (ash (- 59 nbits) -3)))
-                             (m (aref b::+wide-masks+ (* 8 bytes)))
-                             (w (the fixnum
-                                     (logand (sb-sys:sap-ref-64 sap p) m))))
-                        (declare (type fixnum bytes m w))
-                        (setf acc (the fixnum
-                                       (logior acc
-                                               (the fixnum
-                                                    (ash w nbits))))
-                              nbits (+ nbits (* 8 bytes))
-                              p (+ p bytes))))
-                    (when (< nbits ,need)
-                      ;; End-of-stream tail: fewer bits remain than the
-                      ;; primary table width, but the code itself may still
-                      ;; fit.  Hand the rest of the run over to the generic
-                      ;; reader, which decodes the remainder bit-by-bit from
-                      ;; this symbol boundary.
-                      (setf (b:brd-acc r) acc (b:brd-nbits r) nbits (b:brd-pos r) p)
-                      (loop for j from k below count do
-                        (setf (aref out pos) (read-huff r tree))
-                        (incf pos))
-                      (setf acc (b:brd-acc r) nbits (b:brd-nbits r) p (b:brd-pos r))
-                      (return-from %decode-lit-run pos)))))
-      (dotimes (k count)
-        (refill tbits)
-        (let ((entry (aref tbl (logand acc mask))))
-          (declare (type fixnum entry))
-          (let ((len (logand entry 15)))
-            (declare (type fixnum len))
-            (cond
-              ((plusp len)
-               (setf acc (ash acc (- len))
-                     nbits (- nbits len)
-                     (aref out pos) (ash entry -4))
-               (incf pos))
-              ((plusp entry)
-               ;; Secondary table: consume tbits bits, then SBITS more.
-               (let ((sub (aref subvec (1- (ash entry -4)))))
-                 (declare (type (simple-array (unsigned-byte 16) (*)) sub))
-                 ;; The slow hand-off must resume at a symbol boundary, so
-                 ;; remember the reservoir as it was before this code's
-                 ;; primary bits were consumed and restore it when the
-                 ;; refill near end-of-input cannot be satisfied (a valid
-                 ;; stream may end inside the secondary part of its last
-                 ;; code).
-                 (let ((saved-acc acc) (saved-nbits nbits) (saved-p p))
-                   (declare (type fixnum saved-acc saved-nbits saved-p))
-                   (setf acc (ash acc (- tbits)) nbits (- nbits tbits))
-                   ;; Top up 5 bits without the symbol-boundary hand-off.
-                   (unless (>= nbits sbits)
-                     #+cl-brotli-sap
-                     (when (and sap (<= (+ p 8) end))
-                       (let* ((bytes (min 7 (ash (- 59 nbits) -3)))
-                              (m (aref b::+wide-masks+ (* 8 bytes)))
-                              (w (the fixnum
-                                      (logand (sb-sys:sap-ref-64 sap p) m))))
-                         (declare (type fixnum bytes m w))
-                         (setf acc (the fixnum
-                                        (logior acc
-                                                (the fixnum
-                                                     (ash w nbits))))
-                               nbits (+ nbits (* 8 bytes))
-                               p (+ p bytes))))
-                     (unless (>= nbits sbits)
-                       ;; End of input inside the secondary part of the
-                       ;; current code: restore the state saved before the
-                       ;; primary bits were consumed and decode the rest of
-                       ;; the run with the slow reader.
-                       (setf (b:brd-acc r) saved-acc
-                             (b:brd-nbits r) saved-nbits
-                             (b:brd-pos r) saved-p)
-                       (loop for j from k below count do
-                         (setf (aref out pos) (read-huff r tree))
-                         (incf pos))
-                       (setf acc (b:brd-acc r) nbits (b:brd-nbits r)
-                             p (b:brd-pos r))
-                       (return-from %decode-lit-run pos)))
-                   (let ((entry2 (aref sub (logand acc smask))))
-                     (declare (type fixnum entry2))
-                     (let ((rem (logand entry2 15)))
-                       (declare (type fixnum rem))
-                       (unless (plusp rem)
-                         (berr "invalid prefix code"))
-                       (setf acc (ash acc (- rem))
-                             nbits (- nbits rem)
-                             (aref out pos) (ash entry2 -4))
-                       (incf pos))))))
-              (t (berr "invalid prefix code"))))))
-      (setf (b:brd-acc r) acc (b:brd-nbits r) nbits (b:brd-pos r) p)
-      pos))))
-
 ;; C's context lookup: for each of the four modes a 512-byte table with
 ;; context = LUT[mode*512 + p1] | LUT[mode*512 + 256 + p2] - one OR, no
 ;; per-literal branch on the mode (RFC 7932 7.1).
@@ -559,85 +428,6 @@ bytes of capacity.  Returns the position after the last literal."
             (aref v (+ 1536 b)) (ash (aref +lut2+ b) 3)         ; signed
             (aref v (+ 1536 256 b)) (aref +lut2+ b)))))
 (declaim (type (simple-array (unsigned-byte 8) (2048)) +ctx-lut+))
-
-;; Context-modeled literal run (C ProcessCommands' literal loop for the
-;; multi-tree case): reservoir, read position and the two previous bytes
-;; live in locals; only the primary-table hit is inlined.  Single-symbol
-;; trees, secondary tables and the end of input fall back to READ-HUFF for
-;; that one literal, with the reservoir synced through R around the call.
-(defun %decode-lit-run-ctx (r out pos count trees base mode)
-  (declare (type b:brd r)
-           (type (simple-array (unsigned-byte 8) (*)) out)
-           (type fixnum pos count base)
-           (type simple-vector trees)
-           (type (integer 0 3) mode)
-           (optimize (speed 3) (safety 0)))
-  (let ((acc (b:brd-acc r)) (nbits (b:brd-nbits r)) (p (b:brd-pos r))
-        (end (b:brd-end r))
-        (src #+cl-brotli-sap (b:brd-sap r) #-cl-brotli-sap (b:brd-bytes r))
-        (p1 (if (> pos 0) (aref out (1- pos)) 0))
-        (p2 (if (> pos 1) (aref out (- pos 2)) 0))
-        (lut +ctx-lut+) (lb (* 512 mode)))
-    (declare (type fixnum acc p end) (type (integer 0 59) nbits)
-             (type (simple-array (unsigned-byte 8) (2048)) lut)
-             (type (integer 0 1536) lb)
-             #+cl-brotli-sap (type (or null sb-sys:system-area-pointer) src)
-             #-cl-brotli-sap (type (simple-array (unsigned-byte 8) (*)) src)
-             (type (unsigned-byte 8) p1 p2))
-    (dotimes (k count)
-      (let* ((tree (svref trees (+ base (logior (aref lut (+ lb p1))
-                                                 (aref lut (+ lb 256 p2))))))
-             (tbl (huff-table tree))
-             (sym 0))
-        (declare (type huff tree) (type (unsigned-byte 8) sym))
-        (block one
-          (unless tbl
-            (setf sym (huff-single tree))
-            (return-from one))
-          (let ((tbits (huff-table-bits tree)))
-            (declare (type (integer 1 10) tbits))
-            ;; Refill to the longest code (15 bits) so both table levels
-            ;; decode inline; only the end of input takes READ-HUFF.
-            (when (and (< nbits 15) src (<= (+ p 8) end))
-              (let* ((bytes (min 7 (ash (- 59 nbits) -3)))
-                     (w (logand (ptr-u64 src p)
-                                (aref b::+wide-masks+ (* 8 bytes)))))
-                (declare (type (integer 0 7) bytes) (type fixnum w))
-                (setf acc (logior acc (the fixnum (ash w nbits)))
-                      nbits (+ nbits (* 8 bytes))
-                      p (+ p bytes))))
-            (when (>= nbits tbits)
-              (let* ((entry (aref (the (simple-array (unsigned-byte 16) (*)) tbl)
-                                  (logand acc (huff-mask tree))))
-                     (len (logand entry 15)))
-                (declare (type (unsigned-byte 16) entry) (type (integer 0 15) len))
-                (cond
-                  ((plusp len)
-                   (setf acc (ash acc (- len))
-                         nbits (- nbits len)
-                         sym (ash entry -4))
-                   (return-from one))
-                  ((and (plusp entry)
-                        (>= nbits (+ tbits (huff-sub-bits tree))))
-                   (let* ((sub (svref (the simple-vector (huff-subtables tree))
-                                      (1- (ash entry -4))))
-                          (e2 (aref (the (simple-array (unsigned-byte 16) (*)) sub)
-                                    (logand (ash acc (- tbits)) (huff-sub-mask tree))))
-                          (rem (logand e2 15)))
-                     (declare (type (unsigned-byte 16) e2) (type (integer 0 15) rem))
-                     (when (plusp rem)
-                       (setf acc (ash acc (- (+ tbits rem)))
-                             nbits (- nbits (+ tbits rem))
-                             sym (ash e2 -4))
-                       (return-from one))))))))
-          (setf (b:brd-acc r) acc (b:brd-nbits r) nbits (b:brd-pos r) p)
-          (setf sym (read-huff r tree))
-          (setf acc (b:brd-acc r) nbits (b:brd-nbits r) p (b:brd-pos r)))
-        (setf (aref out pos) sym)
-        (incf pos)
-        (setf p2 p1 p1 sym)))
-    (setf (b:brd-acc r) acc (b:brd-nbits r) nbits (b:brd-pos r) p)
-    pos))
 
 (defun %decode-simple-meta-block (r data pos target origin window rb
                                   ctree ltree dtree npostfix ndirect)
@@ -731,7 +521,7 @@ switch points."
 
 (defun %decode-general-meta-block (r data pos target origin window rb
                                    blkL blkI blkD single-lblock single-iblock
-                                   single-dblock cmode lit-trees htreei htreed
+                                   single-dblock cmode lit-trees lit-tables htreei htreed
                                    cmapd single-lit-tree cmd-tree dist-tree
                                    npostfix ndirect postfix-mask)
   "The general command loop (block switches, context-modeled literals,
@@ -745,7 +535,7 @@ negative error code like %DECODE-SIMPLE-META-BLOCK."
            (type (simple-array fixnum (*)) rb)
            (type blk blkL blkI blkD)
            (type boolean single-lblock single-iblock single-dblock)
-           (type simple-vector cmode lit-trees htreei htreed cmapd)
+           (type simple-vector cmode lit-trees lit-tables htreei htreed cmapd)
            (type (or null huff) single-lit-tree cmd-tree dist-tree)
            (optimize (speed 3) (safety 0)))
   (let ((cmode0 (the (integer 0 3) (svref cmode 0)))
@@ -778,14 +568,24 @@ negative error code like %DECODE-SIMPLE-META-BLOCK."
                    ((zerop ilen))
                    (single-lit-tree
                     (if single-lblock
-                        (let ((pend (+ pos ilen)))
-                          (declare (type fixnum pend))
-                          ;; fast mode: <= 2 input bytes per literal
-                          
-                          (loop while (< pos pend) do
-                            (setf (aref data pos)
-                                  (the (unsigned-byte 8) (lsym single-lit-tree)))
-                            (incf pos)))
+                        (let ((pend (+ pos ilen))
+                              (ltb (huff-table single-lit-tree)))
+                          (declare (type fixnum pend)
+                                   (type (simple-array (unsigned-byte 16) (*)) ltb))
+                          ;; literal trees have 8-bit roots: constant mask/width;
+                          ;; call-free when the input holds 2 bytes per literal
+                          (if (fast-input-p (+ 16 (* 2 ilen)))
+                              (loop while (< pos pend) do
+                                (let ((sym (lsym-fast single-lit-tree ltb 8 255)))
+                                  (declare (type fixnum sym))
+                                  (when (minusp sym)
+                                    (return-from %decode-general-meta-block -4))
+                                  (setf (aref data pos) sym)
+                                  (incf pos)))
+                              (loop while (< pos pend) do
+                                (setf (aref data pos)
+                                      (the (unsigned-byte 8) (lsym* single-lit-tree ltb 8 255)))
+                                (incf pos))))
                         (dotimes (k ilen)
                           (switch blkL)
                           (setf (aref data pos)
@@ -793,25 +593,55 @@ negative error code like %DECODE-SIMPLE-META-BLOCK."
                           (incf pos))))
                    (t
                     ;; context-modeled literals (C: context = LUT[p1] |
-                    ;; LUT[256 + p2] for the block type's mode)
+                    ;; LUT[256 + p2] for the block type's mode).  The run is
+                    ;; split at literal-block boundaries, so the inner loop
+                    ;; has no per-literal switch test; every literal tree has
+                    ;; an 8-bit root (constant mask/width) and LIT-TABLES
+                    ;; holds the tables directly - one load less per literal.
                     (let ((p1 (if (> pos 0) (aref data (1- pos)) 0))
                           (p2 (if (> pos 1) (aref data (- pos 2)) 0))
-                          (lb (* 512 cmode0)) (base 0))
-                      (declare (type (unsigned-byte 8) p1 p2)
-                               (type fixnum lb base))
-                      (dotimes (k ilen)
-                        (unless single-lblock
-                          (switch blkL)
-                          (let ((bt (blk-type blkL)))
-                            (setf base (* 64 bt)
-                                  lb (* 512 (the (integer 0 3) (svref cmode bt))))))
-                        (let ((sym (the (unsigned-byte 8)
-                                        (lsym (svref lit-trees
-                                                     (+ base (logior (aref lut (+ lb p1))
-                                                                     (aref lut (+ lb 256 p2)))))))))
-                          (setf (aref data pos) sym)
-                          (incf pos)
-                          (setf p2 p1 p1 sym))))))
+                          (left ilen))
+                      (declare (type (unsigned-byte 8) p1 p2) (type fixnum left))
+                      (loop while (plusp left) do
+                        (let ((piece left) (base 0) (lb (* 512 cmode0)))
+                          (declare (type fixnum piece base lb))
+                          (unless single-lblock
+                            (switch blkL)       ; accounts the piece's first literal
+                            (setf piece (min left (1+ (blk-count blkL))))
+                            (decf (blk-count blkL) (1- piece))
+                            (let ((bt (blk-type blkL)))
+                              (setf base (* 64 bt)
+                                    lb (* 512 (the (integer 0 3) (svref cmode bt))))))
+                          (let ((pend (+ pos piece)))
+                            (declare (type fixnum pend))
+                            (if (fast-input-p (+ 16 (* 2 piece)))
+                                ;; call-free: enough input for every literal
+                                (loop while (< pos pend) do
+                                  (let* ((ci (+ base (logior (aref lut (+ lb p1))
+                                                             (aref lut (+ lb 256 p2)))))
+                                         (sym (lsym-fast (svref lit-trees ci)
+                                                         (the (simple-array (unsigned-byte 16) (*))
+                                                              (svref lit-tables ci))
+                                                         8 255)))
+                                    (declare (type fixnum ci sym))
+                                    (when (minusp sym)
+                                      (return-from %decode-general-meta-block -4))
+                                    (setf (aref data pos) sym)
+                                    (incf pos)
+                                    (setf p2 p1 p1 sym)))
+                                (loop while (< pos pend) do
+                                  (let* ((ci (+ base (logior (aref lut (+ lb p1))
+                                                             (aref lut (+ lb 256 p2)))))
+                                         (sym (the (unsigned-byte 8)
+                                                   (lsym* (svref lit-trees ci)
+                                                          (the (simple-array (unsigned-byte 16) (*))
+                                                               (svref lit-tables ci))
+                                                          8 255))))
+                                    (declare (type fixnum ci))
+                                    (setf (aref data pos) sym)
+                                    (incf pos)
+                                    (setf p2 p1 p1 sym)))))
+                          (decf left piece))))))
                  (when (>= pos target) (return))
                  ;; distance - DCODE 0 (explicit or implicit dist0) reuses
                  ;; the last distance without pushing; all other codes
@@ -957,14 +787,21 @@ distance ring buffer (persists across the stream)."
        (let ((e (%decode-general-meta-block
                  r (outbuf-data out) (outbuf-pos out) target (outbuf-origin out)
                  window rb blkL blkI blkD single-lblock single-iblock
-                 single-dblock cmode lit-trees htreei htreed cmapd
+                 single-dblock cmode lit-trees
+                 ;; tables of the (block type, context) literal trees; only
+                 ;; filled (and used) when literals are context-modeled
+                 (if single-lit-tree
+                     #()
+                     (map 'simple-vector #'huff-table lit-trees))
+                 htreei htreed cmapd
                  single-lit-tree cmd-tree dist-tree npostfix ndirect
                  postfix-mask)))
          (declare (type fixnum e))
          (case e
            (-1 (berr "insert length exceeds the meta-block"))
            (-2 (berr "copy length exceeds the meta-block"))
-           (-3 (berr "invalid distance")))
+           (-3 (berr "invalid distance"))
+           (-4 (berr "invalid prefix code")))
          (setf (outbuf-pos out) e)))
     (when (/= (outbuf-pos out) target)
       (berr "meta-block produced ~d, expected ~d" (- (outbuf-pos out) start) mlen))))

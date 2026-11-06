@@ -3515,3 +3515,45 @@ Matrix (harness, noisy host, load 2-3), compress lisp/C, html/json/binary:
   q0 0.86/0.51/1.11  q1 0.73/0.64/1.14  q2 0.69/0.66/0.69  q3 0.73/0.67/0.73
   q4 0.86/1.28/0.64  q5 0.74/0.65/0.57  q7 1.21/0.95/1.02  q9+ >= ~1.0
 Decode lisp/C: q0-q3 0.60-0.78, q4+ 0.46-0.62.
+
+### Session 6 Nov 2026, part 6: codegen lab, table format, StoreRange, H6
+
+Codegen lab (scratchpad, 4M-symbol Huffman decode kernels, same output):
+current shape 3.34 ns/sym; C's bit-window model 3.58; SAP table/output
+4.05; all locals (unsigned-byte 64) 3.10 (bit count and len untagged, the
+entry still tagged); entry forced past fixnum range (bit 63) 3.34 - the
+chain is untagged but no faster.  Per symbol we are ~1.3x C's dependency
+chain; SBCL tags anything whose TYPE is fixnum-range (the declared u64 is
+narrowed back), and register moves are nearly free.  Not the main gap.
+
+Ablation and synthetic shapes (decode lisp/C core): literal-only q1 0.80,
+q5 0.64; short copies q1 0.76, q5 0.34 (!); long copies 9.3.  q0-q3 html:
+copies are ~20% of decode, the rest alone equals C's whole decode.
+The q5 short-copy case is the general loop's context-literal path: five
+dependent loads per literal (two LUT bytes, LIT-TREES -> struct -> TABLE ->
+entry) + a nil check for single trees + per-literal block bookkeeping.
+- Table format: single-symbol trees are real tables of zero-length
+  entries (MAKE-SINGLE-HUFF; READ-HUFF tells them by a NIL COUNT), the
+  subtable marker moved to length field 15, every 256-symbol tree has an
+  exact 8-bit root (shorter codes replicated) -> constant literal mask and
+  width, no single-tree branch in any reader.  %DECODE-LIT-RUN(-CTX) were
+  dead and are gone.
+- General loop: context literals split at literal-block boundaries (one
+  switch test per piece), tables read from a per-meta-block LIT-TABLES
+  vector (one load less on the chain), call-free LSYM-FAST inner loops when
+  the input holds 2 bytes per literal; same for the single-tree branch.
+  short copies q5 0.34 -> 0.41; html q4-q11 +0..6%.
+Encoder:
+- StoreRange out of line for the quick matchers (one call per match; the
+  loop had been reloading SAP/BUCKETS from the stack, 13 -> 15 insns with
+  no stack traffic and a free-register loop): q2 +10%, q3 +9%, q4 +20%;
+  same for %LZ77's chain StoreRange (%CHAIN-STORE-RANGE): q5 html +5%.
+- C's H6 for q5 (DEFINE-H6-MATCHER: 2^15 x 2^(q-1) bucket ring, 4/10/16
+  distance-cache candidates with C's penalty order, same driver as q2-q4,
+  pooled tables, >= 64 KiB inputs): q5 size vs C html 1.025 -> 0.998,
+  libc 1.015 -> 1.013; speed html ~same (0.77-0.79), libc 0.38 -> 0.56.
+  q6-q9 stay on the chain matcher (faster than C there; H6 would not be).
+  Out-of-line FindLongestMatch for H6 lost (call > spills).
+Measured A/B, html/sbcl/libc compress lisp/C: q5 0.77/0.63/0.56,
+q6 1.24/1.09/0.66, q7 1.47/1.51/0.85, q9 2.11/1.87/0.91.  The shared host
+(load ~2) makes single harness cells +-20%: prefer interleaved A/B.
