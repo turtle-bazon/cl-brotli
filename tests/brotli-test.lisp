@@ -339,7 +339,21 @@ overlapping copies, the shapes that exercise the wide copy paths."
                      (every (lambda (b) (= b #xAA)) (subseq out (+ start n)))
                      (every (lambda (b) (= b #xAA)) (subseq out 0 start)))
           (incf bad))))
-    (is (zerop bad) "~D of 120 calls wrote outside [start,end)" bad)))
+    (is (zerop bad) "~D of 120 calls wrote outside [start,end)" bad))
+  ;; Oversized :END: nothing past the returned end offset may change either
+  ;; (copy fast paths may overrun into scratch - only inside the output).
+  (let ((rnd (lcg-stream 9)) (bad 0))
+    (dotimes (k 120)
+      (let* ((n (+ 20 (funcall rnd 3000)))
+             (data (lz-sample rnd n))
+             (c (cl-brotli.reference:compress data :quality (funcall rnd 12)))
+             (out (make-array (+ n 200) :element-type '(unsigned-byte 8)
+                                        :initial-element #xAA))
+             (e (cl-brotli:decompress-into c out)))
+        (unless (and (= e n) (equalp (subseq out 0 n) data)
+                     (every (lambda (b) (= b #xAA)) (subseq out n)))
+          (incf bad))))
+    (is (zerop bad) "~D of 120 calls touched bytes past the returned end" bad)))
 
 (test corrupt-streams-signal-brotli-error
   ;; Mutated C and Lisp streams must decode or signal BROTLI-ERROR - never

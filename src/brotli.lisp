@@ -46,7 +46,15 @@ smaller, so the total never exceeds N + MAX(32, 5 * chunks + 2)."
     (+ n (max 32 (+ 2 (* 5 chunks))))))
 
 ;;; ---- decompress -------------------------------------------------------
-(defun %out () (make-outbuf (make-array 4096 :element-type '(unsigned-byte 8))))
+(defun %out (&optional (input-length 0))
+  "Growable output for DECOMPRESS, presized from the compressed length (8x,
+4 KiB..16 MiB): growing 1.5x per meta-block from 4 KiB copied the decoded
+output ~3x over (28% of DECOMPRESS on a 6-meta-block 1 MiB stream)."
+  (let ((out (make-outbuf (make-array 4096 :element-type '(unsigned-byte 8)))))
+    ;; applied lazily by the first %GROW: a single last meta-block reserves
+    ;; its exact size instead and never allocates the guess
+    (setf (outbuf-hint out) (min (* 8 input-length) #.(ash 1 24)))
+    out))
 (defun %append (out src)
   (let ((pos (outbuf-pos out)) (n (length src)))
     (%grow out (+ pos n))
@@ -65,9 +73,12 @@ smaller, so the total never exceeds N + MAX(32, 5 * chunks + 2)."
 
 (defun %decompress (r)
   "Decode a brotli stream from the reader R."
-  (let ((out (%decode-stream r (%out))))
+  (let ((out (%decode-stream r (%out (- (b:brd-end r) (b:brd-pos r))))))
     (let ((data (outbuf-data out)) (pos (outbuf-pos out)))
-      (if (= pos (length data)) data (subseq data 0 pos)))))
+      (cond ((= pos (length data)) data)
+            ;; trim in place (O(1), no copy) - the buffer is ours
+            #+sbcl (t (sb-kernel:%shrink-vector data pos))
+            #-sbcl (t (subseq data 0 pos))))))
 
 (defun %decode-blocks (r out window rb)
   "Decode meta-blocks from R into OUT; RB is the stream-wide distance ring.

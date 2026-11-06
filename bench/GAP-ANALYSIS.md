@@ -3410,3 +3410,74 @@ compress  q0-q1 0.2-2.2x | q2-q3 0.40-0.47x (real corpora) | q4 0.61-0.73x
           q5 0.51-0.79x | q7 0.78-1.02x | q9-q11 1.0-3.6x
 size      q2-q11 1.00-1.10 except periodic q5-q11 1.31-1.49
 decode    0.34-0.71x on html/json/binary at every level
+
+### Session 6 Nov 2026, part 3
+
+q9-q11 literal context modeling (C BrotliBuildMetaBlock's literal side,
+without block splits): HQ-CONTEXT-MAP builds the 64 per-context literal
+histograms of the actual parse under C's ChooseContextMode (signed for
+non-UTF8, UTF8 otherwise; the UTF8 test now runs over the literals only),
+then merges histograms greedily while the estimated cost (Shannon bits +
+30 + 4 bits/used symbol; the sweep 2..8 / 20..40 was flat) drops.  Pair
+gains are cached (a merge re-evaluates only its own pairs) and log2 comes
+from the 2048-entry table plus an exponent split, so the cost is 1-4% of
+q10.  Gates: q10/q11 always; q9 only for non-UTF8 (UTF8 gains ~0.5% for
+~6%); never below 64 literals.  The writer emits context mode 3 when chosen.
+  size lisp/C:        before -> after
+  binary q9 / 10 / 11  1.065 / 1.099 / 1.071 -> 1.011 / 1.042 / 1.043
+  libc   q10 / q11     1.095 / 1.061 -> 1.035 / 1.033
+  source q10 / q11     1.053 / 1.040 -> 1.013 / 1.016  (frozen r170 src)
+  html   q10 / q11     1.041 / 1.038 -> 1.027 / 1.029
+  periodic q9 / q10+   1.31 / 1.49 -> 1.22 / 1.34
+  (Measured but not enabled: at q5/q7 the same map gives binary 0.980 /
+  1.011 of C's size, for +40-66% time.)
+Trap: the first version ran MOSTLY-UTF8-P over the whole input per
+meta-block; on repetitive input (zeros/periodic, ~1 ms compresses) that
+fixed cost took q9 from 1.6-2.3x to 0.5-0.6x of C.
+
+Decoder: second-level Huffman tables are now sized per tree (longest
+code - root bits, as C) with 8-bit roots for 256-symbol trees, and both
+fast readers (context literal run, command/distance LSYM) decode
+second-level entries inline after a refill to 15 bits; literal runs are no
+longer called for zero-length inserts.  html decode lisp/C: q0 0.43 ->
+0.47, q10 0.44 -> 0.47; q1 +7% in isolation.  Root width itself (8/9/10)
+measured within noise.
+The html stream at q5 is 33K commands, 24K literals, mostly 17-255-byte
+non-overlapping copies: the remaining gap is per-command (~65 ns vs ~35 ns
+in C), not literals or tree building (READ-PREFIX-CODE 0.28 ms of 2.15).
+
+### Session 6 Nov 2026, part 4: disassembly-driven decoder work
+
+Goal changed (user): speed >= C at every level; ratio only has to match.
+
+Method: compile the hot path in isolation (or the real function),
+DISASSEMBLE, read it against what C would emit; sb-sprof's per-instruction
+sample annotation for where time goes (samples on the instruction after a
+CALL are the callee's).  What the disassembly showed and what fixed it:
+- SBCL keeps no register across a full call.  A cold fallback that was an
+  inline expansion of READ-HUFF, REPLACE/FILL in the copy, and error calls
+  put the loop's position, counter, table and mask in stack slots.
+  READ-HUFF-OOL (out-of-line cold path), %COPY-MATCH-INLINE (call-free
+  word copies with period widening; REPLACE only for >= 4 KiB copies, where
+  bandwidth rules), deferred error codes in the simple loop.  But an extra
+  out-of-line RBITS lost 13% at q11 - measure each call site.
+- +WIDE-MASKS+ and the command tables were DEFPARAMETERs: every read a
+  thread-local symbol-value check.  DEFTABLE (SB-EXT:DEFINE-LOAD-TIME-GLOBAL
+  on SBCL) for all 50 constant tables; refill masks computed by shift.
+- The 26 KB meta-block function had ~40 live values for 14 registers.
+  %DECODE-SIMPLE-META-BLOCK - the loop for C's q0-q4 stream shape (one
+  block type and one tree per category) - fits: 7 KB, 207 stack refs vs
+  ~900.  Plus one local reservoir for the whole meta-block in the general
+  loop, u64 accumulator, 16-byte overrun copies bounded by the meta-block.
+- DECOMPRESS grew its output 1.5x per meta-block from 4 KiB and copied the
+  decoded data ~3x (28% of its time): presize hint (8x input, applied at
+  the first growth), doubling, in-place trim (SB-KERNEL:%SHRINK-VECTOR).
+Decode lisp/C core (harness, DECOMPRESS), html/json/binary:
+  q1 0.42/0.44/0.55 -> 0.63/0.65/0.65   q2 0.49/0.40/0.65 -> 0.72/0.62/0.75
+  q3 0.47/0.41/0.66 -> 0.61/0.62/0.76   q5 0.48/0.45/0.53 -> 0.50/0.48/0.57
+  q11 0.49/0.47/0.59 -> 0.53/0.51/0.63  (decompress-into micro: q2 0.98)
+Tried, no gain: 8/9/10-bit roots, (debug 0), hoisting tree fields, locals
+for tables (more spills), out-of-line copy (call > spills), call-free
+"fast mode" literal loop (q1 runs are ~1 literal).
+Next: the general q4+ loop needs the same treatment (specialized variants
+or fewer live values); encoder q0-q5 has not had a disassembly pass yet.

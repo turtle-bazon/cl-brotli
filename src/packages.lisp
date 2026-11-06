@@ -8,13 +8,13 @@
            #:w-ensure #:%wbits-raw #:%wbits-raw-pm #:w-emit-run #:make-bwr-into
            #:bwr-pos #:bwr-limit #:bwr-result
            #:ptr #:ptr-off #:with-ptrs #:ptr-u8 #:ptr-u16 #:ptr-u32 #:ptr-u64
-           #:ptr+ #:off-u8 #:off-u32 #:ctz64))
+           #:ptr+ #:off-u8 #:off-u32 #:ctz64 #:deftable))
 (defpackage #:cl-brotli.lisp
   (:use #:cl)
   (:local-nicknames (#:b #:cl-brotli.lisp.bitio))
   (:import-from #:cl-brotli.lisp.bitio
                 #:ptr #:ptr-off #:with-ptrs #:ptr-u8 #:ptr-u16 #:ptr-u32
-                #:ptr-u64 #:ptr+ #:off-u8 #:off-u32 #:ctz64)
+                #:ptr-u64 #:ptr+ #:off-u8 #:off-u32 #:ctz64 #:deftable)
   (:export #:decompress #:compress #:brotli-error
              #:compress-into #:decompress-into #:max-compressed-size
              #:make-compressor

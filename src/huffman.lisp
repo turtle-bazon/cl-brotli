@@ -6,6 +6,13 @@
 
 (defconstant +max-bits+ 15)
 (defconstant +huff-table-bits+ 10)
+;; Root-table width per alphabet (C: HUFFMAN_TABLE_BITS = 8 for every
+;; symbol tree).  Literal trees are the many ones (C q5 streams: ~130 per
+;; meta-block), so a smaller root cuts both build stores and cache
+;; footprint; codes longer than the root use a second-level table sized to
+;; the tree's longest code.
+(defconstant +lit-root-bits+ 8)
+(defconstant +other-root-bits+ 10)
 
 (defstruct huff (count nil :type (or null (simple-array fixnum (16))))
   (lengths nil :type (or null (simple-array (unsigned-byte 8) (*))))
@@ -14,9 +21,12 @@
   (table nil :type (or null (simple-array (unsigned-byte 16) (*))))
   (table-bits 0 :type fixnum)
   (mask 0 :type fixnum)
+  ;; second-level width: longest code - TABLE-BITS (0 = no subtables)
+  (sub-bits 0 :type (integer 0 15))
+  (sub-mask 0 :type fixnum)
   (subtables nil :type (or null simple-vector)))
 
-(defparameter +reverse-byte+
+(deftable +reverse-byte+
   (let ((v (make-array 256 :element-type '(unsigned-byte 8) :initial-element 0)))
     (dotimes (i 256 v)
       (let ((x i) (r 0))
@@ -59,7 +69,10 @@ reject anything else), so every table entry is written."
           (when (> l maxlen) (setf maxlen l)))))
     (when (<= nonzero 1)
       (return-from build-huff (make-huff :single last)))
-    (let* ((table-bits (min +huff-table-bits+ maxlen))
+    (let* ((table-bits (min (if (<= n 256) +lit-root-bits+ +other-root-bits+)
+                            maxlen))
+           (sub-bits (- maxlen table-bits))
+           (sub-size (ash 1 sub-bits))
            (tsize (ash 1 table-bits))
            (table (make-array tsize :element-type '(unsigned-byte 16)
                                     :initial-element 0))
@@ -73,6 +86,7 @@ reject anything else), so every table entry is written."
            (next (make-array (1+ +max-bits+) :element-type 'fixnum
                                              :initial-element 0)))
       (declare (type (integer 1 10) table-bits)
+               (type (integer 0 14) sub-bits) (type (integer 1 16384) sub-size)
                (type (integer 2 1024) tsize)
                (type (simple-array (unsigned-byte 16) (*)) table)
                (type fixnum nlong nsub)
@@ -104,7 +118,7 @@ reject anything else), so every table entry is written."
                          (marker (aref table rev-prefix))
                          (sub (if (zerop marker)
                                   (let ((new (make-array
-                                              32 ; 2^(+max-bits+ - +huff-table-bits+)
+                                              sub-size
                                               :element-type '(unsigned-byte 16)
                                               :initial-element 0)))
                                     (setf (svref subtables nsub) new)
@@ -114,17 +128,18 @@ reject anything else), so every table entry is written."
                                   (svref subtables (1- (ash marker -4)))))
                          (entry (logior (ash sym 4) rem))
                          (stride (ash 1 rem)))
-                    (declare (type (integer 1 5) rem)
+                    (declare (type (integer 1 14) rem)
                              (type (unsigned-byte 16) marker entry)
-                             (type (simple-array (unsigned-byte 16) (32)) sub)
+                             (type (simple-array (unsigned-byte 16) (*)) sub)
                              (type fixnum stride))
                     (loop for base of-type fixnum
                             from (%reverse-bits (logand code (1- (ash 1 rem))) rem)
-                            below 32 by stride
+                            below sub-size by stride
                           do (setf (aref sub base) entry))))))))
       (make-huff :count count :lengths lengths :table table
                  :table-bits table-bits
                  :mask (1- tsize)
+                 :sub-bits sub-bits :sub-mask (1- sub-size)
                  :subtables subtables))))
 
 (defun huff-ensure-symbols (h)
@@ -202,17 +217,17 @@ redundant on the fast path."
                (consume-bits r len)
                (ash entry -4)))
             ((plusp entry)
-             (if (or (>= (b:brd-nbits r) (+ table-bits 5))
-                     (>= (b:bits-available r) (+ table-bits 5)))
+             (if (or (>= (b:brd-nbits r) (+ table-bits (huff-sub-bits h)))
+                     (>= (b:bits-available r) (+ table-bits (huff-sub-bits h))))
                  (progn
                    (consume-bits r table-bits)
                    (let* ((subs (huff-subtables h))
                           (sub (aref subs (1- (ash entry -4))))
                           (entry2 (aref sub
                                           (progn
-                                            (unless (>= (b:brd-nbits r) 5)
-                                              (b::%fill-bits r 5))
-                                            (logand (b:brd-acc r) #x1F)))))
+                                            (unless (>= (b:brd-nbits r) (huff-sub-bits h))
+                                              (b::%fill-bits r (huff-sub-bits h)))
+                                            (logand (b:brd-acc r) (huff-sub-mask h))))))
                      (declare (type simple-vector subs)
                               (type (simple-array (unsigned-byte 16) (*)) sub)
                               (type fixnum entry2))
@@ -225,6 +240,170 @@ redundant on the fast path."
                  (read-huff-slow r h)))
             (t (read-huff-slow r h))))
         (read-huff-slow r h))))
+
+;; Straight-line groups of reads (command symbol + its two extras; distance
+;; symbol + extra) with the reservoir in locals instead of the BRD struct:
+;; one load and one store of ACC/NBITS/POS per group instead of per read.
+;; BODY must not call anything that takes R itself - the slow fallbacks
+;; below sync the locals through R around their own calls.
+(defun read-huff-ool (r h)
+  "Out-of-line READ-HUFF for the local readers' cold path.  Inlining the
+whole of READ-HUFF there (as before) put its variables in every hot loop's
+register allocation: the disassembly showed the loop counter, output
+position, table and mask all living in stack slots."
+  (declare (type b:brd r) (type huff h) (optimize (speed 3) (safety 0)))
+  (read-huff r h))
+(declaim (notinline read-huff-ool))
+(defun rbits-ool (r n)
+  "Out-of-line B:RBITS for LBITS' cold path (an inline RBITS brought its
+refill loop and a +WIDE-MASKS+ symbol-value fetch to every call site)."
+  (declare (type b:brd r) (type (integer 0 24) n) (optimize (speed 3) (safety 0)))
+  (b:rbits r n))
+(declaim (notinline rbits-ool))
+
+(defmacro with-local-bits ((r) &body body)
+  (let ((acc (gensym "ACC")) (nb (gensym "NB")) (p (gensym "P"))
+        (end (gensym "END")) (src (gensym "SRC")) (end8 (gensym "END8")))
+    `(let* ((,acc (b:brd-acc ,r)) (,nb (b:brd-nbits ,r)) (,p (b:brd-pos ,r))
+            (,end (b:brd-end ,r))
+            (,src #+cl-brotli-sap (b:brd-sap ,r) #-cl-brotli-sap (b:brd-bytes ,r))
+            ;; last position an 8-byte refill may read from; -1 disables the
+            ;; fast refill (no SAP), so the hot test is one compare
+            (,end8 (if ,src (- ,end 8) -1)))
+       (declare (type fixnum ,end8) (ignorable ,end))
+       ;; ACC is an untagged u64 in a register (it never exceeds 59 bits);
+       ;; as a FIXNUM every shift paid a tag/untag pair.  It is converted
+       ;; only where it is synced with the BRD slot.
+       (declare (type (unsigned-byte 64) ,acc) (type fixnum ,p ,end)
+                (type (integer 0 59) ,nb)
+                #+cl-brotli-sap (type (or null sb-sys:system-area-pointer) ,src)
+                #-cl-brotli-sap (type (simple-array (unsigned-byte 8) (*)) ,src))
+       (macrolet ((%lfill (need)
+                    `(when (and (< ,',nb ,need) (<= ,',p ,',end8))
+                       ;; (59 - nb) >> 3 is already <= 7; the mask is a shift,
+                       ;; not a lookup in +WIDE-MASKS+ (a special variable:
+                       ;; a thread-local symbol-value fetch per refill)
+                       (let* ((bytes (ash (- 59 ,',nb) -3))
+                              (w (logand (ptr-u64 #+cl-brotli-sap (the sb-sys:system-area-pointer ,',src)
+                                                  #-cl-brotli-sap ,',src
+                                                  ,',p)
+                                         (1- (ash 1 (* 8 bytes))))))
+                         (declare (type (integer 0 7) bytes) (type (unsigned-byte 64) w))
+                         (setf ,',acc (logior ,',acc (logand (ash w ,',nb) #xFFFFFFFFFFFFFFFF))
+                               ,',nb (+ ,',nb (* 8 bytes))
+                               ,',p (+ ,',p bytes)))))
+                  (%lslow (form)
+                    `(progn
+                       (setf (b:brd-acc ,',r) (the fixnum ,',acc) (b:brd-nbits ,',r) ,',nb
+                             (b:brd-pos ,',r) ,',p)
+                       (prog1 ,form
+                         (setf ,',acc (b:brd-acc ,',r) ,',nb (b:brd-nbits ,',r)
+                               ,',p (b:brd-pos ,',r)))))
+                  (lbits (n)
+                    (let ((nn (gensym "N")))
+                      `(let ((,nn ,n))
+                         (declare (type (integer 0 24) ,nn))
+                         (%lfill ,nn)
+                         (if (>= ,',nb ,nn)
+                             (prog1 (logand ,',acc (1- (ash 1 ,nn)))
+                               (setf ,',acc (ash ,',acc (- ,nn))
+                                     ,',nb (- ,',nb ,nn)))
+                             (%lslow (b:rbits ,',r ,nn))))))
+                  (lsym (tree)
+                    (let ((tr (gensym "TREE")))
+                      `(let ((,tr ,tree))
+                         (declare (type huff ,tr))
+                         (lsym* ,tr (huff-table ,tr) (huff-table-bits ,tr)
+                                (huff-mask ,tr)))))
+                  (lsym-fast (tree table table-bits mask)
+                    ;; Fast mode (C's "safe = 0"): the caller has checked
+                    ;; that the input holds enough bytes for every symbol it
+                    ;; will read here, so the refill needs no end test and
+                    ;; nothing in this expansion calls a function - which
+                    ;; lets SBCL keep the loop's variables in registers (no
+                    ;; register survives a full call).  Returns -1 for
+                    ;; anything but a one- or two-level hit; the caller then
+                    ;; falls back to LSYM*.
+                    (let ((tr (gensym "TREE")) (tb (gensym "TBL")))
+                      `(let* ((,tr ,tree) (,tb ,table))
+                         (declare (type huff ,tr)
+                                  (type (simple-array (unsigned-byte 16) (*)) ,tb))
+                         (block lsym
+                           (when (< ,',nb 15)
+                             (let* ((bytes (ash (- 59 ,',nb) -3))
+                                    (w (logand (ptr-u64 #+cl-brotli-sap (the sb-sys:system-area-pointer ,',src)
+                                                        #-cl-brotli-sap ,',src
+                                                        ,',p)
+                                               (1- (ash 1 (* 8 bytes))))))
+                               (declare (type (integer 0 7) bytes) (type (unsigned-byte 64) w))
+                               (setf ,',acc (logior ,',acc (logand (ash w ,',nb) #xFFFFFFFFFFFFFFFF))
+                                     ,',nb (+ ,',nb (* 8 bytes))
+                                     ,',p (+ ,',p bytes))))
+                           (let* ((tbits ,table-bits)
+                                  (entry (aref ,tb (logand ,',acc ,mask)))
+                                  (len (logand entry 15)))
+                             (declare (type (integer 1 10) tbits)
+                                      (type (unsigned-byte 16) entry)
+                                      (type (integer 0 15) len))
+                             (when (plusp len)
+                               (setf ,',acc (ash ,',acc (- len)) ,',nb (- ,',nb len))
+                               (return-from lsym (ash entry -4)))
+                             (when (plusp entry)
+                               (let* ((sub (svref (the simple-vector (huff-subtables ,tr))
+                                                  (1- (ash entry -4))))
+                                      (e2 (aref (the (simple-array (unsigned-byte 16) (*)) sub)
+                                                (logand (ash ,',acc (- tbits))
+                                                        (huff-sub-mask ,tr))))
+                                      (rem (logand e2 15)))
+                                 (declare (type (unsigned-byte 16) e2) (type (integer 0 15) rem))
+                                 (when (plusp rem)
+                                   (setf ,',acc (ash ,',acc (- (+ tbits rem)))
+                                         ,',nb (- ,',nb (+ tbits rem)))
+                                   (return-from lsym (ash e2 -4)))))
+                             -1)))))
+                  (fast-input-p (nbytes)
+                    ;; at least NBYTES of input beyond P for 8-byte refills
+                    `(<= (+ ,',p ,nbytes) ,',end8))
+                  (lsym* (tree table table-bits mask)
+                    ;; TABLE / TABLE-BITS / MASK may be variables hoisted out
+                    ;; of a loop (single-tree streams): SBCL does not hoist
+                    ;; the struct reads past the output stores by itself.
+                    (let ((tr (gensym "TREE")) (tb (gensym "TBL")))
+                      `(let* ((,tr ,tree) (,tb ,table))
+                         (declare (type huff ,tr)
+                                  (type (or null (simple-array (unsigned-byte 16) (*))) ,tb))
+                         (block lsym
+                           (unless ,tb (return-from lsym (huff-single ,tr)))
+                           (let ((tbits ,table-bits))
+                             (declare (type (integer 1 10) tbits))
+                             (%lfill 15)
+                             (when (>= ,',nb tbits)
+                               (let* ((entry (aref ,tb (logand ,',acc ,mask)))
+                                      (len (logand entry 15)))
+                                 (declare (type (unsigned-byte 16) entry)
+                                          (type (integer 0 15) len))
+                                 (cond
+                                   ((plusp len)
+                                    (setf ,',acc (ash ,',acc (- len))
+                                          ,',nb (- ,',nb len))
+                                    (return-from lsym (ash entry -4)))
+                                   ((and (plusp entry)
+                                         (>= ,',nb (+ tbits (huff-sub-bits ,tr))))
+                                    (let* ((sub (svref (the simple-vector (huff-subtables ,tr))
+                                                       (1- (ash entry -4))))
+                                           (e2 (aref (the (simple-array (unsigned-byte 16) (*)) sub)
+                                                     (logand (ash ,',acc (- tbits))
+                                                             (huff-sub-mask ,tr))))
+                                           (rem (logand e2 15)))
+                                      (declare (type (unsigned-byte 16) e2)
+                                               (type (integer 0 15) rem))
+                                      (when (plusp rem)
+                                        (setf ,',acc (ash ,',acc (- (+ tbits rem)))
+                                              ,',nb (- ,',nb (+ tbits rem)))
+                                        (return-from lsym (ash e2 -4)))))))))
+                           (%lslow (read-huff-ool ,',r ,tr)))))))
+         (multiple-value-prog1 (progn ,@body)
+           (setf (b:brd-acc ,r) (the fixnum ,acc) (b:brd-nbits ,r) ,nb (b:brd-pos ,r) ,p))))))
 
 (defun alphabet-bits (size) (max 1 (integer-length (1- size))))
 
@@ -239,7 +418,7 @@ redundant on the fast path."
           (if (zerop (b:rbit r)) 2
               (if (zerop (b:rbit r)) 1 5)))))
 
-(defparameter +clcl-order+
+(deftable +clcl-order+
   (coerce '(1 2 3 4 0 5 17 6 16 7 8 9 10 11 12 13 14 15) '(simple-array fixnum (18))))
 (declaim (type (simple-array fixnum (18)) +clcl-order+))
 
@@ -270,8 +449,9 @@ redundant on the fast path."
           (symbol 0) (prev-code-len 8) (repeat 0) (repeat-code-len 0) (space 32768))
       (declare (type fixnum symbol repeat space)
                (type (integer 0 15) prev-code-len repeat-code-len))
+      (with-local-bits (r)
       (loop while (and (< symbol alphabet-size) (> space 0)) do
-        (let ((c (read-huff r clh)))
+        (let ((c (lsym clh)))
           (declare (type (integer 0 17) c))
           (if (< c 16)
               (progn (setf repeat 0 (aref lengths symbol) c) (incf symbol)
@@ -282,12 +462,12 @@ redundant on the fast path."
                 (unless (= repeat-code-len new-len) (setf repeat 0 repeat-code-len new-len))
                 (let ((old-repeat repeat))
                   (when (plusp repeat) (setf repeat (ash (- repeat 2) extra-bits)))
-                  (incf repeat (+ (b:rbits r extra-bits) 3))
+                  (incf repeat (+ (lbits extra-bits) 3))
                   (let ((delta (- repeat old-repeat)))
                     (declare (type fixnum delta))
                     (when (plusp new-len) (decf space (ash delta (- 15 new-len))))
                     (dotimes (k delta)
-                      (when (< symbol alphabet-size) (setf (aref lengths symbol) new-len) (incf symbol)))))))))
+                      (when (< symbol alphabet-size) (setf (aref lengths symbol) new-len) (incf symbol))))))))))
       ;; C: BROTLI_DECODER_ERROR_FORMAT_HUFFMAN_SPACE - the code must be
       ;; exactly complete.
       (unless (zerop space)

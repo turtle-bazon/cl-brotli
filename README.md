@@ -25,7 +25,7 @@ License: GPL-3.0
 (asdf:test-system "cl-brotli")
 ```
 
-The suite passes (243/243 checks) on SBCL (2.6.7 and Roswell 2.6.9, with
+The suite passes (244/244 checks) on SBCL (2.6.7 and Roswell 2.6.9, with
 multi-threaded tests), Clozure CL 1.12 and ECL 26.5. SBCL on x86-64 uses
 system-area-pointer loads and an SSE2 match-length VOP; every other
 implementation (and SBCL with `:cl-brotli-portable` on `*features*`) uses the

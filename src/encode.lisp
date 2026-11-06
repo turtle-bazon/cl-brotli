@@ -11,6 +11,16 @@
 
 (declaim (optimize (speed 3) (safety 0)))
 
+;; q10/q11 literal context modeling (HQ-CONTEXT-MAP) and its cost model.
+(defvar *hq-context-modeling* t)
+;; From q9: there the encoder has speed headroom over C (1.0-2.4x) and the
+;; clustered map beats C's static maps (binary q9 1.065 -> 1.011 of C's
+;; size); at q5-q7 it would cost up to +66% time on binary input.
+(defvar *hq-min-quality* 9)
+(defvar *hq-tree-bits-per-symbol* 4.0d0)
+(defvar *hq-tree-bits-base* 30.0d0)
+
+
 ;;; ---- canonical code construction --------------------------------------
 
 (defun canonical-codes (lengths n)
@@ -256,7 +266,7 @@ Port of C BrotliCreateHuffmanTree; >= 2 nonzero frequencies assumed."
   single
   simple)
 
-(defparameter +empty-fixnums+ (make-array 0 :element-type 'fixnum))
+(deftable +empty-fixnums+ (make-array 0 :element-type 'fixnum))
 (declaim (type (simple-array fixnum (*)) +empty-fixnums+))
 
 (defun reverse-code (code len)
@@ -415,7 +425,7 @@ Long runs are split with a literal reset between repeat codes so consecutive
 
 ;;; ---- command / distance code computation ------------------------------
 
-(defparameter +celltab+ #(#(2 3 6) #(4 5 8) #(7 9 10)))   ; [ins-range][copy-range] -> cmd cell
+(deftable +celltab+ #(#(2 3 6) #(4 5 8) #(7 9 10)))   ; [ins-range][copy-range] -> cmd cell
 
 (defun make-length-code-table (base bits maxlen)
   "Precompute (code, extra-value, extra-bits) for lengths 0..MAXLEN.
@@ -434,25 +444,25 @@ LENGTH-CODE was ~20% of low-quality compression time."
                  (return)))
     (list code xval xbits)))
 
-(defparameter +ins-lc+ (make-length-code-table +ins-base+ +ins-bits+ 4096))
-(defparameter +cpy-lc+ (make-length-code-table +cpy-base+ +cpy-bits+ 4096))
+(deftable +ins-lc+ (make-length-code-table +ins-base+ +ins-bits+ 4096))
+(deftable +cpy-lc+ (make-length-code-table +cpy-base+ +cpy-bits+ 4096))
 
-(defparameter +ins-code+ (first +ins-lc+))
-(defparameter +ins-xval+ (second +ins-lc+))
-(defparameter +ins-xbits+ (third +ins-lc+))
-(defparameter +cpy-code+ (first +cpy-lc+))
-(defparameter +cpy-xval+ (second +cpy-lc+))
-(defparameter +cpy-xbits+ (third +cpy-lc+))
+(deftable +ins-code+ (first +ins-lc+))
+(deftable +ins-xval+ (second +ins-lc+))
+(deftable +ins-xbits+ (third +ins-lc+))
+(deftable +cpy-code+ (first +cpy-lc+))
+(deftable +cpy-xval+ (second +cpy-lc+))
+(deftable +cpy-xbits+ (third +cpy-lc+))
 (declaim (type (simple-array fixnum (*))
                +ins-code+ +ins-xval+ +ins-xbits+
                +cpy-code+ +cpy-xval+ +cpy-xbits+))
-(defparameter +ins-xbits-f+
+(deftable +ins-xbits-f+
   (let ((v (make-array (length +ins-xbits+) :element-type 'single-float
                                              :initial-element 0.0f0)))
     (dotimes (i (length +ins-xbits+) v)
       (setf (aref v i) (float (aref +ins-xbits+ i) 1.0f0))))
   "Insert-length extra bits as single-float for the hot DP loops.")
-(defparameter +cpy-xbits-f+
+(deftable +cpy-xbits-f+
   (let ((v (make-array (length +cpy-xbits+) :element-type 'single-float
                                              :initial-element 0.0f0)))
     (dotimes (i (length +cpy-xbits+) v)
@@ -506,7 +516,7 @@ the canonical search."
               do (return (values c (- len (the fixnum (aref base c)))
                                  (the fixnum (aref bits c)))))))
 
-(defparameter +cmd-symbol-table+
+(deftable +cmd-symbol-table+
   (let ((v (make-array (* 24 24) :element-type 'fixnum :initial-element 0)))
     (declare (type (simple-array fixnum (*)) v))
     (dotimes (i 24 v)
@@ -655,7 +665,7 @@ identical to the cons-list version."
           ;; concurrent reader never sees a half-built index.
           (setf *dict-index* (cons flat counts))))))
 
-(defparameter +dict-transforms+
+(deftable +dict-transforms+
   (loop for tid from 0 below (length +transforms+)
         for tr = (aref +transforms+ tid)
         when (and (zerop (length (first tr)))
@@ -664,7 +674,7 @@ identical to the cons-list version."
           collect tid)
   "Dictionary transforms that preserve word length (identity and uppercase).")
 
-(defparameter +dict-tid0+
+(deftable +dict-tid0+
   (or (car (rassoc 0 (loop for tid in +dict-transforms+
                            for tr = (aref +transforms+ tid)
                            when (and (zerop (length (first tr)))
@@ -678,7 +688,7 @@ identical to the cons-list version."
                        :test #'=))
       0)
   "Transform id of KIND 0 (identity).")
-(defparameter +dict-transform-kinds+
+(deftable +dict-transform-kinds+
   (loop for tid in +dict-transforms+
         for tr = (aref +transforms+ tid)
         collect (cons tid (case (second tr)
@@ -927,7 +937,7 @@ dictionary is worth consulting."
 ;;; ---- Zopfli cost-model DP (q10/11; C backward_references_hq + literal_cost)
 
 
-(defparameter +zdc-jo+
+(deftable +zdc-jo+
   ;; C kDistanceCacheIndex/kDistanceCacheOffset packed into one byte:
   ;; (slot << 4) | (offset + 8), offsets are -3..3.  One table read per
   ;; short candidate instead of two.
@@ -1066,7 +1076,7 @@ codepoint is -1 for invalid sequences (which count as one byte)."
            (values #x110000 1)))
       (t (values #x110000 1)))))
 
-(defparameter +fast-log2-table+
+(deftable +fast-log2-table+
   (let ((v (make-array 2048 :element-type 'double-float
                              :initial-element 0.0d0)))
     (dotimes (i 2048 v)
@@ -3104,8 +3114,10 @@ compressor like ACQUIRE-HEADPREV."
 few u32 slots per bucket, the last distance probed first, candidates ranked
 by BackwardReferenceScore, the lazy one-byte deferral (cost_diff_lazy 175,
 at most 4 in a row), StoreRange over copy interiors and the sparse-search
-jumps through literal runs.  No static dictionary.  Returns the flat
-5-fixnum command vector (insert lit-start copy distance 0), like %LZ77."
+jumps through literal runs.  No static dictionary.  Returns (values CMDS
+USED): the flat 5-fixnum command vector (insert lit-start copy distance 0)
+like %LZ77's, but possibly longer than USED (it is pooled) - callers must
+use only CMDS[0..USED)."
   (declare (type (simple-array (unsigned-byte 8) (*)) data)
            (type ptr sap)
            (type fixnum window)
@@ -3115,7 +3127,15 @@ jumps through literal runs.  No static dictionary.  Returns the flat
   (let* ((n (length data))
          (buckets (acquire-quick-buckets bits sweep))
          (hshift (- bits 64))
-         (cmds (make-array (* 5 (max 4096 (ash n -5))) :element-type 'fixnum))
+         ;; Pooled per compressor and returned untrimmed with its used
+         ;; length: the doubling growth + final SUBSEQ were ~20% of q2.
+         (cmds (let ((pool *scratch-pool*) (want (* 5 (max 4096 (ash n -5)))))
+                 (or (and pool
+                          (let ((v (gethash :quick-cmds pool)))
+                            (and v (>= (length (the (simple-array fixnum (*)) v)) want) v)))
+                     (let ((v (make-array want :element-type 'fixnum)))
+                       (when pool (setf (gethash :quick-cmds pool) v))
+                       v))))
          (ncmd 0)
          (c0 4) (c1 11) (c2 15) (c3 16)          ; C's initial distance cache
          (store-end (if (>= n 8) (- n 7) 0))
@@ -3154,6 +3174,7 @@ jumps through literal runs.  No static dictionary.  Returns the flat
                (when (>= (* 5 (1+ ncmd)) (length cmds))
                  (let ((new (make-array (* 2 (length cmds)) :element-type 'fixnum)))
                    (replace new cmds)
+                   (when *scratch-pool* (setf (gethash :quick-cmds *scratch-pool*) new))
                    (setf cmds new)))
                (let ((b (* 5 ncmd)))
                  (declare (type fixnum b))
@@ -3278,8 +3299,8 @@ jumps through literal runs.  No static dictionary.  Returns the flat
       (incf insert (- n pos))
       (when (plusp insert)
         (push-cmd insert (- n insert) 0 0))
-      (let ((total (* 5 ncmd)))
-        (if (= (length cmds) total) cmds (subseq cmds 0 total))))))
+      ;; (values CMDS USED): only CMDS[0..USED) is this input's commands.
+      (values cmds (* 5 ncmd)))))
 
 ;;; ---- C Brotli's q0/q1 fast-fragment entropy coding --------------------
 
@@ -3295,7 +3316,7 @@ jumps through literal runs.  No static dictionary.  Returns the flat
         ((< c 56) (+ 256 (* 8 (- c 48))))
         (t (+ 448 (* 8 (- c 56))))))
 
-(defparameter +q0-cmd-map+
+(deftable +q0-cmd-map+
   (let ((v (make-array 64 :element-type 'fixnum)))
     (dotimes (c 64 v) (setf (aref v c) (q0-cmd-symbol c)))))
 ;; typed: an untyped DEFPARAMETER made every (AREF +Q0-CMD-MAP+ CC) in the
@@ -3306,13 +3327,13 @@ jumps through literal runs.  No static dictionary.  Returns the flat
 
 ;; C's kCmdHistoSeed: a prior that keeps every command code the fast path can
 ;; emit encodable and avoids degenerate one-symbol command trees.
-(defparameter +q0-seed-cmd+
+(deftable +q0-seed-cmd+
   #(0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
     0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1
     1 1 1 1 1 1 1 1 0 1 1 1 1 1 1 1
     1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1))
 
-(defparameter +q0-seed-dist+
+(deftable +q0-seed-dist+
   #(1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
     1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
     1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
@@ -4009,10 +4030,12 @@ compression ratio for encoder throughput."
 ;;; recomputed in the emission pass.
 (defun write-trivial-block-body (w data cmds rb
                                  &key (short-dist nil)
-                                   (max-lit-bits 15))
+                                   (max-lit-bits 15)
+                                   (n5 (length cmds)))
   (declare (type b:bwr w)
            (type (simple-array (unsigned-byte 8) (*)) data)
            (type (simple-array fixnum (*)) rb cmds)
+           (type fixnum n5)
            (optimize (speed 3) (safety 0)))
   (let* ((litf (make-array 256 :element-type 'fixnum :initial-element 0))
          (cmdf (make-array 704 :element-type 'fixnum :initial-element 0))
@@ -4028,7 +4051,7 @@ compression ratio for encoder throughput."
     (declare (type (simple-array fixnum (256)) litf)
              (type (simple-array fixnum (*)) cmdf distf probe-rb))
     ;; Pass 1: histograms only.  CMDS is a flat 5-fixnum vector; DICTP is 0/1.
-    (loop for ci of-type fixnum from 0 below (truncate (length cmds) 5) do
+    (loop for ci of-type fixnum from 0 below (truncate n5 5) do
       (let* ((vb (* 5 ci))
              (ins (aref cmds vb)) (lit-start (aref cmds (+ vb 1)))
              (cpy (aref cmds (+ vb 2)))
@@ -4096,7 +4119,7 @@ compression ratio for encoder throughput."
       (write-etree w cmd 704)
       (write-etree w dist 64)
       ;; Pass 2: recompute the compact codes and emit.
-      (loop for ci of-type fixnum from 0 below (truncate (length cmds) 5) do
+      (loop for ci of-type fixnum from 0 below (truncate n5 5) do
         (let* ((vb (* 5 ci))
                (ins (aref cmds vb)) (lit-start (aref cmds (+ vb 1)))
                (cpy (aref cmds (+ vb 2)))
@@ -4285,7 +4308,24 @@ per command."
          (recs (make-array (* +cmd-stride+ ncmd)
                            :element-type 'fixnum))
          (ri 0)
-         (ctx (multiple-value-list (literal-contexts data quality)))
+         ;; C ChooseContextMode for q10+: signed for non-UTF8 input, and
+         ;; the context map comes from clustering this parse's literals.
+         ;; Cost is proportional to the literals, and a parse with few
+         ;; literals (repetitive input) gains nothing from 64 contexts:
+         ;; those keep the static path, which costs nothing.
+         (hq (and (>= quality *hq-min-quality*) *hq-context-modeling*
+                  (>= (loop for vb of-type fixnum from 0 below (length cmds) by 5
+                            sum (the fixnum (aref cmds vb)) of-type fixnum)
+                      64)))
+         (lit-mode (if (and hq (not (literals-mostly-utf8-p data cmds))) 3 2))
+         ;; Below q10 only non-UTF8 input clusters: there it is worth ~5% of
+         ;; size; on UTF8 text ~0.5% for ~6% more time (C's q9 uses static
+         ;; maps for both).
+         (hq (and hq (or (>= quality 10) (= lit-mode 3))))
+         (ctx (multiple-value-list
+               (if hq
+                   (hq-context-map data cmds lit-mode)
+                   (literal-contexts data quality))))
          (lit-k (first ctx))
          (lit-cmap (second ctx))
          (litfreq (make-array (* lit-k 256) :element-type 'fixnum
@@ -4299,8 +4339,9 @@ per command."
          (ins-b +ins-base+) (ins-bt +ins-bits+)
          (cpy-c +cpy-code+) (cpy-x +cpy-xval+) (cpy-xb +cpy-xbits+)
          (cpy-b +cpy-base+) (cpy-bt +cpy-bits+)
-         (lut0 +lut0+) (lut1 +lut1+))
-    (declare (type fixnum ri)
+         (ctxlut +ctx-lut+) (lb (* 512 lit-mode)))
+    (declare (type fixnum ri lb)
+             (type (simple-array (unsigned-byte 8) (2048)) ctxlut)
              (type (simple-array (unsigned-byte 8) (*)) data)
              (type (simple-array fixnum (*)) recs litfreq cmdfreq distfreq
                                      rb cmds)
@@ -4346,8 +4387,8 @@ per command."
                                     (p1 (if (plusp i) (aref data (1- i)) 0))
                                     (p2 (if (> i 1) (aref data (- i 2)) 0))
                                     (cid (aref lit-cmap
-                                               (logior (aref lut0 p1)
-                                                       (aref lut1 p2)))))
+                                               (logior (aref ctxlut (+ lb p1))
+                                                       (aref ctxlut (+ lb 256 p2))))))
                                (declare (type fixnum sym p1 p2 cid))
                                (incf (aref litfreq (+ (* cid 256) sym))))))
                 (when copyp
@@ -4379,7 +4420,7 @@ per command."
                       (aref recs (+ ri 8)) dxv
                       (aref recs (+ ri 9)) dxb)
                 (incf ri +cmd-stride+)))))))
-    (values recs ncmd litfreq cmdfreq distfreq lit-k lit-cmap)))
+    (values recs ncmd litfreq cmdfreq distfreq lit-k lit-cmap lit-mode)))
 
 (defun write-mlen-header (w n last)
   (let* ((m1 (1- n)) (nib (cond ((<= m1 #xFFFF) 4) ((<= m1 #xFFFFF) 5) (t 6))))
@@ -4393,19 +4434,19 @@ per command."
 ;; ---- literal context modeling (C encode.c: DecideOverLiteralContext
 ;; ---- / ChooseContextMap / ShouldUseComplexStaticContextMap) --------------
 
-(defparameter +ctx-simple-utf8+
+(deftable +ctx-simple-utf8+
   #(0 0 1 1 0 0 0 0 0 0 0 0 0 0 0 0
     0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
     0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
     0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0))
 
-(defparameter +ctx-continuation+
+(deftable +ctx-continuation+
   #(1 1 2 2 0 0 0 0 0 0 0 0 0 0 0 0
     0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
     0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
     0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0))
 
-(defparameter +ctx-complex-utf8+
+(deftable +ctx-complex-utf8+
   #(11 11 12 12 0 0 0 0 1 1 9 9 2 2 2 2
     1 1 1 1 8 3 3 3 1 1 1 1 2 2 2 2
     8 4 4 4 8 7 4 4 8 0 0 0 3 3 3 3
@@ -4513,6 +4554,147 @@ Returns (values K CMAP) with K in {1,2,3}."
                   ((< (- e2 e3) 0.02d0)
                    (values 2 +ctx-simple-utf8+))
                   (t (values 3 +ctx-continuation+))))))))
+
+
+(declaim (inline %approx-log2))
+(defun %approx-log2 (v)
+  "log2 of a positive fixnum without libm: exact below 2048, else the top
+11 bits through the table (relative error < 2^-10) - cluster decisions only."
+  (declare (type (integer 1 #.most-positive-fixnum) v) (optimize (speed 3) (safety 0)))
+  (if (< v 2048)
+      (aref +fast-log2-table+ v)
+      (let ((k (- (integer-length v) 11)))
+        (+ k (aref +fast-log2-table+ (ash v (- k)))))))
+
+(defun %histo-cost (h off)
+  "Estimated bits to code the 256-bin histogram H[OFF..OFF+256) with its own
+prefix code: Shannon bits plus a code-description estimate."
+  (declare (type (simple-array fixnum (*)) h) (type fixnum off)
+           (optimize (speed 3) (safety 0)))
+  (let ((total 0) (nnz 0) (sum 0.0d0))
+    (declare (type fixnum total nnz) (type double-float sum))
+    (loop for i of-type fixnum from off below (+ off 256) do
+      (let ((c (aref h i)))
+        (declare (type fixnum c))
+        (when (plusp c)
+          (incf total c) (incf nnz)
+          (incf sum (* c (%approx-log2 c))))))
+    (if (<= nnz 1)
+        (if (zerop nnz) 0.0d0 12.0d0)
+        (+ (- (* total (%approx-log2 total)) sum)
+           *hq-tree-bits-base*
+           (* *hq-tree-bits-per-symbol* nnz)))))
+
+(defun literals-mostly-utf8-p (data cmds)
+  "C BrotliIsMostlyUTF8 (ratio 0.75) over the parse's literal runs only -
+proportional to the literal count, not the input size."
+  (declare (type (simple-array (unsigned-byte 8) (*)) data)
+           (type (simple-array fixnum (*)) cmds)
+           (optimize (speed 3) (safety 0)))
+  (let ((good 0) (total 0))
+    (declare (type fixnum good total))
+    (loop for vb of-type fixnum from 0 below (length cmds) by 5 do
+      (let* ((ls (aref cmds (+ vb 1))) (end (+ ls (aref cmds vb))) (i ls))
+        (declare (type fixnum ls end i))
+        (incf total (- end ls))
+        (loop while (< i end) do
+          (multiple-value-bind (cp bytes) (parse-as-utf8 data i end)
+            (declare (type fixnum cp bytes))
+            (when (< cp #x110000) (incf good bytes))
+            (incf i bytes)))))
+    (> (* 4 good) (* 3 total))))
+
+(defun hq-context-map (data cmds mode)
+  "C's q10+ literal context modeling (BrotliBuildMetaBlock without block
+splits): 64 literal histograms under context MODE (2 UTF8, 3 signed) from
+the parse's literals, merged greedily while a merge saves estimated bits
+\(the BrotliClusterHistograms idea).  Returns (values K CMAP64), or
+\(values 1 NIL) when everything merges into one histogram."
+  (declare (type (simple-array (unsigned-byte 8) (*)) data)
+           (type (simple-array fixnum (*)) cmds)
+           (type (integer 0 3) mode)
+           (optimize (speed 3) (safety 0)))
+  (let ((h (make-array (* 64 256) :element-type 'fixnum :initial-element 0))
+        (lut +ctx-lut+) (lb (* 512 mode)))
+    (declare (type (simple-array fixnum (*)) h)
+             (type (simple-array (unsigned-byte 8) (2048)) lut)
+             (type fixnum lb))
+    (loop for vb of-type fixnum from 0 below (length cmds) by 5 do
+      (let ((ins (aref cmds vb)) (ls (aref cmds (+ vb 1))))
+        (declare (type fixnum ins ls))
+        (loop for i of-type fixnum from ls below (+ ls ins) do
+          (let* ((p1 (if (plusp i) (aref data (1- i)) 0))
+                 (p2 (if (> i 1) (aref data (- i 2)) 0))
+                 (cid (logior (aref lut (+ lb p1)) (aref lut (+ lb 256 p2)))))
+            (declare (type fixnum p1 p2 cid))
+            (incf (aref h (+ (* cid 256) (aref data i))))))))
+    ;; clusters: OWNER[c] = representative context, COST[c] for representatives
+    (let ((owner (make-array 64 :element-type 'fixnum))
+          (cost (make-array 64 :element-type 'double-float))
+          (alive (make-array 64 :element-type 'bit :initial-element 0))
+          (tmp (make-array 256 :element-type 'fixnum)))
+      (declare (type (simple-array fixnum (64)) owner)
+               (type (simple-array double-float (64)) cost)
+               (type (simple-array bit (64)) alive)
+               (type (simple-array fixnum (256)) tmp))
+      (dotimes (c 64)
+        (setf (aref owner c) c (aref cost c) (%histo-cost h (* c 256)))
+        (when (loop for i from (* c 256) below (* (1+ c) 256)
+                    thereis (plusp (aref h i)))
+          (setf (aref alive c) 1)))
+      (let ((gain (make-array (* 64 64) :element-type 'double-float
+                                        :initial-element 0.0d0)))
+        (declare (type (simple-array double-float (4096)) gain))
+      (flet ((merged-cost (a b)
+               (declare (type fixnum a b))
+               (dotimes (i 256)
+                 (setf (aref tmp i) (+ (aref h (+ (* a 256) i))
+                                       (aref h (+ (* b 256) i)))))
+               (%histo-cost tmp 0)))
+        ;; GAIN[a*64+b] (a < b) caches the saving of merging a and b; a
+        ;; merge only invalidates the pairs that involve the merged cluster.
+        (flet ((refresh (a b)
+                 (declare (type fixnum a b))
+                 (when (> a b) (rotatef a b))
+                 (setf (aref gain (+ (* a 64) b))
+                       (- (+ (aref cost a) (aref cost b)) (merged-cost a b)))))
+          (dotimes (a 64)
+            (when (= 1 (aref alive a))
+              (loop for b of-type fixnum from (1+ a) below 64 do
+                (when (= 1 (aref alive b)) (refresh a b)))))
+        (loop
+          (let ((best-gain 0.0d0) (ba -1) (bb -1))
+            (declare (type double-float best-gain) (type fixnum ba bb))
+            (dotimes (a 64)
+              (when (= 1 (aref alive a))
+                (loop for b of-type fixnum from (1+ a) below 64 do
+                  (when (= 1 (aref alive b))
+                    (let ((g (aref gain (+ (* a 64) b))))
+                      (declare (type double-float g))
+                      (when (> g best-gain)
+                        (setf best-gain g ba a bb b)))))))
+            (when (< ba 0) (return))
+            ;; merge BB into BA
+            (dotimes (i 256)
+              (incf (aref h (+ (* ba 256) i)) (aref h (+ (* bb 256) i)))
+              (setf (aref h (+ (* bb 256) i)) 0))
+            (setf (aref cost ba) (%histo-cost h (* ba 256))
+                  (aref alive bb) 0)
+            (dotimes (c 64)
+              (when (and (= 1 (aref alive c)) (/= c ba)) (refresh ba c)))
+            (dotimes (c 64)
+              (when (= (aref owner c) bb) (setf (aref owner c) ba))))))))
+      ;; dense cluster ids in first-use order; empty contexts join cluster 0
+      (let ((ids (make-array 64 :element-type 'fixnum :initial-element -1))
+            (cmap (make-array 64 :initial-element 0))
+            (k 0))
+        (declare (type (simple-array fixnum (64)) ids) (type fixnum k))
+        (dotimes (c 64)
+          (let ((o (aref owner c)))
+            (when (= 1 (aref alive o))
+              (when (< (aref ids o) 0) (setf (aref ids o) k) (incf k))
+              (setf (svref cmap c) (aref ids o)))))
+        (if (<= k 1) (values 1 nil) (values k cmap))))))
 
 (defun literal-contexts (data quality)
   "C DecideOverLiteralContextModeling.  Returns (values K CMAP64)."
@@ -4736,7 +4918,7 @@ finds no split the header degrades to the single-type form byte-for-byte."
            (type (or null fixnum) dict-limit)
            (type (simple-array fixnum (*)) rb)
            (type fixnum max-chain))
-  (multiple-value-bind (recs ncmd litf cmdf distf lit-k lit-cmap)
+  (multiple-value-bind (recs ncmd litf cmdf distf lit-k lit-cmap lit-mode)
         (plan-commands
          data
          (or cmds
@@ -4881,7 +5063,7 @@ finds no split the header degrades to the single-type form byte-for-byte."
               (b:wbits w 0 4)                ; NDIRECT=0
               (if (= lit-k 1)
                   (b:wbits w 0 2)            ; context mode (unused)
-                  (b:wbits w 2 2))           ; context mode 2 = UTF8
+                  (b:wbits w lit-mode 2))    ; context mode: 2 UTF8, 3 signed
               (if (= lit-k 1)
                   (b:wbits w 0 1)            ; NTREESL=1
                   (write-nbltypes w lit-k))
@@ -4991,8 +5173,9 @@ finds no split the header degrades to the single-type form byte-for-byte."
                       (decf ileft))
                     (let ((ins (aref recs b))
                           (ls (aref recs (+ b 1)))
-                          (lut0 +lut0+) (lut1 +lut1+))
-                      (declare (type fixnum ins ls))
+                          (ctxlut +ctx-lut+) (lb (* 512 (the (integer 0 3) lit-mode))))
+                      (declare (type fixnum ins ls lb)
+                               (type (simple-array (unsigned-byte 8) (2048)) ctxlut))
                       ;; One capacity check covers every bit this command can
                       ;; emit: at most ~13 bytes of command/distance overhead
                       ;; plus two bytes per literal (code lengths <= 15 bits),
@@ -5021,8 +5204,8 @@ finds no split the header degrades to the single-type form byte-for-byte."
                                           (p2 (if (> i 1)
                                                   (aref data (- i 2)) 0))
                                           (cid (aref lit-cmap
-                                                     (logior (aref lut0 p1)
-                                                             (aref lut1 p2)))))
+                                                     (logior (aref ctxlut (+ lb p1))
+                                                             (aref ctxlut (+ lb 256 p2))))))
                                      (declare (type fixnum sym p1 p2 cid))
                                      (unless (aref lit-sng cid)
                                        (b:%wbits-raw
@@ -5218,15 +5401,15 @@ meta-block."
                         :fast-fragment t)
                 (write-fast-block-body w data cv nc litf cmdf distf))))
          (trivial
-          (write-trivial-block-body
-           w data
-           (lz77 data window :use-dict use-dict :dict-limit dict-limit
-                          :base-pos 0 :max-chain max-chain :lazy lazy
-                          :skip-match skip-match
-                          :insert-interior insert-interior
-                          :quick quick)
-           rb :short-dist short-dist
-              :max-lit-bits max-lit-bits))
+          (multiple-value-bind (cmds used)
+              (lz77 data window :use-dict use-dict :dict-limit dict-limit
+                                :base-pos 0 :max-chain max-chain :lazy lazy
+                                :skip-match skip-match
+                                :insert-interior insert-interior
+                                :quick quick)
+            (write-trivial-block-body w data cmds rb :short-dist short-dist
+                                                     :max-lit-bits max-lit-bits
+                                                     :n5 (or used (length cmds)))))
          (t
           (write-compressed-block-body w data 0 window use-dict dict-limit rb
                                        :max-chain max-chain :lazy lazy
@@ -5240,13 +5423,16 @@ meta-block."
               (mb-lazy (if fast-fragment t lazy))
               (mb-skip (if fast-fragment nil skip-match))
               (mb-interior (if fast-fragment t insert-interior))
-              (cmds (lz77 data window :use-dict use-dict
+              (cmds (multiple-value-bind (v used)
+                        (lz77 data window :use-dict use-dict
                                    :dict-limit dict-limit :base-pos 0
                                    :max-chain mb-chain :lazy mb-lazy
                                    :skip-match mb-skip
                                    :insert-interior mb-interior
                                    :score-p score-p :checks checks
-                                   :bt bt :quick quick))
+                                   :bt bt :quick quick)
+                      ;; the quick matcher's vector is pooled and untrimmed
+                      (if (and used (/= used (length v))) (subseq v 0 used) v)))
               (remaining (partition-commands (cmds->list cmds) #.(ash 1 24)))
               (pos 0))
          (loop while remaining do

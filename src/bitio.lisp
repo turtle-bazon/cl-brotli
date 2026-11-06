@@ -8,12 +8,12 @@
          (map '(simple-array (unsigned-byte 8) (*)) #'char-code s))
         (t (coerce s '(simple-array (unsigned-byte 8) (*))))))
 
-(defparameter +masks+
+(deftable +masks+
   (let ((v (make-array 25 :element-type 'fixnum :initial-element 0)))
     (dotimes (i 25 v) (setf (aref v i) (1- (ash 1 i))))))
 (declaim (type (simple-array fixnum (25)) +masks+))
 
-(defparameter +wide-masks+
+(deftable +wide-masks+
   (let ((v (make-array 57 :element-type 'fixnum :initial-element 0)))
     (dotimes (i 57 v) (setf (aref v i) (1- (ash 1 i))))))
 (declaim (type (simple-array fixnum (57)) +wide-masks+))

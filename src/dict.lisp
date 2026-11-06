@@ -1,7 +1,7 @@
 ;;;; src/dict.lisp — brotli static dictionary + word transforms (RFC 7932 §8).
 (in-package #:cl-brotli.lisp)
 
-(defparameter +ndbits+
+(deftable +ndbits+
   (make-array 25 :element-type 'fixnum
                   :initial-contents '(0 0 0 0 10 10 11 11 10 10 10 10 10 9 9 8 7 7 8 7 7 6 6 5 5)))
 (declaim (type (simple-array fixnum (25)) +ndbits+))
@@ -12,7 +12,7 @@
 tight ftype so hot callers' distance arithmetic stays in fixnum range."
   (declare (type (integer 0 24) len) (optimize (speed 3) (safety 0)))
   (if (>= len 4) (ash 1 (aref +ndbits+ len)) 0))
-(defparameter +doffset+
+(deftable +doffset+
   (let ((d (make-array 26 :element-type 'fixnum :initial-element 0)))
     (loop for l from 0 to 24 do (setf (aref d (1+ l)) (+ (aref d l) (* l (nwords l)))))
     d))
@@ -76,7 +76,7 @@ tight ftype so hot callers' distance arithmetic stays in fixnum range."
 ;;; (PREFIX KIND K SUFFIX): KIND 0 identity, 1 uppercase-first, 2 uppercase-
 ;;; all, 3 omit-first-K, 4 omit-last-K.  DICT-WORD above re-parsed the
 ;;; transform's symbol name and made five temporary vectors per reference.
-(defparameter +transforms-c+
+(deftable +transforms-c+
   (map 'simple-vector
        (lambda (tr)
          (destructuring-bind (prefix type suffix) tr

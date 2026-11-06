@@ -93,3 +93,13 @@ passing the base pointer too."
            (optimize (speed 3) (safety 0)))
   #+cl-brotli-x86-64 (sb-kernel:count-trailing-zeros x)
   #-cl-brotli-x86-64 (1- (integer-length (logand x (- x)))))
+
+(defmacro deftable (name value &optional doc)
+  "A constant lookup table.  On SBCL a load-time global
+\(SB-EXT:DEFINE-LOAD-TIME-GLOBAL: value computed at load time, like
+DEFPARAMETER; DEFGLOBAL would also evaluate it at compile time).  A global
+can never be dynamically bound, so a read is one load - a DEFPARAMETER read
+is a thread-local symbol-value check plus a global load (5 instructions in
+every hot loop that touches the table).  Elsewhere DEFPARAMETER."
+  #+sbcl `(sb-ext:define-load-time-global ,name ,value ,@(when doc (list doc)))
+  #-sbcl `(defparameter ,name ,value ,@(when doc (list doc))))
