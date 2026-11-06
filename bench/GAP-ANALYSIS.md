@@ -2634,3 +2634,30 @@ Also recorded: timing2 itself shows +/-8% run variance on boundary cells
 (source q1 read 0.996x, then 1.075x, then 1.05x on three consecutive
 runs of identical code) - so single-cell timing claims need either the
 controlled A/B (both orders) or the sweep per-level medians.
+
+## Rev 156 (experiment, reverted): inlining FIND-MATCH / FIND-MATCH-SCORE / EMIT-NORMAL
+
+The q5/q7 profiles showed FIND-MATCH-SCORE (43.1% of q5), FIND-MATCH
+(53.7% of q7) and EMIT-NORMAL (13-15%) as their OWN label entries -
+i.e. never inlined, so every position paid a local call.  The labels
+block already carries (DECLARE (INLINE hash ins mlen mlen2 probe-ok ...)),
+so the three big labels were added to that list.
+
+Result: inlining DID take effect - the three entries vanished and %LZ77
+self jumped 3.6% -> 60.5%.  But a controlled A/B (both orders, minutes
+apart, same harness) shows a WASH:
+  html q5  45.79 -> 45.13 MiB/s  (-1.4%)
+  html q7  43.86 -> 43.25 MiB/s  (-1.4%)
+  html q9  30.12 -> 30.94 MiB/s  (+2.7%)
+Local static-fn calls were already ~5 cycles; the code bloat (three
+large functions duplicated at 3-4 call sites each, %LZ77 far past L1i)
+apparently offsets the call removal.
+
+REVERTED, for a second reason that outweighs the wash: the split profile
+entries are the campaign's primary diagnostic - every decision since
+Rev 148 (matcher vs command path, per-tier lever choice) came from
+FIND-MATCH / FIND-MATCH-SCORE / EMIT-NORMAL percentages.  Collapsing
+them into one 60.5% blob would blind future iterations for no speed.
+
+Lesson: measure profile STRUCTURE, not just speed, when trading away
+instrumentation-friendly code shape.
