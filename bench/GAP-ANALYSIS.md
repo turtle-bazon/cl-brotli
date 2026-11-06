@@ -3011,3 +3011,30 @@ Context: the r164 sweep is 19/45 both gates, 0 gate ratio failures
 r160 and r154b read 0.99, so this cell is ±load noise per the Rev 161
 caveat).  Sparse corpora fully recovered by the r164 alloc fix
 (DICT/PATTERN/PERIODIC/UTF8/ZEROS q2 +0.13..0.21 each).
+
+## Rev 166 (experiment, reverted): state-threading WRITE-FAST-BLOCK-BODY - NEUTRAL
+
+Applied the r160 EMIT-ONE pattern (acc/nbits/pos as lexicals across the
+command loop, wr-pm/wr-raw instead of %WBITS-RAW-PM/%WBITS-RAW, flush+
+reload around W-EMIT-RUN, flush before W-ENSURE which reads BWR-POS) to
+q1's writer, targeting WRITE-FAST's 31.1% self-share of source q1
+(profile: fragment scan 52.5% + write-fast 31.1%).
+
+Prediction was +4-7% (7 struct-slot ops x ~550k writes).  MEASURED
+(interleaved A/B, A=r165): source q1 320.7 -> 320.5 mean (0.0%),
+html q1 +1.0%, binary q1 -0.5%, json q1 exact ties.
+
+NEUTRAL - reverted per the Rev 156 rule.  Why it failed where r160
+succeeded: EMIT-ONE's reads/writes sat on a CALL boundary (reload
+every command, values dead across the call), while write-fast's
+inlined %WBITS-RAW-PM struct ops are straight-line L1 hits that the
+out-of-order engine already hides - removing them changes the
+instruction count but not the critical path.  Lesson: the r160 pattern
+pays only where the state crosses a real function boundary; count the
+boundary, not the slot accesses.
+
+Boundary-cell status after r165: source q1 0.94, html q7 0.97 (both
+need +3-6%); binary q7 0.86 / source q7 0.88 (+14-16%).  The q1/q7
+profiles show no remaining single item of that size outside the
+structural work (fragment single-path split; find-match's chain shape
+vs C's H6 contiguous-bucket scan + 10-entry distance cache).
