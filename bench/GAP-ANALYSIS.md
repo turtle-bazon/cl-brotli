@@ -2880,3 +2880,54 @@ window.  Reverted; tree back to r160, 45/45 byte-identical.
 Lesson: "profile entry above 3% means not inlined" tells you where a
 CALL is, not that removing the call is free - inline only after timing,
 and only when the body is small relative to the caller.
+
+## Rev 163: command list -> flat fixnum vector (q7 +9.5%, q2 +17.6%, q5 +13%)
+
+The profile of binary q7 (the cheapest open gate cell) showed the command
+MACHINERY, not the matcher: EMIT-NORMAL 13% self (conses a 5-element
+list per command), PLAN-COMMANDS 10% (walks it with 5 pointer chases),
+LIST-NREVERSE 1.5%, plus the GC of ~100k live conses per compress call.
+C keeps commands in a flat array; the fragment already used one
+(PUSH-CMD/cv) - only %LZ77 still built lists.
+
+REFACTOR (three return shapes unified to one protocol - a flat fixnum
+vector, 5 entries per command: ins lit-start cpy dist dictp, DICTP 0/1):
+  * %LZ77: (cmds '()) -> geometrically-growing fixnum vector + NCMD;
+    PUSH-CMD label replaces the 3 (push (list ...)) sites; the tail
+    shrinks to exact size (SUBSEQ) so consumers derive NCMD = length/5.
+    (NREVERSE gone - the vector is already in order.)
+  * TINY-INPUT early return (n < min-match): (list (list n 0 0 0 nil))
+    -> an exact 5-fixnum vector (THIRD shape, found the hard way).
+  * BT/ZOPFLI branch (q10/11): Z-ITERATE returns 5-element lists with
+    boolean DICTP -> wrapped in BLOCK->CMDS at the %LZ77 boundary
+    (ZOPFLI-SET-FROM-COMMANDS still gets Z-ITERATE's list internally).
+  * Consumers: PLAN-COMMANDS + WRITE-TRIVIL-BLOCK-BODY (x2 loops) iterate
+    the vector; dictp truthiness NOT/OR -> ZEROP/PLUSP (0 is truthy!);
+    typed (SIMPLE-ARRAY FIXNUM (*)) declare on CMDS or every AREF fell
+    back to the generic accessor (r152 lesson).
+  * >16MiB multi-meta-block path only: CMDS->LIST / BLOCK->CMDS adapters
+    keep PARTITION-COMMANDS + SPLIT-COMMAND-AT list-based (cold).
+
+BUGS FOUND DURING IT (both would have been silent corruptors):
+  1. dictp semantics: consumers test (not dictp)/(or dictp ...) which are
+     wrong for 0/1 fixnums - converted at all 6 sites; zopfli's own
+     accumulator already used booleans (comment at its push site).
+  2. q10's bt=16 path and the n<min-match path returned LISTS while
+     PLAN-COMMANDS (safety 0 + vector declare) read them as vectors ->
+     aref on a cons = heap corruption -> 618 GB bogus allocation.  Both
+     fixed by converting at the producer boundary.
+
+Verified: ALL 45 BYTE-IDENTICAL; 241/241 tests (incl. multi-threaded);
+bt-min 8/8; repro-split clean; ratio45 0 failures (worst 1.100).
+
+MEASURED (controlled A/B, interleaved A B A B, each pair exact-repeat):
+  spec        A=lists        B=vectors      delta
+  binary q7   35.71 36.66    39.94 39.43    +9.6%
+  source q7   76.69 77.64    84.46 85.03    +9.5%
+  html q2     77.16 75.30    88.65 89.29   +17.6%
+  html q5     41.95 42.23    47.53 46.99   +13.0%
+  json q10     2.34  2.39     2.43  2.41    +2.8% (BLOCK->CMDS conversion)
+
+Beats the recorded +4-8% scope.  Projection: binary q7 0.92 -> ~1.01
+(gate flip), source q7 0.90 -> ~0.985 (boundary), q2/q5/q6 all gain
+13-18% but remain short of 1.0.

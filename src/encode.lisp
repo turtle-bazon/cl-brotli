@@ -1584,7 +1584,6 @@ The final insert-only trailing command is not part of C's command stream
         (setf (aref prefix (1+ i))
               (+ (aref prefix i) (aref ct (aref data i))))))
     model))
-
 (defun %lz77 (data sap dictv dictsap window use-dict dict-limit base-pos
               max-chain lazy skip-match insert-interior
               &optional (score-p nil) (checks 1)
@@ -1611,7 +1610,12 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
          ;; partitioning is future work).
          (bt (if (and bt (<= n #.(ash 1 23))) bt nil)))
     (if (< n min-match)
-        (if (zerop n) '() (list (list n 0 0 0 nil)))
+        ;; Tiny input: one insert-only command, in the same flat 5-fixnum
+        ;; vector shape the rest of this function returns.
+        (if (zerop n)
+            (make-array 0 :element-type 'fixnum)
+            (make-array 5 :element-type 'fixnum
+                         :initial-contents (list n 0 0 0 0)))
         (let* ((hbits 17) (hmask (1- (ash 1 hbits)))
                (chained (and (not bt) (> max-chain 1)))
                ;; H10 binary-tree matcher (q10/11, C hash_to_binary_tree):
@@ -1707,7 +1711,9 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                ;; was inserted, so no initial fill is needed.
                (prev (and chained
                           (make-array n :element-type '(unsigned-byte 32))))
-               (cmds '()) (lit-start 0) (p 0) (last (- n min-match))
+               (cmds (make-array (* 5 (max 1024 (ash n -3)))
+                                  :element-type 'fixnum))
+               (ncmd 0) (lit-start 0) (p 0) (last (- n min-match))
                (skip 32) (dict-used 0) (last-dist 0)
                ;; NIL dict-limit means "no limit": folding it into one
                ;; fixnum local keeps every gate a fixnum compare (the
@@ -2767,14 +2773,31 @@ score rather than length.  Returns (values len dist score)."
                                              best-len ml
                                              best-dist (- pos cand)))))))))
                        (values best-len best-dist best-score)))
+                   (push-cmd (ins ls cpy dist dictp)
+                     "Append one 5-fixnum command record (INS LIT-START CPY
+DIST DICTP) to CMDS, growing it geometrically.  DICTP is 0/1, not nil/t:
+the consumers test it with ZEROP/PLUSP."
+                     (declare (type fixnum ins ls cpy dist dictp))
+                     (when (>= (* 5 (1+ ncmd)) (length cmds))
+                       (let ((new (make-array (* 2 (length cmds))
+                                              :element-type 'fixnum)))
+                         (replace new cmds)
+                         (setf cmds new)))
+                     (let ((vb (* 5 ncmd)))
+                       (declare (type fixnum vb))
+                       (setf (aref cmds vb) ins
+                             (aref cmds (+ vb 1)) ls
+                             (aref cmds (+ vb 2)) cpy
+                             (aref cmds (+ vb 3)) dist
+                             (aref cmds (+ vb 4)) dictp))
+                     (incf ncmd))
                    (emit-normal (best-len best-dist inserted h)
                      (declare (type fixnum best-len best-dist h))
                      (unless inserted (ins p h))
                      (if (>= best-len min-cop)
                          (progn
-                           (push (list (- p lit-start) lit-start best-len
-                                       best-dist nil)
-                                 cmds)
+                           (push-cmd (- p lit-start) lit-start best-len
+                                     best-dist 0)
                            (setf last-dist best-dist)
                            (when (and dc (/= best-dist (aref dc 0)))
                              ;; C rotates the cache for every copy except a
@@ -2839,11 +2862,14 @@ score rather than length.  Returns (values len dist score)."
                              (incf p)))))
             (declare (inline hash ins mlen mlen2 probe-ok penalty
                              zq-push z-minlen bt-hash z-update-node
-                             z-shortcut z-eval z-cache))
+                             z-shortcut z-eval z-cache push-cmd))
             (if bt
+                ;; Z-ITERATE builds 5-element lists (boolean DICTP); the
+                ;; consumers below expect the flat 5-fixnum vector, so
+                ;; convert at this boundary (same as BLOCK->CMDS).
                 (if (>= bt 64)
-                    (z-iterate-hq)
-                    (z-iterate nil))
+                    (block->cmds (z-iterate-hq))
+                    (block->cmds (z-iterate nil)))
                 (progn
                   (loop while (<= p last) do
               (let* ((ph (hash p)))
@@ -2874,8 +2900,7 @@ score rather than length.  Returns (values len dist score)."
                                        (the (integer 0 2047) dict-idx)
                                        (* (the (integer 0 127) dict-tid)
                                           (nwords dict-len)))))
-                            (push (list (- p lit-start) lit-start dict-len dist t)
-                                  cmds)
+                            (push-cmd (- p lit-start) lit-start dict-len dist 1)
                             (incf dict-used)
                             (ins p ph)
                             (when (or bt (and chained insert-interior))
@@ -2945,8 +2970,12 @@ score rather than length.  Returns (values len dist score)."
                                        (setf done t)
                                        (emit-normal bl bd t ph)))))))))))))
                   (when (< lit-start n)
-                    (push (list (- n lit-start) lit-start 0 0 nil) cmds))
-                  (nreverse cmds))))))))
+                    (push-cmd (- n lit-start) lit-start 0 0 0))
+                  (let ((total (* 5 ncmd)))
+                    (declare (type fixnum total))
+                    (if (= (length cmds) total)
+                        cmds
+                        (subseq cmds 0 total))))))))))
 
 ;;; ---- C Brotli's q0/q1 fast-fragment entropy coding --------------------
 
@@ -3523,7 +3552,8 @@ decisions; used only when W is non-nil."
                               (bt nil))
   "Return commands (insert-len lit-start copy-len distance dict-p); copy-len 0
 marks a trailing insert-only command.  BASE-POS is the number of bytes already
-produced before DATA; it is needed to encode dictionary distances correctly
+produced before DATA.  Commands come back as a flat fixnum vector with five
+entries per command (insert-len lit-start copy-len distance dict-p).; it is needed to encode dictionary distances correctly
 when DATA is one chunk of a multi-meta-block stream.  MAX-CHAIN and LAZY trade
 compression ratio for encoder throughput."
   ;; One dictionary snapshot per run: the vector, and its SAP taken
@@ -3560,7 +3590,7 @@ compression ratio for encoder throughput."
                                    (max-lit-bits 15))
   (declare (type b:bwr w)
            (type (simple-array (unsigned-byte 8) (*)) data)
-           (type (simple-array fixnum (*)) rb)
+           (type (simple-array fixnum (*)) rb cmds)
            (optimize (speed 3) (safety 0)))
   (let* ((litf (make-array 256 :element-type 'fixnum :initial-element 0))
          (cmdf (make-array 704 :element-type 'fixnum :initial-element 0))
@@ -3568,11 +3598,13 @@ compression ratio for encoder throughput."
          (probe-rb (copy-seq rb)))
     (declare (type (simple-array fixnum (256)) litf)
              (type (simple-array fixnum (*)) cmdf distf probe-rb))
-    ;; Pass 1: histograms only.
-    (dolist (c cmds)
-      (let* ((ins (car c)) (lit-start (cadr c)) (cpy (caddr c))
-             (dist (cadddr c)) (dictp (car (cddddr c))))
-        (declare (type fixnum ins lit-start cpy dist))
+    ;; Pass 1: histograms only.  CMDS is a flat 5-fixnum vector; DICTP is 0/1.
+    (loop for ci of-type fixnum from 0 below (truncate (length cmds) 5) do
+      (let* ((vb (* 5 ci))
+             (ins (aref cmds vb)) (lit-start (aref cmds (+ vb 1)))
+             (cpy (aref cmds (+ vb 2)))
+             (dist (aref cmds (+ vb 3))) (dictp (aref cmds (+ vb 4))))
+        (declare (type fixnum ins lit-start cpy dist dictp))
         (loop for i from lit-start below (+ lit-start ins)
               do (incf (aref litf (aref data i))))
         (multiple-value-bind (icode ixv ixb)
@@ -3584,7 +3616,7 @@ compression ratio for encoder throughput."
                   (values 0 0 0))
             (declare (ignore cxv cxb))
             (let* ((ring-pos (aref probe-rb 4))
-                   (repeat (and (plusp cpy) (not dictp)
+                   (repeat (and (plusp cpy) (zerop dictp)
                                 (= dist (aref probe-rb
                                               (logand (+ ring-pos 3) 3)))))
                    (dist0 (and repeat (<= icode 7) (< ccode 16)))
@@ -3609,7 +3641,7 @@ compression ratio for encoder throughput."
                               (declare (ignore xv xb))
                               (setf dcode code)))))
                   (incf (aref distf dcode))
-                  (unless (or dictp (= dcode 0))
+                  (unless (or (plusp dictp) (= dcode 0))
                     (setf (aref probe-rb (logand ring-pos 3)) dist)
                     (setf (aref probe-rb 4) (1+ ring-pos))))))))))
     (let* ((lit (build-etree litf 256 max-lit-bits))
@@ -3635,10 +3667,12 @@ compression ratio for encoder throughput."
       (write-etree w cmd 704)
       (write-etree w dist 64)
       ;; Pass 2: recompute the compact codes and emit.
-      (dolist (c cmds)
-        (let* ((ins (car c)) (lit-start (cadr c)) (cpy (caddr c))
-               (dist (cadddr c)) (dictp (car (cddddr c))))
-          (declare (type fixnum ins lit-start cpy dist))
+      (loop for ci of-type fixnum from 0 below (truncate (length cmds) 5) do
+        (let* ((vb (* 5 ci))
+               (ins (aref cmds vb)) (lit-start (aref cmds (+ vb 1)))
+               (cpy (aref cmds (+ vb 2)))
+               (dist (aref cmds (+ vb 3))) (dictp (aref cmds (+ vb 4))))
+          (declare (type fixnum ins lit-start cpy dist dictp))
           (let ((cost (+ 24 (* 2 ins))))
             (declare (type fixnum cost))
             (when (> cost slack)
@@ -3652,7 +3686,7 @@ compression ratio for encoder throughput."
                     (length-code cpy +cpy-code+ +cpy-xval+ +cpy-xbits+ +cpy-base+ +cpy-bits+)
                     (values 0 0 0))
               (let* ((ring-pos (aref rb 4))
-                     (repeat (and (plusp cpy) (not dictp)
+                     (repeat (and (plusp cpy) (zerop dictp)
                                   (= dist (aref rb (logand (+ ring-pos 3) 3)))))
                      (dist0 (and repeat (<= icode 7) (< ccode 16)))
                      (csym (if dist0
@@ -3671,7 +3705,7 @@ compression ratio for encoder throughput."
                             (setf dcode scode dxv sxv dxb sxb)
                             (multiple-value-setq (dcode dxv dxb)
                               (encode-distance dist)))))
-                  (unless (or dictp (= dcode 0))
+                  (unless (or (plusp dictp) (= dcode 0))
                     (setf (aref rb (logand ring-pos 3)) dist)
                     (setf (aref rb 4) (1+ ring-pos))))
                 (unless cmd-single
@@ -3818,7 +3852,7 @@ RB is the distance ring shared by all meta-blocks of the stream; it must
 persist across chunks just like the decoder's ring.  SHORT-DIST enables the 15
 short distance-ring codes; low qualities disable them to avoid 15 comparisons
 per command."
-  (let* ((ncmd (length cmds))
+  (let* ((ncmd (truncate (length cmds) 5))
          (recs (make-array (* +cmd-stride+ ncmd)
                            :element-type 'fixnum))
          (ri 0)
@@ -3831,21 +3865,24 @@ per command."
          (distfreq (make-array 64 :element-type 'fixnum :initial-element 0)))
     (declare (type fixnum ri)
              (type (simple-array (unsigned-byte 8) (*)) data)
-             (type (simple-array fixnum (*)) recs litfreq cmdfreq distfreq rb)
+             (type (simple-array fixnum (*)) recs litfreq cmdfreq distfreq
+                                     rb cmds)
              ;; every CMAP variant is a #(...) literal vector (or NIL for
              ;; the unmodelled path); without this the per-literal AREF in
              ;; the loop below fell back to the generic hairy accessor
              (type (or null simple-vector) lit-cmap))
-    ;; Explicit CAR/CDR access instead of DESTRUCTURING-BIND: the latter
-    ;; expands to SB-C::CHECK-DS-LIST in this hot loop.
-    (dolist (c cmds)
-      (let* ((ins (car c))
-             (lit-start (cadr c))
-             (cpy (caddr c))
-             (dist (cadddr c))
-             (dictp (car (cddddr c)))
+    ;; Flat fixnum vector, 5 entries per command (INS LIT-START CPY DIST
+    ;; DICTP); DICTP is 0/1 here so the truthiness tests below use
+    ;; ZEROP/PLUSP instead of NOT/OR (0 is truthy in Lisp).
+    (loop for ci of-type fixnum from 0 below (truncate (length cmds) 5) do
+      (let* ((vb (* 5 ci))
+             (ins (aref cmds vb))
+             (lit-start (aref cmds (+ vb 1)))
+             (cpy (aref cmds (+ vb 2)))
+             (dist (aref cmds (+ vb 3)))
+             (dictp (aref cmds (+ vb 4)))
              (ring-pos (aref rb 4)))
-        (declare (type fixnum ins lit-start cpy dist ring-pos))
+        (declare (type fixnum ins lit-start cpy dist dictp ring-pos))
         (multiple-value-bind (icode ixv ixb)
             (length-code ins +ins-code+ +ins-xval+ +ins-xbits+ +ins-base+ +ins-bits+)
           (declare (type fixnum icode ixv ixb))
@@ -3855,7 +3892,7 @@ per command."
                     (length-code cpy +cpy-code+ +cpy-xval+ +cpy-xbits+ +cpy-base+ +cpy-bits+)
                     (values 0 0 0))
               (declare (type fixnum ccode cxv cxb))
-              (let* ((repeat (and copyp (not dictp)
+              (let* ((repeat (and copyp (zerop dictp)
                                   (= dist (aref rb (logand (+ ring-pos 3) 3)))))
                      (dist0 (and repeat (<= icode 7) (< ccode 16)))
                      (csym (if dist0
@@ -3891,7 +3928,7 @@ per command."
                     (incf (aref distfreq dcode))
                     ;; Distance symbol 0 reuses the last distance without
                     ;; pushing; dictionary references are not pushed either.
-                    (unless (or dictp (= dcode 0))
+                    (unless (or (plusp dictp) (= dcode 0))
                       (setf (aref rb (logand ring-pos 3)) dist)
                       (setf (aref rb 4) (1+ ring-pos)))))
                 (setf (aref recs ri) ins
@@ -4633,6 +4670,33 @@ split and the current meta-block must be closed first."
                  (values (list ins lit-start first-copy dist nil)
                          (list 0 0 rest-copy dist nil))))))))))))
 
+(defun cmds->list (v)
+  "Flat 5-fixnum command vector -> list of 5-element lists with boolean
+DICTP (NIL/T), the representation PARTITION-COMMANDS and SPLIT-COMMAND-AT
+expect.  Only the >16MiB multi-meta-block path pays this conversion."
+  (declare (type (simple-array fixnum (*)) v) (optimize (speed 3) (safety 0)))
+  (let ((out '()))
+    (loop for i from (- (length v) 5) downto 0 by 5 do
+      (push (list (aref v i) (aref v (+ i 1)) (aref v (+ i 2))
+                  (aref v (+ i 3)) (if (zerop (aref v (+ i 4))) nil t))
+            out))
+    out))
+
+(defun block->cmds (lst)
+  "Inverse of CMDS->LIST: a partitioned command list back to an exact flat
+5-fixnum vector (DICTP 0/1) for the writers."
+  (declare (type list lst) (optimize (speed 3) (safety 0)))
+  (let* ((n (length lst))
+         (v (make-array (* 5 n) :element-type 'fixnum)))
+    (declare (type (simple-array fixnum (*)) v) (type fixnum n))
+    (loop for c in lst for i of-type fixnum from 0 by 5 do
+      (setf (aref v i) (car c)
+            (aref v (+ i 1)) (cadr c)
+            (aref v (+ i 2)) (caddr c)
+            (aref v (+ i 3)) (cadddr c)
+            (aref v (+ i 4)) (if (car (cddddr c)) 1 0)))
+    v))
+
 (defun partition-commands (cmds limit)
   "Partition CMDS into meta-blocks whose total output length is <= LIMIT.
 Normal copies and literal runs may be split; dictionary copies are kept
@@ -4733,7 +4797,7 @@ meta-block."
                                    :insert-interior mb-interior
                                    :score-p score-p :checks checks
                                    :bt bt))
-              (remaining (partition-commands cmds #.(ash 1 24)))
+              (remaining (partition-commands (cmds->list cmds) #.(ash 1 24)))
               (pos 0))
          (loop while remaining do
            (let* ((block (pop remaining))
@@ -4742,7 +4806,7 @@ meta-block."
                                         :initial-value 0)))
              (write-mlen-header w outlen lastp)
              (if trivial
-                 (write-trivial-block-body w data block rb
+                 (write-trivial-block-body w data (block->cmds block) rb
                                            :short-dist short-dist
                                            :max-lit-bits max-lit-bits)
                  (write-compressed-block-body w data 0 window use-dict dict-limit
@@ -4752,7 +4816,7 @@ meta-block."
                                                  :insert-interior insert-interior
                                                  :quality quality
                                                  :bt bt
-                                                 :cmds block))
+                                                 :cmds (block->cmds block)))
              (incf pos outlen)))
          (unless (= pos n)
            (error "multi-block encoder produced ~D bytes, expected ~D" pos n)))))
