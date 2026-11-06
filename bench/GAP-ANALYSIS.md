@@ -2661,3 +2661,49 @@ them into one 60.5% blob would blind future iterations for no speed.
 
 Lesson: measure profile STRUCTURE, not just speed, when trading away
 instrumentation-friendly code shape.
+
+## Rev 157: first true assembly-vs-assembly comparison (q0 tier) - and a failed exploit
+
+Asked whether we compare COMPILED CODE, not just profiles: yes now.
+Method: gcc -O2 -S the real c/enc/compress_fragment.c (our q0 counterpart
+is BrotliCompressFragmentFastImpl15 - table_bits 15, matching our q0's
+fragment table), and disassemble our %LZ77-fragment; compare loop by loop.
+
+WHAT C'S ASSEMBLY SHOWS (cf.s, Impl15 at line 702):
+* Interior hash stores: C does ONE UNALIGNED_LOAD64LE(ip-3) and derives
+  all four hashes from it via HashBytesAtOffset(input_bytes, 0/1/2/3,
+  shift) - the offsets are LITERALS, so gcc folds them to immediate
+  shifts.  Ours called HASH once per position: a fresh 8-byte load each
+  time, plus loop overhead.
+* IsMatch is emitted as `cmpl %reg, (mem)` - one load folded into the
+  compare instruction (5 sites); our PREFIX-MATCH issues two explicit
+  loads plus compares.
+* C checks the copy distance ONCE after the trawl loop; we test
+  (<= (- p c2) window) on EVERY trawl iteration (sub + cmp + branch).
+* Total code: C's Impl15 = 1,503 instructions; our %LZ77-fragment =
+  3,449 (2.3x).  Part of it is real: our function carries BOTH the
+  one-pass and two-pass paths (`if w` everywhere) while C keeps them in
+  separate translation units.
+
+FAILED EXPLOIT - DO NOT RE-DERIVE: batching the interior hash stores
+(one load, four literal-offset hashes, group of four) was implemented
+twice:
+  a) runtime offset into %HASHF-ONCE/FROM: 21-29% SLOWER - the runtime
+     offset turns `(ash bytes (- (* 8 d)))` into a 3-cycle VARIABLE
+     shift, while the loads it replaced are L1 hits (cheap).
+  b) literal offsets 0/1/2/3 (as C does): still 3.1% (html) / 5.9%
+     (json) SLOWER, binary +1.4% - the batching structure (double
+     bounds condition, group index arithmetic, four separate table-index
+     computations) costs more than the load it removes.
+Conclusion: the per-position loads were never the bottleneck; C's edge
+in this loop is denser surrounding code, not the load count.  Both
+versions reverted; tree back to r156 state, 45/45 byte-identical.
+
+HONEST ANSWER TO "why still 0.4": the gap is structural, not a single
+instruction.  Our scan loop is ~45-55 instructions/iteration vs C's
+~35-40 (window check every iteration vs once; extra last-distance
+guards; loop bookkeeping), our function is 2.3x the code, and the emit
+half (47% of q0) writes through a struct that C keeps in registers.
+Closing q0 needs C's exact loop shape - straight-line emission with
+next_emit tracking and a single-path function - i.e. the rewrite GAP
+already records as the q0/q1 structural remainder, not more micro-tuning.
