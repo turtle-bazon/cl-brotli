@@ -1426,6 +1426,32 @@ rather than grown), so retention is bounded per compressor."
               (setf (gethash n pool) (make-scratch-arrays n)))
             (make-scratch-arrays n)))))
 
+(defun acquire-bwr (n)
+  "Pooled output writer: C's GetBrotliStorage reuses the encoder context's
+storage_ buffer across every metablock and call - ours reuses one BWR per
+compressor, its OUT buffer kept at the high-water mark, so the 64KiB ->
+output-size growth (alloc + copy of the old buffer) happens once per
+compressor instead of once per compress.  POS/ACC/NBITS are reset on every
+acquisition; the stale OUT bytes are overwritten from position zero.
+Without a pool (plain COMPRESS) a fresh writer is returned, exactly as
+before.  Thread-safety mirrors ACQUIRE-SCRATCH: the pool belongs to one
+MAKE-COMPRESSOR closure, and the MT suite runs one compressor per thread."
+  (declare (type fixnum n))
+  (let ((pool *scratch-pool*))
+    (if (null pool)
+        (b:make-bwr (min (+ n 1024) 65536))
+        (or (let ((w (gethash :bwr pool)))
+              (when w
+                (setf (b::bwr-pos w) 0
+                      (b::bwr-acc w) 0
+                      (b::bwr-nbits w) 0)
+                w))
+            (progn
+              (when (>= (hash-table-count pool) +scratch-max-entries+)
+                (clrhash pool))
+              (setf (gethash :bwr pool)
+                    (b:make-bwr (min (+ n 1024) 65536))))))))
+
 (defun zopfli-analytic-model (data n scratch)
   "C ZopfliCostModelSetFromLiteralCosts: estimated literal costs as a
 prefix sum + analytic command/distance costs (log2(11+i)/log2(20+i))."
@@ -4904,7 +4930,7 @@ are split into <= 2^24-byte compressed meta-blocks followed by an empty last
 meta-block."
   (let* ((data (b:to-octets input))
          (n (length data))
-         (w (b:make-bwr (min (+ n 1024) 65536)))
+         (w (acquire-bwr n))
          (wbits (min 24 (max 10 (integer-length (max 1 n)))))
          (window (- (ash 1 wbits) 16))
          (rb (make-array 5 :element-type 'fixnum

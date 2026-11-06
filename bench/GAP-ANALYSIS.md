@@ -3135,3 +3135,48 @@ No regressions.  The gain is smaller than Rev 157's "part of it is
 real" implied: removing dead code + the q0 cv allocation buys ~2%,
 not 10%+ - the scan loop's per-operation cost (Rev 157/159) remains
 the structural gap at q0/q1.
+
+## Rev 169: pool the output writer (C's storage_ reuse) - and the
+## pre-size experiment that found it
+
+EXPERIMENT 1 (reverted): C pre-sizes its buffer once per call
+(GetBrotliStorage(s, 2*bytes+503)) and never re-checks capacity per
+command, so WRITE-FAST-BLOCK-BODY and EMIT-ONE's per-command slack
+checks + 64KiB-chunk growth looked like the C-mismatch.  Implemented:
+one-time (b:w-ensure (+ (* 5 n) 32768)) [proven bound: an input byte
+contributes <= max(15 literal bits, 113/5 amortized command bits) =
+22.6 bits] and both slack checks removed.
+
+  MEASURED: REGRESSION on every spec - source q1 -10%, html q1 -7%,
+  html q0 -7.6%, binary q1 -5%.  Cause: the 5.2MiB large-object
+  allocation costs ~0.35ms EVERY call on this box (r164's lesson,
+  again) - more than the ~0.3ms of slack checks + growth copies it
+  saved.  C's pre-size is free because GetBrotliStorage returns the
+  ENCODER CONTEXT's buffer: C allocates once per encoder, not per
+  call.  We had the sizing half but not the reuse half.
+
+EXPERIMENT 2 (kept): ACQUIRE-BWR - one BWR per MAKE-COMPRESSOR
+closure from *SCRATCH-POOL* (key :BWR, same eviction rules as
+ACQUIRE-SCRATCH), POS/ACC/NBITS reset on every acquisition, OUT kept
+at the high-water mark.  Plain COMPRESS still gets a fresh writer, so
+the unpooled path is byte-for-byte the old behavior.  This is the
+missing reuse half: the 64KiB -> output-size growth (alloc + copy)
+now happens once per compressor instead of once per compress.
+
+  Verified: ALL 45 BYTE-IDENTICAL; 241/241 (incl. the three MT
+  tests - one private compressor per thread is the documented
+  contract, and MAKE-COMPRESSOR-IDENTICAL-TO-PLAIN covers
+  pooled-vs-fresh output identity); bt-min; repro-split; ratio45 0
+  failures.
+
+  MEASURED (interleaved A/B, A = r168):
+    spec        A=r168        B=pooled     delta
+    html q0     201.6 204.9   204.9 211.9  +2.4%
+    binary q1   137.4 138.9   137.4 142.0  +1.9%
+    html q1     154.3 156.3   154.3 158.2  +0.6%
+    source q1   312.5 320.5   304.9 320.5  -1.2% (noise: one exact tie)
+
+Lesson for the file: a C pattern often couples TWO properties - this
+one is (size the buffer) AND (own the buffer for the encoder's
+lifetime).  Porting only the sizing ported the cost.  Check which
+half is doing the work before porting either.
