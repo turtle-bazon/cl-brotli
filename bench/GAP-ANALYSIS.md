@@ -2851,3 +2851,32 @@ CAVEAT: TEXT q7's +0.65 swing is larger than r155/158/160's measured
 effects on q7 (all ~flat) - likely load (r154b swept at 02:33, this at
 08:40, load 0.19).  Treat both q7 flips as boundary cells; re-confirm
 in the next sweep before building on them.
+
+## Rev 162 (experiment, reverted): (declare (inline emit-one)) - REGRESSION
+
+Post-r160 profile of html q0 said EMIT-ONE self = 53.3% (scan = 38.3%),
+with EMIT-ONE visible as its own profile entry (i.e. not inlined) - so
+the obvious next step was to inline it (r159 had only inlined it for
+DISASSEMBLY, never timed it).
+
+Declared (inline emit-one) in the fragment's labels declare.
+
+Verified: compiles clean, EMIT-ONE vanishes from the profile (92.7%
+self moves into %LZ77-FRAGMENT), ALL 45 BYTE-IDENTICAL.
+
+MEASURED (controlled A/B, interleaved A B A B):
+  spec        A=r160          B=inline       delta
+  html q0     198.4 201.6     195.3 198.4    -1.5%
+  binary q0   192.3 198.4     186.6 183.8    -5.2%
+  json q0     260.4 260.4     231.5 235.9    -10.1%
+  html q1     154.3 156.3     152.4 143.7    -5.5%
+
+CONSISTENT REGRESSION on every spec.  Why: the body duplicates at its
+4-5 call sites inside an already 3,449-instruction function (icache),
+and merging EMIT-ONE's live ranges with the scan loop's forces spills.
+The function boundary was HELPING, not hurting - it acts as a register
+window.  Reverted; tree back to r160, 45/45 byte-identical.
+
+Lesson: "profile entry above 3% means not inlined" tells you where a
+CALL is, not that removing the call is free - inline only after timing,
+and only when the body is small relative to the caller.
