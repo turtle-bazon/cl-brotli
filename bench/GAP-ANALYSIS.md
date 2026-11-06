@@ -2826,3 +2826,28 @@ instructions/iteration remains, see Rev 157).
 
 Verified: ALL 45 cell sizes BYTE-IDENTICAL; 241/241 tests; bt-min
 8/8; repro-split clean; ratio45 0 failures (worst 1.100 html q7).
+
+## Rev 161 (sweep): r160 state = 19/45 both gates, 0 ratio failures
+
+Full 45-cell gate sweep (5 corpora x q0,1,2,5,6,7,9,10,11 @1MiB) after
+r155 + r158 + r160 (all previously unswept).  vs r154b (18/45):
+
+  SPEED FLIPS IN:  HTML q7   0.99 -> 1.01   (ratio 1.100, at cap)
+                   TEXT q7   0.73 -> 1.38
+  FLIPS OUT:       none
+  q10/11 gates:    all pass (speed + ratio)
+  ratio > 1.10:    0 cells (worst 1.100 HTML q7)
+
+Per-level median speed (lisp/C), old -> new:
+  q0 0.36 -> 0.40   q1 0.47 -> 0.50   q2 0.47 -> 0.45
+  q5 0.68 -> 0.68   q6 0.59 -> 0.61   q7 0.99 -> 1.09
+  q9 1.23 -> 1.26   q10 1.35 -> 1.34  q11 1.54 -> 1.54
+
+Remaining 25 speed fails: q0 x3 (0.36-0.40), q1 x5 (0.40-0.95),
+q2 x5 (0.36-0.65), q5 x5 (0.61-0.79), q6 x5 (0.60-0.64),
+q7 x2 (binary 0.92, source 0.90).  q9/q10/q11 clean.
+
+CAVEAT: TEXT q7's +0.65 swing is larger than r155/158/160's measured
+effects on q7 (all ~flat) - likely load (r154b swept at 02:33, this at
+08:40, load 0.19).  Treat both q7 flips as boundary cells; re-confirm
+in the next sweep before building on them.
