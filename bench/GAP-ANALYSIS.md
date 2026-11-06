@@ -3481,3 +3481,37 @@ for tables (more spills), out-of-line copy (call > spills), call-free
 "fast mode" literal loop (q1 runs are ~1 literal).
 Next: the general q4+ loop needs the same treatment (specialized variants
 or fewer live values); encoder q0-q5 has not had a disassembly pass yet.
+
+### Session 6 Nov 2026, part 5: same method on the general decoder and the q0-q4 encoder
+
+Decoder, general (q4+ C streams, block-split):
+- the loop is now %DECODE-GENERAL-META-BLOCK (own function, explicit
+  arguments, errors as codes) with the single-tree hoists dropped and the
+  block switch out of line (BLK-SWITCH-OOL: the inline BLK-MAYBE-SWITCH
+  brought READ-HUFF with ~12 slow-path call sites to each switch point).
+  26 KB / 891 stack refs -> 11 KB / 372.  Speed moved little (q5 html
+  0.50 -> 0.51 harness): the annotated profile is now flat (hottest
+  instruction 4%), i.e. the remaining gap is instruction count spread over
+  the whole command path, plus tree setup (~13%) and copy-source latency.
+Encoder:
+- WRITE-TRIVIAL-BLOCK-BODY (q2-q4): bit writes through the BWR struct ->
+  WR-PM/WR-RAW over local ACC/NBITS/POS (synced around W-ENSURE /
+  W-EMIT-RUN); command fields bounded (the "signed word to integer
+  coercion" bignum boxing is gone).  q2 +18%.
+- %LZ77-QUICK specialized per C hasher (DEFINE-QUICK-MATCHER: H2/H3/H4/H54
+  with bits/sweep/hash-len as constants): StoreRange went from reloading
+  and branching on them per store to 13 instructions.  q3 +12%, q2 +7%.
+- SPECIAL-DISTANCE-CODE = C ComputeDistanceCode (<= 6 tests instead of 15,
+  twice per command in every writer).  q2 +9%.  Ties now resolve in C's
+  order (2 bytes difference on html q2).
+- q0/q1 fragment matchers: %HASHF-TAIL inline (7 call sites in the scan),
+  pooled hash tables + q1 command vector (POOLED-U32; fresh 512 KiB tables
+  per call were ~6% of q1).  q1 +10%.  Inlining EMIT-ONE again: no gain,
+  more spills (522 -> 705 stack refs) - left as is.
+- q9 context-modeling gate sampled the first 32 KiB of literals for the
+  UTF8 test (a full parse cost JSON q9 several percent); q10/11 keep the
+  full scan (the sample misjudged ELF binaries).
+Matrix (harness, noisy host, load 2-3), compress lisp/C, html/json/binary:
+  q0 0.86/0.51/1.11  q1 0.73/0.64/1.14  q2 0.69/0.66/0.69  q3 0.73/0.67/0.73
+  q4 0.86/1.28/0.64  q5 0.74/0.65/0.57  q7 1.21/0.95/1.02  q9+ >= ~1.0
+Decode lisp/C: q0-q3 0.60-0.78, q4+ 0.46-0.62.

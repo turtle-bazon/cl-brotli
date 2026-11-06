@@ -513,8 +513,9 @@ the canonical search."
       (values (aref code len) (aref xval len) (aref xbits len))
       (loop for c of-type fixnum from (1- (length base)) downto 0
             when (>= len (the fixnum (aref base c)))
-              do (return (values c (- len (the fixnum (aref base c)))
-                                 (the fixnum (aref bits c)))))))
+              do (return (values c (the (integer 0 #.(ash 1 40))
+                                        (- len (the fixnum (aref base c))))
+                                 (the (integer 0 24) (aref bits c)))))))
 
 (deftable +cmd-symbol-table+
   (let ((v (make-array (* 24 24) :element-type 'fixnum :initial-element 0)))
@@ -555,29 +556,28 @@ The loop-free form partitions D by NBITS = INTEGER-LENGTH(D+4)-2."
 (declaim (inline special-distance-code))
 (defun special-distance-code (rb d)
   "If D is one of the short distance-ring codes, return (values CODE 0 0).
-RB is the 4-slot ring plus a write index in slot 4."
+RB is the 4-slot ring plus a write index in slot 4.  C ComputeDistanceCode:
+at most six tests instead of trying all 15 candidates in turn (it ran twice
+per command in every writer).  D equal to the last distance is the
+caller's code 0 and never reaches here."
   (declare (type (simple-array fixnum (5)) rb) (type fixnum d)
            (optimize (speed 3) (safety 0)))
-  ;; MACROLET, not FLET: the local TRY stayed a real function (15 calls
-  ;; per invocation showed up in the profile as FLET TRY); the checks are
-  ;; literal arguments at every site, so they expand inline.
-  (macrolet ((try (code offset delta)
-               `(let ((candidate (+ (the (integer 0 #.(ash 1 40))
-                                         (aref rb (logand (+ (aref rb 4) ,offset) 3)))
-                                    ,delta)))
-                  (when (and (> candidate 0) (= candidate d))
-                    (return-from special-distance-code
-                      (values ,code 0 0))))))
-    (try 1 2 0)                       ; second-to-last
-    (try 2 1 0)                       ; third-to-last
-    (try 3 0 0)                       ; fourth-to-last
-    (try 4 3 -1) (try 5 3 1)          ; last -/+ 1
-    (try 6 3 -2) (try 7 3 2)          ; last -/+ 2
-    (try 8 3 -3) (try 9 3 3)          ; last -/+ 3
-    (try 10 2 -1) (try 11 2 1)        ; second-to-last -/+ 1
-    (try 12 2 -2) (try 13 2 2)        ; second-to-last -/+ 2
-    (try 14 2 -3) (try 15 2 3)        ; second-to-last -/+ 3
-    (values nil 0 0)))
+  (let* ((i (aref rb 4))
+         (d0 (aref rb (logand (+ i 3) 3)))   ; last
+         (d1 (aref rb (logand (+ i 2) 3)))   ; second-to-last
+         (o0 (- (+ d 3) d0))
+         (o1 (- (+ d 3) d1)))
+    (declare (type fixnum i d0 d1 o0 o1))
+    (cond ((= d d1) (values 1 0 0))
+          ((and (<= 0 o0) (< o0 7) (/= o0 3))
+           ;; last-3..last+3 -> 8 6 4 . 5 7 9
+           (values (logand (ash #x9750468 (- (* 4 o0))) #xF) 0 0))
+          ((and (<= 0 o1) (< o1 7))
+           ;; second-3..second+3 -> 14 12 10 1 11 13 15
+           (values (logand (ash #xFDB1ACE (- (* 4 o1))) #xF) 0 0))
+          ((= d (aref rb (logand (+ i 1) 3))) (values 2 0 0))
+          ((= d (aref rb (logand i 3))) (values 3 0 0))
+          (t (values nil 0 0)))))
 
 ;;; ---- static dictionary index (base words, no transforms) ---------------
 
@@ -3088,6 +3088,25 @@ score rather than length.  Returns (values len dist score)."
 ;;; ---- C Brotli's q2-q4 matcher: CreateBackwardReferences over the
 ;;; HashLongestMatchQuickly family (H2 / H3 / H4 / H54) ---------------------
 
+(defun pooled-u32 (key size fill)
+  "A u32 vector of at least SIZE from the compressor's pool under KEY
+\(fresh when there is no pool).  When FILL is a number the first SIZE
+entries are set to it; otherwise contents are stale and the caller must
+not read what it has not written."
+  (declare (type fixnum size) (optimize (speed 3) (safety 0)))
+  (let* ((pool *scratch-pool*)
+         (v (and pool (gethash key pool))))
+    (if (and v (>= (length (the (simple-array (unsigned-byte 32) (*)) v)) size))
+        (progn (when fill (fill (the (simple-array (unsigned-byte 32) (*)) v)
+                                fill :end size))
+               v)
+        (let ((new (if fill
+                       (make-array size :element-type '(unsigned-byte 32)
+                                        :initial-element fill)
+                       (make-array size :element-type '(unsigned-byte 32)))))
+          (when pool (setf (gethash key pool) new))
+          new))))
+
 (defun acquire-quick-buckets (bits sweep)
   "Zeroed bucket table for %LZ77-QUICK (2^BITS + SWEEP u32; C zeroes its
 buckets in Prepare and treats 0 as a real position).  Pooled per
@@ -3108,23 +3127,22 @@ compressor like ACQUIRE-HEADPREV."
                     (clrhash pool))
                   (setf (gethash key pool) (make-it)))))))))
 
-(defun %lz77-quick (data sap window bits sweep hash-len)
-  "C BrotliCreateBackwardReferences with HashLongestMatchQuickly
-\(BUCKET_BITS = BITS, BUCKET_SWEEP = SWEEP, HASH_LEN = HASH-LEN): one or a
-few u32 slots per bucket, the last distance probed first, candidates ranked
-by BackwardReferenceScore, the lazy one-byte deferral (cost_diff_lazy 175,
-at most 4 in a row), StoreRange over copy interiors and the sparse-search
-jumps through literal runs.  No static dictionary.  Returns (values CMDS
-USED): the flat 5-fixnum command vector (insert lit-start copy distance 0)
-like %LZ77's, but possibly longer than USED (it is pooled) - callers must
-use only CMDS[0..USED)."
-  (declare (type (simple-array (unsigned-byte 8) (*)) data)
-           (type ptr sap)
-           (type fixnum window)
-           (type (integer 1 24) bits) (type (integer 1 4) sweep)
-           (type (integer 5 8) hash-len)
-           (optimize (speed 3) (safety 0)))
-  (let* ((n (length data))
+;; One specialized matcher per C hasher: BUCKET_BITS / BUCKET_SWEEP /
+;; HASH_LEN are compile-time constants in C, and as runtime arguments here
+;; every store reloaded them from stack slots and branched on them.
+(defmacro define-quick-matcher (name bits sweep hash-len)
+  `(defun ,name (data sap window)
+     (declare (type (simple-array (unsigned-byte 8) (*)) data)
+              (type ptr sap)
+              (type fixnum window)
+              (optimize (speed 3) (safety 0)))
+     (symbol-macrolet ((bits ,bits) (sweep ,sweep) (hash-len ,hash-len))
+       (%lz77-quick-body))))
+
+(defmacro %lz77-quick-body ()
+  ;; the body of every DEFINE-QUICK-MATCHER instance; BITS, SWEEP and
+  ;; HASH-LEN are symbol macros there (constants)
+  '(let* ((n (length data))
          (buckets (acquire-quick-buckets bits sweep))
          (hshift (- bits 64))
          ;; Pooled per compressor and returned untrimmed with its used
@@ -3301,6 +3319,26 @@ use only CMDS[0..USED)."
         (push-cmd insert (- n insert) 0 0))
       ;; (values CMDS USED): only CMDS[0..USED) is this input's commands.
       (values cmds (* 5 ncmd)))))
+
+(define-quick-matcher %lz77-quick-h2 16 1 5)
+(define-quick-matcher %lz77-quick-h3 16 2 5)
+(define-quick-matcher %lz77-quick-h4 17 4 5)
+(define-quick-matcher %lz77-quick-h54 20 4 7)
+
+(defun %lz77-quick (data sap window bits sweep hash-len)
+  "C BrotliCreateBackwardReferences with HashLongestMatchQuickly
+\(BUCKET_BITS = BITS, BUCKET_SWEEP = SWEEP, HASH_LEN = HASH-LEN): one or a
+few u32 slots per bucket, the last distance probed first, candidates ranked
+by BackwardReferenceScore, the lazy one-byte deferral (cost_diff_lazy 175,
+at most 4 in a row), StoreRange over copy interiors and the sparse-search
+jumps through literal runs.  No static dictionary.  Returns (values CMDS
+USED): the flat 5-fixnum command vector (insert lit-start copy distance 0)
+like %LZ77's, but possibly longer than USED (it is pooled) - callers must
+use only CMDS[0..USED)."
+  (cond ((and (= bits 16) (= sweep 1)) (%lz77-quick-h2 data sap window))
+        ((= bits 16) (%lz77-quick-h3 data sap window))
+        ((= bits 17) (%lz77-quick-h4 data sap window))
+        (t (progn hash-len (%lz77-quick-h54 data sap window)))))
 
 ;;; ---- C Brotli's q0/q1 fast-fragment entropy coding --------------------
 
@@ -3556,9 +3594,7 @@ mirroring %WBITS-RAW."
          (k (if (<= table-bits 16) 5 6))
          (min-match k)
          (hmask (1- (ash 1 table-bits)))
-         (table (make-array (ash 1 table-bits)
-                            :element-type '(unsigned-byte 32)
-                            :initial-element #xFFFFFFFF))
+         (table (pooled-u32 :frag1-table (ash 1 table-bits) #xFFFFFFFF))
          (litf (%sample-lit-histogram data n))
          (cmdf (make-array 64 :element-type 'fixnum :initial-element 0))
          (distf (make-array 64 :element-type 'fixnum :initial-element 0))
@@ -3831,17 +3867,16 @@ decisions; used only when W is non-nil."
 (defun %lz77-fragment-two-pass (data sap window table-bits)
   (declare (type (simple-array (unsigned-byte 8) (*)) data)
            (type ptr sap)
-           (type fixnum window table-bits)
+           (type fixnum window) (type (integer 10 24) table-bits)
            (optimize (speed 3) (safety 0)))
   (let* ((n (length data))
          (k (if (<= table-bits 16) 5 6))
          (min-match k)
          (hmask (1- (ash 1 table-bits)))
-         (table (make-array (ash 1 table-bits)
-                            :element-type '(unsigned-byte 32)
-                            :initial-element #xFFFFFFFF))
-         (cv (make-array (* 4 (max 4096 (ash n -5)))
-                         :element-type '(unsigned-byte 32)))
+         ;; pooled per compressor (C owns these in the encoder state):
+         ;; a fresh 512 KiB table + command vector per call was ~6% of q1
+         (table (pooled-u32 :frag2-table (ash 1 table-bits) #xFFFFFFFF))
+         (cv (pooled-u32 :frag2-cv (* 4 (max 4096 (ash n -5))) nil))
          (nc 0)
          (litf (make-array 256 :element-type 'fixnum
                                      :initial-element 0))
@@ -3886,6 +3921,7 @@ decisions; used only when W is non-nil."
                  (let ((new (make-array (* 2 (length cv))
                                         :element-type '(unsigned-byte 32))))
                    (replace new cv)
+                   (when *scratch-pool* (setf (gethash :frag2-cv *scratch-pool*) new))
                    (setf cv new)))
                (let ((b (* 4 nc)))
                  (setf (aref cv b) ins
@@ -4056,7 +4092,8 @@ compression ratio for encoder throughput."
              (ins (aref cmds vb)) (lit-start (aref cmds (+ vb 1)))
              (cpy (aref cmds (+ vb 2)))
              (dist (aref cmds (+ vb 3))) (dictp (aref cmds (+ vb 4))))
-        (declare (type fixnum ins lit-start cpy dist dictp))
+        (declare (type (integer 0 #.(ash 1 40)) ins lit-start cpy dist)
+                 (type (integer 0 1) dictp))
         (loop for i from lit-start below (+ lit-start ins)
               do (incf (aref litf (aref data i))))
         (multiple-value-bind (icode ixv ixb)
@@ -4111,25 +4148,36 @@ compression ratio for encoder throughput."
            (slack 0))
       (declare (type (simple-array fixnum (*))
                      lit-rc lit-ln cmd-rc cmd-ln dist-rc dist-ln)
-               (type fixnum slack))
+               (type (integer 0 #.(ash 1 40)) slack))
       (b:wbits w 0 1) (b:wbits w 0 1) (b:wbits w 0 1)
       (b:wbits w 0 2) (b:wbits w 0 4) (b:wbits w 0 2)
       (b:wbits w 0 1) (b:wbits w 0 1)
       (write-etree w lit 256)
       (write-etree w cmd 704)
       (write-etree w dist 64)
-      ;; Pass 2: recompute the compact codes and emit.
+      ;; Pass 2: recompute the compact codes and emit.  The writer's
+      ;; ACC/NBITS/POS live in locals (WR-PM / WR-RAW) and are synced with
+      ;; the BWR only around W-ENSURE and W-EMIT-RUN: through the struct,
+      ;; every write was three loads and three stores.
+      (let ((acc (b::bwr-acc w)) (nbits (b::bwr-nbits w)) (wpos (b::bwr-pos w)))
+        (declare (type (unsigned-byte 64) acc) (type (integer 0 7) nbits)
+                 (type fixnum wpos))
+        (macrolet ((sync-out () '(setf (b::bwr-acc w) acc (b::bwr-nbits w) nbits (b::bwr-pos w) wpos))
+                   (sync-in () '(setf acc (b::bwr-acc w) nbits (b::bwr-nbits w) wpos (b::bwr-pos w))))
       (loop for ci of-type fixnum from 0 below (truncate n5 5) do
         (let* ((vb (* 5 ci))
                (ins (aref cmds vb)) (lit-start (aref cmds (+ vb 1)))
                (cpy (aref cmds (+ vb 2)))
                (dist (aref cmds (+ vb 3))) (dictp (aref cmds (+ vb 4))))
-          (declare (type fixnum ins lit-start cpy dist dictp))
+          (declare (type (integer 0 #.(ash 1 40)) ins lit-start cpy dist)
+                   (type (integer 0 1) dictp))
           (let ((cost (+ 24 (* 2 ins))))
             (declare (type fixnum cost))
             (when (> cost slack)
               (setf slack 65536)
-              (b:w-ensure w (+ slack cost)))
+              (sync-out)
+              (b:w-ensure w (+ slack cost))
+              (sync-in))
             (decf slack cost))
           (multiple-value-bind (icode ixv ixb)
               (length-code ins ins-c ins-x ins-xb ins-b ins-bt)
@@ -4161,22 +4209,26 @@ compression ratio for encoder throughput."
                     (setf (aref rb (logand ring-pos 3)) dist)
                     (setf (aref rb 4) (1+ ring-pos))))
                 (unless cmd-single
-                  (b:%wbits-raw-pm w (aref cmd-rc csym) (aref cmd-ln csym)))
-                (b:%wbits-raw-pm w ixv ixb)
-                (b:%wbits-raw-pm w cxv cxb)
+                  (wr-pm w acc nbits wpos (aref cmd-rc csym) (aref cmd-ln csym)))
+                (wr-pm w acc nbits wpos ixv ixb)
+                (wr-pm w acc nbits wpos cxv cxb)
                 (unless lit-single
                   (if (>= ins 16)
-                      (b:w-emit-run w data lit-start (+ lit-start ins)
-                                    lit-rc lit-ln)
-                      (loop for i from lit-start below (+ lit-start ins)
+                      (progn
+                        (sync-out)
+                        (b:w-emit-run w data lit-start (+ lit-start ins)
+                                      lit-rc lit-ln)
+                        (sync-in))
+                      (loop for i of-type fixnum from lit-start below (+ lit-start ins)
                             do (let ((sym (aref data i)))
-                                 (b:%wbits-raw w (aref lit-rc sym)
-                                               (aref lit-ln sym))))))
+                                 (wr-raw w acc nbits wpos (aref lit-rc sym)
+                                         (aref lit-ln sym))))))
                 (when (>= dcode 0)
                   (unless dist-single
-                    (b:%wbits-raw-pm w (aref dist-rc dcode)
-                                                     (aref dist-ln dcode)))
-                  (b:%wbits-raw w dxv dxb))))))))))
+                    (wr-pm w acc nbits wpos (aref dist-rc dcode)
+                           (aref dist-ln dcode)))
+                  (wr-raw w acc nbits wpos dxv dxb)))))))
+        (sync-out))))))
 
 ;;; ---- compressed meta-block --------------------------------------------
 
@@ -4317,7 +4369,9 @@ per command."
                   (>= (loop for vb of-type fixnum from 0 below (length cmds) by 5
                             sum (the fixnum (aref cmds vb)) of-type fixnum)
                       64)))
-         (lit-mode (if (and hq (not (literals-mostly-utf8-p data cmds))) 3 2))
+         (lit-mode (if (and hq (not (literals-mostly-utf8-p
+                                      data cmds (if (>= quality 10) most-positive-fixnum 32768))))
+                       3 2))
          ;; Below q10 only non-UTF8 input clusters: there it is worth ~5% of
          ;; size; on UTF8 text ~0.5% for ~6% more time (C's q9 uses static
          ;; maps for both).
@@ -4585,15 +4639,20 @@ prefix code: Shannon bits plus a code-description estimate."
            *hq-tree-bits-base*
            (* *hq-tree-bits-per-symbol* nnz)))))
 
-(defun literals-mostly-utf8-p (data cmds)
-  "C BrotliIsMostlyUTF8 (ratio 0.75) over the parse's literal runs only -
-proportional to the literal count, not the input size."
+(defun literals-mostly-utf8-p (data cmds &optional (limit most-positive-fixnum))
+  "C BrotliIsMostlyUTF8 (ratio 0.75) over the parse's literal runs (up to
+LIMIT literal bytes) - not the whole input."
   (declare (type (simple-array (unsigned-byte 8) (*)) data)
            (type (simple-array fixnum (*)) cmds)
            (optimize (speed 3) (safety 0)))
+  ;; LIMIT caps the literal bytes examined: at q9 the gate runs on every
+  ;; UTF8 input only to skip the modeling (a full parse of JSON's ~250 KB of
+  ;; literals cost several percent), so q9 samples 32 KiB; q10/q11 scan all
+  ;; (a sample misjudged ELF binaries as UTF8 there).
   (let ((good 0) (total 0))
     (declare (type fixnum good total))
-    (loop for vb of-type fixnum from 0 below (length cmds) by 5 do
+    (loop for vb of-type fixnum from 0 below (length cmds) by 5
+          while (< total limit) do
       (let* ((ls (aref cmds (+ vb 1))) (end (+ ls (aref cmds vb))) (i ls))
         (declare (type fixnum ls end i))
         (incf total (- end ls))

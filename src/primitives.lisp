@@ -26,7 +26,7 @@
     len))
 
 (declaim (inline %hash4-sap %hash4-tail))
-(declaim (inline %hashf-sap))
+(declaim (inline %hashf-sap %hashf-tail))
 (defun %hashf-sap (sap i shift hmask)
   "C Brotli's fast-fragment hash: take the TOP table-bits of the 64-bit
 product (input << 24) * kHashMul32 with shift = 64 - table-bits, like
