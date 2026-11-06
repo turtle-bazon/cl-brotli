@@ -2743,3 +2743,49 @@ Lesson for this codebase: a runtime parameter that is provably bounded
 (a shift derived from a small table size) must carry that bound in its
 TYPE, or SBCL pays the generic expansion at every use - and in a hash
 called a million times per compress, that is the whole ballgame.
+
+## Rev 159 (diagnostics): we scan FEWER positions than C - the gap is per-operation cost
+
+Instrumented BOTH sides (temporary counters, reverted; C built from the
+real source with gcc -O2 -lm):
+
+  trawl iterations, 1 MiB q0:
+    html    C = 32,548 + 65,038 = 97,586   (C chunks input at 512 KiB -
+            BrotliCompressFragmentFast is called twice; ours is one pass)
+            ours = 56,708                   (58% of C)
+    binary  C = 184,417 + 205,561 = 389,978
+            ours = 202,154                  (52% of C)
+  match attempts (emits): html q0 = 19,636 (53.4 bytes/emitted),
+            binary q0 = 38,446 (27.3 bytes/emitted)
+
+CONCLUSION: the q0 gap is NOT "we do more work" - we scan HALF as many
+positions as C and still take 2.3x longer.  It is per-operation cost,
+and the emit half (47.4% of q0) is where the measurement points.
+
+Per-LITERAL cost, counted from both disassemblies (emit-one inlined into
+%LZ77-FRAGMENT for the measurement, then reverted):
+  ours ~29 instructions:
+    3 stack-slot array-base reloads ([RBP-8] data, [RBP-144] lit-rc-1p,
+        [RBP-152] lit-ln-1p - frame spills, reloaded EVERY literal)
+    3 SAR untags (sym/value/nbits)
+    3 struct slot ops ([R9+29], [R9+21], [R9+13] - the bwr state)
+    emit calculation (nbits >> 3 + AND) + flush test
+  C    ~14 instructions:
+    3 table reads (depth[u8], bits[u16], input[j] - register bases)
+    BrotliWriteBits: pos>>3 address, one byte load, shift+or,
+    UNALIGNED_STORE64LE, *pos += n_bits
+
+FAILED EXPERIMENT - DO NOT RE-DERIVE: (declaim (inline w-emit-run
+w-ensure)) to remove the writer's escape points so SBCL could scalar-
+replace the bwr struct into registers.  Byte-identical, but neutral
+(html q0 -1.6%, q5 0%, q7 -1%, q9 +0.3%) - SBCL does not SRA a struct
+that is captured by a closure (emit-one captures W from the enclosing
+function's parameter list).  Reverted: a wash that also bloats code.
+
+THE FIX THAT REMAINS: thread the bit-writer state (acc/nbits/pos) as
+LEXICALS through EMIT-ONE's bodies - a state-threading write primitive
+returning (values acc nbits pos), with a single write-back to W at the
+end (and a flush/reload around the non-inline W-EMIT-RUN calls).  That
+takes the per-literal path from ~29 instructions to C's ~14 (register
+bases, no per-literal SARs, no per-literal struct slot traffic) and is
+estimated +25-35% on q0 - the largest single measured lever left.
