@@ -2931,3 +2931,42 @@ MEASURED (controlled A/B, interleaved A B A B, each pair exact-repeat):
 Beats the recorded +4-8% scope.  Projection: binary q7 0.92 -> ~1.01
 (gate flip), source q7 0.90 -> ~0.985 (boundary), q2/q5/q6 all gain
 13-18% but remain short of 1.0.
+
+## Rev 164: fix r163's upfront-allocation regression (n/8 -> n/32 initial)
+
+The r163 sweep (99 cells; gate = the usual 45) showed the vector
+refactor LOSING ground on command-SPARSE corpora while winning on
+command-dense ones - and my controlled A/B had missed it because I only
+tested html/binary/source/json:
+
+  sweep r160 -> r163, lisp MiB/s:  TEXT q2 713 -> 468 (-34%),
+  TEXT q5 400 -> 289, TEXT q7 423 -> 296, TEXT q9 445 -> 289;
+  DICT/PATTERN/PERIODIC/UTF8/ZEROS q2 ~1.05x -> ~0.40x C.
+  Gate fallout: HTML q7 (1.01 -> 0.99) and TEXT q7 (1.38 -> 0.96)
+  flipped OUT -> 18/45 (see correction below).
+
+CAUSE: the initial vector (max 1024 (ash n -3)) = n/8 commands =
+655,360 fixnums = 5.2 MiB allocated on EVERY %LZ77 call.  For
+command-dense corpora that is a wash (the old list consed MBs anyway,
+so the A/B there was valid: +11-17%).  For command-sparse corpora
+(TEXT: ~hundreds of commands) the old cost was kilobytes of conses and
+the new cost is a fixed 5.2 MiB large-object alloc + free every call -
+0.8 ms of pure fixed cost on a 1.4 ms call (+63% measured by swapping
+only this constant).
+
+FIX: mirror the fragment's proven PUSH-CMD policy - initial capacity
+(max 4096 (ash n -5)) = n/32 commands (160 KiB at 1 MiB, floor 20 KiB),
+growth doubles, exact-size SUBSEQ at return stays proportional to the
+real command count.
+
+MEASURED (controlled A/B, interleaved A B A B):
+  spec        A=r160 lists   B=vectors n/32   delta
+  TEXT q2     781 694        781 781          +5.8%
+  TEXT q5     390.6 390.6    416.7 390.6      +3.3%
+  HTML q5     43.6 44.5      49.4 48.6       +11.5%
+  BINARY q7   34.1 34.3      38.8 38.2       +13.4%
+B >= A on every pair.  Verified: ALL 45 BYTE-IDENTICAL; 241/241;
+bt-min 8/8; repro-split; ratio45 0 failures.
+
+CORRECTION to Rev 161: the r160 sweep was 20/45, not 19 (45 cells -
+25 speed fails = 20; the entry miscounted).  r163 = 18/45.

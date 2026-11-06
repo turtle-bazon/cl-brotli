@@ -1711,7 +1711,14 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                ;; was inserted, so no initial fill is needed.
                (prev (and chained
                           (make-array n :element-type '(unsigned-byte 32))))
-               (cmds (make-array (* 5 (max 1024 (ash n -3)))
+               ;; Initial capacity mirrors the fragment's PUSH-CMD policy
+               ;; (n/32 commands, floor 4096 = 160KiB at 1MiB): sizing it
+               ;; at n/8 cost 5.2MiB upfront on EVERY call, which dominated
+               ;; command-sparse corpora (TEXT q2 -34% in the r163 sweep -
+               ;; fixed cost, not per-command work).  Growth doubles from
+               ;; here; the exact-size SUBSEQ at return is proportional to
+               ;; the real command count.
+               (cmds (make-array (* 5 (max 4096 (ash n -5)))
                                   :element-type 'fixnum))
                (ncmd 0) (lit-start 0) (p 0) (last (- n min-match))
                (skip 32) (dict-used 0) (last-dist 0)
