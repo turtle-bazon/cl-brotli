@@ -2789,3 +2789,40 @@ end (and a flush/reload around the non-inline W-EMIT-RUN calls).  That
 takes the per-literal path from ~29 instructions to C's ~14 (register
 bases, no per-literal SARs, no per-literal struct slot traffic) and is
 estimated +25-35% on q0 - the largest single measured lever left.
+
+## Rev 160: state-threaded EMIT-ONE (acc/nbits/pos as lexicals) - q0 +0.8..+3.1%
+
+Implements the fix Rev 159 recorded: while W escapes to the non-inline
+W-EMIT-RUN, every bit write reloaded the BWR struct slots (3 stack
+loads + 3 untags per literal = ~29 instructions/literal vs C's 14).
+EMIT-ONE now reads ACC/NBITS/POS from W ONCE, threads them as LEXICALS
+through two macros (WR-PM / WR-RAW - exact transcriptions of
+%WBITS-RAW-PM / %WBITS-RAW, same arithmetic, same flush), writes back
+to W once at the end, and flush/reloads only around W-EMIT-RUN.
+
+BUG FOUND AND FIXED DURING IT (lesson for this codebase): declaring the
+running NBITS as (INTEGER 0 7) let SBCL delete the (LOGAND NBITS 7)
+mask inside the macros - NBITS transiently exceeds 7 on every flush
+(before the mask), so the unmasked value fed the next (ASH V NBITS)
+and corrupted the bit stream ("dictionary copy length 2 out of
+range", then a segfault).  The 0..7 bound holds only for the ENTRY
+value; the running variable must stay a plain FIXNUM and the macros
+assert (THE (INTEGER 0 7) pr) at the shift site instead.
+
+MEASURED (controlled A/B, interleaved A B A B - drift would be
+monotonic, not variant-correlated; each variant repeated exactly):
+
+  spec        A=r158           B=threaded      delta
+  binary q0   186.57 186.57    192.31 192.31   +3.1%
+  html q0     195.31 198.41    198.41 198.41   +0.8%
+  json q0     255.10 250.00    255.10 255.10   +1.0%
+  html q1     152.44 147.06    148.81 154.32   +1.2% (noisy)
+
+An earlier single-shot reading of binary q0 +11% was load noise; the
+controlled number is +3.1%.  The Rev 159 prediction of +25-35% did NOT
+materialize - the per-literal instruction count drops but the emit path
+is not the whole q0 story (the scan loop's 45-55 vs C's 35-40
+instructions/iteration remains, see Rev 157).
+
+Verified: ALL 45 cell sizes BYTE-IDENTICAL; 241/241 tests; bt-min
+8/8; repro-split clean; ratio45 0 failures (worst 1.100 html q7).

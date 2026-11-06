@@ -3138,6 +3138,72 @@ samples, stride-29 sampling plus one-count smoothing above."
             (incf (aref f i) (+ 1 (* 2 (min (aref f i) 11)))))))
     f))
 
+;;;; Bit-writer macros that thread ACC/NBITS/POS as LEXICALS instead of
+;;;; touching the BWR struct on every write.  See EMIT-ONE: while W
+;;;; escapes to the non-inline W-EMIT-RUN, every struct-slot write paid
+;;;; 3 stack loads + 3 untags - measured 29 instructions per literal
+;;;; against C's 14.  Both macros are exact transcriptions of
+;;;; %WBITS-RAW-PM / %WBITS-RAW (same arithmetic, same flush), so the
+;;;; bits written cannot change.
+
+(defmacro wr-pm (w acc nbits pos v n)
+  "Pre-masked write over the lexicals ACC/NBITS/POS (V must satisfy
+0 <= V < 2^N), mirroring %WBITS-RAW-PM."
+  (let ((vv (gensym)) (nn (gensym)) (pr (gensym)) (aa (gensym))
+        (nb (gensym)) (em (gensym)) (pp (gensym)))
+    `(let* ((,vv ,v) (,nn ,n) (,pr ,nbits)
+            (,aa (logior (the (unsigned-byte 64) ,acc)
+                         (the (unsigned-byte 32) (ash ,vv ,pr))))
+            (,nb (+ ,pr ,nn))
+            (,em (ash ,nb -3)))
+       (declare (type fixnum ,vv ,nn ,pr ,nb ,em)
+                (type (integer 0 7) ,pr)
+                (type (unsigned-byte 64) ,aa))
+       (setf ,acc ,aa ,nbits ,nb)
+       (when (plusp ,em)
+         (let ((,pp ,pos))
+           #+(and sbcl little-endian)
+           (sb-sys:with-pinned-objects ((b:bwr-out ,w))
+             (setf (sb-sys:sap-ref-64 (sb-sys:vector-sap (b:bwr-out ,w)) ,pp)
+                   ,aa))
+           #-(and sbcl little-endian)
+           (loop for i of-type fixnum below ,em
+                 do (setf (aref (b:bwr-out ,w) (+ ,pp i))
+                          (logand (ash ,aa (* -8 i)) #xff))))
+         (incf ,pos ,em)
+         (setf ,acc (ash ,acc (* -8 ,em)))
+         (setf ,nbits (logand ,nbits 7))))))
+
+(defmacro wr-raw (w acc nbits pos v n)
+  "Masked write over the lexicals ACC/NBITS/POS (V masked to N bits),
+mirroring %WBITS-RAW."
+  (let ((vv (gensym)) (nn (gensym)) (pr (gensym)) (vb (gensym))
+        (aa (gensym)) (nb (gensym)) (em (gensym)) (pp (gensym)))
+    `(let* ((,vv ,v) (,nn ,n) (,pr ,nbits)
+            (,vb (the (unsigned-byte 32)
+                      (logand ,vv (aref b::+masks+ ,nn))))
+            (,aa (logior (the (unsigned-byte 64) ,acc)
+                         (the (unsigned-byte 32) (ash ,vb ,pr))))
+            (,nb (+ ,pr ,nn))
+            (,em (ash ,nb -3)))
+       (declare (type fixnum ,vv ,nn ,pr ,nb ,em)
+                (type (integer 0 7) ,pr)
+                (type (unsigned-byte 64) ,aa))
+       (setf ,acc ,aa ,nbits ,nb)
+       (when (plusp ,em)
+         (let ((,pp ,pos))
+           #+(and sbcl little-endian)
+           (sb-sys:with-pinned-objects ((b:bwr-out ,w))
+             (setf (sb-sys:sap-ref-64 (sb-sys:vector-sap (b:bwr-out ,w)) ,pp)
+                   ,aa))
+           #-(and sbcl little-endian)
+           (loop for i of-type fixnum below ,em
+                 do (setf (aref (b:bwr-out ,w) (+ ,pp i))
+                          (logand (ash ,aa (* -8 i)) #xff))))
+         (incf ,pos ,em)
+         (setf ,acc (ash ,acc (* -8 ,em)))
+         (setf ,nbits (logand ,nbits 7))))))
+
 (defun %lz77-fragment (data sap window table-bits &optional w)
   (declare (type (simple-array (unsigned-byte 8) (*)) data)
            (type sb-sys:system-area-pointer sap)
@@ -3239,73 +3305,100 @@ return the updated last-distance.  Mirrors WRITE-FAST-BLOCK-BODY's
 decisions; used only when W is non-nil."
                (declare (type fixnum insert lit-start cpy dist last-dist)
                         (optimize (speed 3) (safety 0)))
+               ;; Slack check first: W's state is still authoritative here.
                (let ((cost (+ 32 (* 2 insert))))
                  (declare (type fixnum cost))
                  (when (> cost slack)
                    (setf slack 65536)
                    (b:w-ensure w (+ slack cost)))
                  (decf slack cost))
-               (flet ((cmd-bits (cc)
-                        (unless cmd-1p-single
-                          ;; one map lookup, not two
-                          (let ((mc (aref +q0-cmd-map+ cc)))
-                            (b:%wbits-raw-pm w (aref cmd-rc-1p mc)
-                                             (aref cmd-ln-1p mc)))))
-                      (dist0-bits ()
-                        (unless dist-1p-single
-                          (b:%wbits-raw w (aref dist-rc-1p 0)
-                                        (aref dist-ln-1p 0))))
-                      (lits ()
-                        (unless lit-1p-single
-                          (if (>= insert 8)
-                              (b:w-emit-run w data lit-start (+ lit-start insert)
-                                            lit-rc-1p lit-ln-1p)
-                              (loop for i of-type fixnum
+               ;; Thread the writer state as LEXICALS: while W escapes to
+               ;; the non-inline W-EMIT-RUN, every bit write reloaded the
+               ;; BWR struct slots (3 stack loads + 3 untags per literal =
+               ;; 29 instructions/literal vs C's 14).  Locals stay in
+               ;; registers; W is written back at the end and around
+               ;; W-EMIT-RUN (which reads it on entry).
+               (let ((acc (b::bwr-acc w)) (nbits (b::bwr-nbits w)) (pos (b::bwr-pos w)))
+                 ;; NBITS is deliberately a plain FIXNUM: it transiently exceeds
+                 ;; 7 on every flush, and declaring (INTEGER 0 7) here would
+                 ;; let SBCL delete the (LOGAND NBITS 7) mask in WR-PM/WR-RAW;
+                 ;; the >7 value would then feed the next shift and corrupt
+                 ;; the bit stream.  The 0..7 bound holds only for the ENTRY
+                 ;; value, which the macros assert as (THE (INTEGER 0 7) pr).
+                 (declare (type (unsigned-byte 64) acc)
+                          (type fixnum nbits pos))
+                 (flet ((cmd-bits (cc)
+                          (unless cmd-1p-single
+                            ;; one map lookup, not two
+                            (let ((mc (aref +q0-cmd-map+ cc)))
+                              (wr-pm w acc nbits pos (aref cmd-rc-1p mc)
+                                              (aref cmd-ln-1p mc)))))
+                        (dist0-bits ()
+                          (unless dist-1p-single
+                            (wr-raw w acc nbits pos (aref dist-rc-1p 0)
+                                            (aref dist-ln-1p 0))))
+                        (lits ()
+                          (unless lit-1p-single
+                            (if (>= insert 8)
+                                (progn
+                                  ;; W-EMIT-RUN is not inline: flush the
+                                  ;; lexicals into W, call, reload
+                                  (setf (b::bwr-acc w) acc (b::bwr-nbits w) nbits
+                                        (b::bwr-pos w) pos)
+                                  (b:w-emit-run w data lit-start
+                                                (+ lit-start insert)
+                                                lit-rc-1p lit-ln-1p)
+                                  (setf acc (b::bwr-acc w) nbits (b::bwr-nbits w)
+                                        pos (b::bwr-pos w)))
+                                (loop for i of-type fixnum
                                       from lit-start below (+ lit-start insert)
-                                    do (let ((sym (aref data i)))
-                                         (b:%wbits-raw-pm
-                                          w (aref lit-rc-1p sym)
-                                          (aref lit-ln-1p sym))))))))
-                 ;; these three run per command/literal; without this they
-                 ;; stay separate local functions (CMD-BITS 12.0% and LITS
-                 ;; 6.4% of q0 samples as their own profile entries)
-                 (declare (inline cmd-bits dist0-bits lits))
-                 (cond
-                   ((and (plusp insert) (plusp cpy))
-                    (multiple-value-bind (cc e nb) (q0-insert-len insert)
-                      (cmd-bits cc)
-                      (when (plusp nb) (b:%wbits-raw w e nb)))
-                    (lits)
-                    (if (= dist last-dist)
-                        (dist0-bits)
-                        (progn
-                          (multiple-value-bind (cc e nb) (q0-distance dist)
-                            (unless dist-1p-single
-                              (b:%wbits-raw w (aref dist-rc-1p (- cc 64))
-                                            (aref dist-ln-1p (- cc 64)))
-                              (when (plusp nb) (b:%wbits-raw w e nb))))
-                          (setf last-dist dist)))
-                    (multiple-value-bind (cc e nb) (q0-copy-last-len cpy)
-                      (cmd-bits cc)
-                      (when (plusp nb) (b:%wbits-raw w e nb))
-                      (when (>= (aref +q0-cmd-map+ cc) 128)
-                        (dist0-bits))))
-                   ((plusp cpy)
-                    (multiple-value-bind (cc e nb) (q0-copy-len cpy)
-                      (cmd-bits cc)
-                      (when (plusp nb) (b:%wbits-raw w e nb)))
-                    (lits)
-                    (multiple-value-bind (cc e nb) (q0-distance dist)
-                      (unless dist-1p-single
-                        (b:%wbits-raw w (aref dist-rc-1p (- cc 64))
-                                      (aref dist-ln-1p (- cc 64)))
-                        (when (plusp nb) (b:%wbits-raw w e nb))))
-                    (setf last-dist dist))
-                   (t
-                    (multiple-value-bind (cc e nb) (q0-insert-len insert)
-                      (cmd-bits cc)
-                      (when (plusp nb) (b:%wbits-raw w e nb)))
-                    (lits))))
+                                      do (let ((sym (aref data i)))
+                                           (wr-pm w acc nbits pos
+                                                  (aref lit-rc-1p sym)
+                                                  (aref lit-ln-1p sym))))))))
+                   ;; these three run per command/literal; without this they
+                   ;; stay separate local functions (CMD-BITS 12.0% and LITS
+                   ;; 6.4% of q0 samples as their own profile entries)
+                   (declare (inline cmd-bits dist0-bits lits))
+                   (cond
+                     ((and (plusp insert) (plusp cpy))
+                      (multiple-value-bind (cc e nb) (q0-insert-len insert)
+                        (cmd-bits cc)
+                        (when (plusp nb) (wr-raw w acc nbits pos e nb)))
+                      (lits)
+                      (if (= dist last-dist)
+                          (dist0-bits)
+                          (progn
+                            (multiple-value-bind (cc e nb) (q0-distance dist)
+                              (unless dist-1p-single
+                                (wr-raw w acc nbits pos
+                                        (aref dist-rc-1p (- cc 64))
+                                        (aref dist-ln-1p (- cc 64)))
+                                (when (plusp nb) (wr-raw w acc nbits pos e nb))))
+                            (setf last-dist dist)))
+                      (multiple-value-bind (cc e nb) (q0-copy-last-len cpy)
+                        (cmd-bits cc)
+                        (when (plusp nb) (wr-raw w acc nbits pos e nb))
+                        (when (>= (aref +q0-cmd-map+ cc) 128)
+                          (dist0-bits))))
+                     ((plusp cpy)
+                      (multiple-value-bind (cc e nb) (q0-copy-len cpy)
+                        (cmd-bits cc)
+                        (when (plusp nb) (wr-raw w acc nbits pos e nb)))
+                      (lits)
+                      (multiple-value-bind (cc e nb) (q0-distance dist)
+                        (unless dist-1p-single
+                          (wr-raw w acc nbits pos (aref dist-rc-1p (- cc 64))
+                                          (aref dist-ln-1p (- cc 64)))
+                          (when (plusp nb) (wr-raw w acc nbits pos e nb))))
+                      (setf last-dist dist))
+                     (t
+                      (multiple-value-bind (cc e nb) (q0-insert-len insert)
+                        (cmd-bits cc)
+                        (when (plusp nb) (wr-raw w acc nbits pos e nb)))
+                      (lits))))
+                 ;; write the threaded state back for the next call / flush
+                 (setf (b::bwr-acc w) acc (b::bwr-nbits w) nbits (b::bwr-pos w) pos))
                last-dist)
              (push-cmd (ins ls cpy dist)
                (when (>= (* 4 nc) (length cv))
