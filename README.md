@@ -25,9 +25,19 @@ License: GPL-3.0
 (asdf:test-system "cl-brotli")
 ```
 
-The suite passes on Roswell SBCL 2.6.9 (241/241 checks, including
-multi-threaded tests). Benchmarks are run on Roswell SBCL 2.6.9 via
-`bench/run.sh`.
+The suite passes (243/243 checks) on SBCL (2.6.7 and Roswell 2.6.9, with
+multi-threaded tests), Clozure CL 1.12 and ECL 26.5. SBCL on x86-64 uses
+system-area-pointer loads and an SSE2 match-length VOP; every other
+implementation (and SBCL with `:cl-brotli-portable` on `*features*`) uses the
+portable byte-vector path in `src/port.lisp`, which produces identical
+streams. A 64-bit Lisp is required (fixnums of at least 60 bits); loading
+on a narrower Lisp signals an error instead of corrupting packed records.
+Benchmarks are run on SBCL via `bench/run.sh`.
+
+The decoder validates prefix codes, symbol ranges and meta-block lengths the
+way the C decoder does, so corrupt or hostile input signals
+`cl-brotli:brotli-error` (including truncated input) rather than reading or
+writing out of bounds.
 
 ## Usage
 ```lisp

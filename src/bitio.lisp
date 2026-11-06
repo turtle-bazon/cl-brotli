@@ -52,8 +52,8 @@
       ;; bytes always fit under the 59-bit fixnum bound.
       (declare (type fixnum pos end) (type (integer 0 23) nbits))
       (cond
-        ((>= pos end) (error "brotli: end of input"))
-        #+(and sbcl little-endian)
+        ((>= pos end) (error 'cl-brotli.lisp::brotli-error :msg "end of input"))
+        #+cl-brotli-sap
         ((and (brd-sap r) (<= (+ pos 8) end))
          ;; Refill with the widest 8-byte read that still keeps ACC below
          ;; 2^59, so every shift and logior below stays in fixnum.
@@ -116,8 +116,13 @@
 (defun bits-available (r)
   "Number of bits remaining, including bits already buffered in ACC."
   (declare (type brd r) (optimize (speed 3) (safety 0)))
+  ;; END - POS is a byte count of a real vector, so 8x it is a fixnum; say
+  ;; so, or SBCL compiles this per-symbol guard to GENERIC-+.
   (the fixnum (+ (brd-nbits r)
-                 (* 8 (- (brd-end r) (brd-pos r))))))
+                 (the fixnum
+                      (* 8 (the (integer #.(- (ash most-positive-fixnum -4))
+                                         #.(ash most-positive-fixnum -4))
+                                (- (brd-end r) (brd-pos r))))))))
 
 (defun r-align (r)
   "Discard bits up to the next byte boundary."
@@ -148,7 +153,7 @@ does not allocate an intermediate vector."
           (let ((pos (brd-pos r)) (count (- n i)))
             (declare (type fixnum pos count))
             (unless (<= (+ pos count) (brd-end r))
-              (error "brotli: end of input"))
+              (error 'cl-brotli.lisp::brotli-error :msg "end of input"))
             (replace out (brd-bytes r) :start1 (+ start i) :start2 pos
                      :end2 (+ pos count))
             (incf (brd-pos r) count))))
@@ -160,7 +165,7 @@ does not allocate an intermediate vector."
               (decf (brd-nbits r) 8))
             (progn
               (when (>= (brd-pos r) (brd-end r))
-                (error "brotli: end of input"))
+                (error 'cl-brotli.lisp::brotli-error :msg "end of input"))
               (setf (aref out (+ start i)) (aref (brd-bytes r) (brd-pos r)))
               (incf (brd-pos r)))))))
 
@@ -200,65 +205,56 @@ does not allocate an intermediate vector."
         (replace new out)
         (setf (bwr-out w) new)))))
 
+;; The SBCL writers are branchless (C's BrotliWriteBits shape): every write
+;; stores the whole 64-bit accumulator at POS - the caller-guaranteed
+;; eight bytes of slack make that safe - then advances POS by the completed
+;; bytes.  The old (WHEN (PLUSP EMIT) ...) flush was a data-dependent branch
+;; on every symbol (~3.2 vs ~1.8 ns/literal measured on 1 MiB of HTML).
+;; Bytes past the new POS are scratch: they are rewritten by the next store.
+(defmacro %wbits-body (w vbits n)
+  `(let* ((prev (bwr-nbits ,w))
+          (acc (logior (the (unsigned-byte 64) (bwr-acc ,w))
+                       (the (unsigned-byte 32) (ash ,vbits prev))))
+          (nbits (+ prev ,n))
+          (emit (ash nbits -3))
+          (pos (bwr-pos ,w))
+          (out (bwr-out ,w)))
+     (declare (type (unsigned-byte 64) acc) (type fixnum nbits pos)
+              (type (integer 0 3) emit)
+              (type (integer 0 7) prev)
+              (type (simple-array (unsigned-byte 8) (*)) out))
+     #+cl-brotli-sap
+     (sb-sys:with-pinned-objects (out)
+       (setf (sb-sys:sap-ref-64 (sb-sys:vector-sap out) pos) acc))
+     #-cl-brotli-sap
+     (loop for i below emit
+           do (setf (aref out (+ pos i))
+                    (logand (ash acc (* -8 i)) #xff)))
+     (setf (bwr-acc ,w) (ash acc (- (ash emit 3)))
+           (bwr-nbits ,w) (logand nbits 7)
+           (bwr-pos ,w) (+ pos emit))))
+
 (declaim (inline %wbits-raw))
 (defun %wbits-raw (w v n)
-  "Write N bits without a capacity check.  The caller must have ensured at
-least eight bytes of slack at the current position (see W-ENSURE)."
-  (declare (type bwr w) (type fixnum v n)
+  "Write N <= 24 bits without a capacity check.  The caller must have
+ensured at least eight bytes of slack at the current position (see
+W-ENSURE)."
+  (declare (type bwr w) (type fixnum v) (type (integer 0 24) n)
            (optimize (speed 3) (safety 0)))
-  (let* ((prev (bwr-nbits w))
-         (vbits (the (unsigned-byte 32) (logand v (aref +masks+ n))))
-         (acc (logior (the (unsigned-byte 64) (bwr-acc w))
-                      (the (unsigned-byte 32) (ash vbits prev))))
-         (nbits (+ prev n))
-         (emit (ash nbits -3))
-         (pos (bwr-pos w)))
-    (declare (type (unsigned-byte 64) acc) (type fixnum nbits pos emit)
-             (type (integer 0 7) prev))
-    (when (plusp emit)
-      (let ((out (bwr-out w)))
-        (declare (type (simple-array (unsigned-byte 8) (*)) out))
-        #+(and sbcl little-endian)
-        (sb-sys:with-pinned-objects (out)
-          (setf (sb-sys:sap-ref-64 (sb-sys:vector-sap out) pos) acc))
-        #-(and sbcl little-endian)
-        (loop for i below emit
-              do (setf (aref out (+ pos i))
-                       (logand (ash acc (* -8 i)) #xff))))
-      (incf pos emit)
-      (setf acc (ash acc (* -8 emit)))
-      (setf nbits (logand nbits 7)))
-    (setf (bwr-acc w) acc (bwr-nbits w) nbits (bwr-pos w) pos)))
+  (let ((vbits (the (unsigned-byte 32) (logand v (aref +masks+ n)))))
+    (%wbits-body w vbits n)))
+
 (declaim (inline %wbits-raw-pm))
 (defun %wbits-raw-pm (w v n)
-  "PRE-MASKED writer: V must already satisfy 0 <= V < 2^N (the writer's
-hot paths emit reversed codes / extra values from width-exact tables).
-No mask-table load, no logand; the call sites that can carry a negative
-or un-masked value (the special-distance offsets) keep using %WBITS-RAW."
-  (declare (type bwr w) (type fixnum v n)
+  "PRE-MASKED writer: V must already satisfy 0 <= V < 2^N, N <= 24 (the
+writer's hot paths emit reversed codes / extra values from width-exact
+tables).  No mask-table load, no logand; the call sites that can carry a
+negative or un-masked value (the special-distance offsets) keep using
+%WBITS-RAW."
+  (declare (type bwr w) (type fixnum v) (type (integer 0 24) n)
            (optimize (speed 3) (safety 0)))
-  (let* ((prev (bwr-nbits w))
-         (acc (logior (the (unsigned-byte 64) (bwr-acc w))
-                      (the (unsigned-byte 32) (ash v prev))))
-         (nbits (+ prev n))
-         (emit (ash nbits -3))
-         (pos (bwr-pos w)))
-    (declare (type (unsigned-byte 64) acc) (type fixnum nbits pos emit)
-             (type (integer 0 7) prev))
-    (when (plusp emit)
-      (let ((out (bwr-out w)))
-        (declare (type (simple-array (unsigned-byte 8) (*)) out))
-        #+(and sbcl little-endian)
-        (sb-sys:with-pinned-objects (out)
-          (setf (sb-sys:sap-ref-64 (sb-sys:vector-sap out) pos) acc))
-        #-(and sbcl little-endian)
-        (loop for i below emit
-              do (setf (aref out (+ pos i))
-                       (logand (ash acc (* -8 i)) #xff))))
-      (incf pos emit)
-      (setf acc (ash acc (* -8 emit)))
-      (setf nbits (logand nbits 7)))
-    (setf (bwr-acc w) acc (bwr-nbits w) nbits (bwr-pos w) pos)))
+  (let ((vbits (the (unsigned-byte 32) v)))
+    (%wbits-body w vbits n)))
 
 (defun w-ensure (w slack)
   "Ensure SLACK writable bytes after the current output position."
@@ -282,29 +278,36 @@ The caller must ensure two bytes per symbol plus eight bytes of slack."
     (declare (type (unsigned-byte 64) acc) (type fixnum nbits pos)
              (type (integer 0 7) nbits)
              (type (simple-array (unsigned-byte 8) (*)) out))
-    #+(and sbcl little-endian)
+    #+cl-brotli-sap
+    ;; Lazy 48-bit reservoir for the run: flush six bytes only when 48 bits
+    ;; are pending (one predictable branch per ~6 literals), then normalize
+    ;; back to the writer's < 8 pending bits.  Every store lands at or
+    ;; before the run's final position, inside the caller's slack.
     (sb-sys:with-pinned-objects (out)
-      (let ((sap (sb-sys:vector-sap out)))
-        (declare (type sb-sys:system-area-pointer sap))
-        (loop for i from start below end do
+      (let ((sap (sb-sys:vector-sap out))
+            (nb nbits))
+        (declare (type sb-sys:system-area-pointer sap)
+                 (type (integer 0 63) nb))
+        (loop for i of-type fixnum from start below end do
           (let* ((sym (aref data i))
                  (v (aref rcodes sym))
-                 (n (aref lengths sym))
-                 (new-acc (logior acc
-                                  (the (unsigned-byte 32)
-                                       (ash (the (unsigned-byte 32) v)
-                                            nbits))))
-                 (new-nbits (+ nbits n))
-                 (emit (ash new-nbits -3)))
-            (declare (type fixnum sym n new-nbits emit)
-                     (type (unsigned-byte 64) new-acc))
-            (when (plusp emit)
-              (setf (sb-sys:sap-ref-64 sap pos) new-acc)
-              (incf pos emit)
-              (setf new-acc (ash new-acc (* -8 emit)))
-              (setf new-nbits (logand new-nbits 7)))
-            (setf acc new-acc nbits new-nbits)))))
-    #-(and sbcl little-endian)
+                 (n (aref lengths sym)))
+            (declare (type (unsigned-byte 32) v) (type (integer 0 15) n))
+            (setf acc (logior acc (the (unsigned-byte 64)
+                                       (ash v (the (integer 0 47) nb)))))
+            (setf nb (+ (the (integer 0 47) nb) n))
+            (when (>= nb 48)
+              (setf (sb-sys:sap-ref-64 sap pos) acc)
+              (incf pos 6)
+              (setf acc (ash acc -48))
+              (setf nb (- nb 48)))))
+        (loop while (>= nb 8) do
+          (setf (sb-sys:sap-ref-8 sap pos) (logand acc #xff))
+          (incf pos)
+          (setf acc (ash acc -8))
+          (decf nb 8))
+        (setf nbits nb)))
+    #-cl-brotli-sap
     (loop for i from start below end do
       (let* ((sym (aref data i))
              (new-acc (logior acc (ash (logand (aref rcodes sym)

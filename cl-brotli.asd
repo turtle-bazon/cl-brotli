@@ -9,6 +9,7 @@
   :components ((:module "src"
                 :serial t
                 :components ((:file "packages")
+                             (:file "port")
                              (:file "bitio")
                              (:file "tables")
                              (:file "huffman")

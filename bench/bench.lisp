@@ -353,7 +353,14 @@ Common Lisp source, which would make HTML nearly identical to SOURCE."
            :data (make-json-octets size)))
     (:source
      (list :name "source"
-           :description "cl-newzlib + pesekey source (stable corpus)"
+           ;; Say which corpus was actually used: the fallback is this
+           ;; repository's own src/, which changes whenever cl-brotli is
+           ;; edited (its fingerprint then differs run to run).
+           :description (if (some #'probe-file
+                                  (list (merge-pathnames "cl-newzlib/src/" (user-homedir-pathname))
+                                        (merge-pathnames "pesekey/pesekey/src/" (user-homedir-pathname))))
+                            "cl-newzlib + pesekey source (stable corpus)"
+                            "FALLBACK: cl-brotli's own src/ (not stable across edits)")
            :data (tile-octets (external-source-octets) size)))
     (:binary
      (let ((path (first-existing

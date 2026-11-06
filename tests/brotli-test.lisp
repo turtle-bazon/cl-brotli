@@ -51,9 +51,12 @@
       (is (equalp (cl-brotli.reference:decompress compressed) data)))))
 
 (test invalid-distance-is-rejected
-  (let ((out (make-array 16 :element-type '(unsigned-byte 8)
-                            :adjustable t :fill-pointer 8)))
-    (dotimes (i 8) (setf (aref out i) i))
+  ;; OUT-COPY takes the decoder's OUTBUF (the old adjustable-vector form
+  ;; only "passed" through undefined behavior at safety 0).
+  (let ((out (cl-brotli.lisp::make-outbuf
+              (make-array 16 :element-type '(unsigned-byte 8)))))
+    (dotimes (i 8) (setf (aref (cl-brotli.lisp::outbuf-data out) i) i))
+    (setf (cl-brotli.lisp::outbuf-pos out) 8)
     (signals cl-brotli:brotli-error
       (cl-brotli.lisp::out-copy out 0 2))))
 
@@ -302,3 +305,61 @@ every worker's list must be byte-equal to (ELT REFERENCES J)."
                               (declare (ignore i))
                               (list (cl-brotli:compress data :quality q))))
                   (list reference))))))
+
+(defun lcg-stream (seed)
+  "Deterministic portable PRNG: (funcall g n) -> integer in [0, n)."
+  (let ((s seed))
+    (lambda (n)
+      (setf s (mod (+ (* s 6364136223846793005) 1442695040888963407) (expt 2 64)))
+      (mod (ash s -33) n))))
+
+(defun lz-sample (rnd n)
+  "N bytes of short-range repeats over a small alphabet: many short and
+overlapping copies, the shapes that exercise the wide copy paths."
+  (let ((v (make-array n :element-type '(unsigned-byte 8))))
+    (dotimes (i n v)
+      (setf (aref v i)
+            (if (and (plusp i) (< (funcall rnd 10) 7))
+                (aref v (max 0 (- i 1 (funcall rnd 40))))
+                (+ 97 (funcall rnd 6)))))))
+
+(test decompress-into-stays-in-range
+  ;; The output range is [START, END) of a larger caller buffer: no byte
+  ;; outside it may change (the 16-byte copy fast path once wrote past END).
+  (let ((rnd (lcg-stream 7)) (bad 0))
+    (dotimes (k 120)
+      (let* ((n (+ 20 (funcall rnd 3000)))
+             (data (lz-sample rnd n))
+             (c (cl-brotli.reference:compress data :quality (funcall rnd 12)))
+             (start (funcall rnd 5))
+             (out (make-array (+ start n 64) :element-type '(unsigned-byte 8)
+                                             :initial-element #xAA)))
+        (cl-brotli:decompress-into c out :start start :end (+ start n))
+        (unless (and (equalp (subseq out start (+ start n)) data)
+                     (every (lambda (b) (= b #xAA)) (subseq out (+ start n)))
+                     (every (lambda (b) (= b #xAA)) (subseq out 0 start)))
+          (incf bad))))
+    (is (zerop bad) "~D of 120 calls wrote outside [start,end)" bad)))
+
+(test corrupt-streams-signal-brotli-error
+  ;; Mutated C and Lisp streams must decode or signal BROTLI-ERROR - never
+  ;; another condition (at safety 0 that meant an out-of-bounds access).
+  (let ((rnd (lcg-stream 11)) (other 0) (first-other nil))
+    (dotimes (k 400)
+      (let* ((n (+ 10 (funcall rnd 3000)))
+             (data (lz-sample rnd n))
+             (q (funcall rnd 12))
+             (c (copy-seq (if (evenp k)
+                              (cl-brotli.reference:compress data :quality q)
+                              (cl-brotli:compress data :quality q)))))
+        (dotimes (j (1+ (funcall rnd 4)))
+          (setf (aref c (funcall rnd (length c))) (funcall rnd 256)))
+        (handler-case
+            (progn (cl-brotli:decompress c)
+                   (cl-brotli:decompress-into
+                    c (make-array (+ n 16) :element-type '(unsigned-byte 8))
+                    :start 3 :end (+ n 3)))
+          (cl-brotli:brotli-error () nil)
+          (error (e) (incf other) (unless first-other (setf first-other e))))))
+    (is (zerop other) "~D corrupt streams signalled a non-brotli error, e.g. ~A"
+        other first-other)))

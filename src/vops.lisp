@@ -18,10 +18,10 @@
 ;;;; both compute the same common-prefix length (300k random + exhaustive
 ;;;; differential check against the reference body).
 
-#+(and sbcl x86-64 64-bit little-endian)
+#+cl-brotli-x86-64
 (in-package #:sb-vm)
 
-#+(and sbcl x86-64 64-bit little-endian)
+#+cl-brotli-x86-64
 (eval-when (:compile-toplevel :load-toplevel :execute)
   ;; The VOP macro looks up the translation function's FUN-INFO, which a plain
   ;; DEFUN does not expose at compile time.  Register it explicitly.  There is

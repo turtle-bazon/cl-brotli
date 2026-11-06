@@ -71,3 +71,71 @@ tight ftype so hot callers' distance arithmetic stays in fixnum range."
          (tid (ash word-id (- (aref +ndbits+ len)))))
     (when (> tid 120) (berr "transform id ~d > 120" tid))
     (apply-transform base (aref +transforms+ tid))))
+
+;;; Allocation-free decoder path.  Each transform is precompiled once into
+;;; (PREFIX KIND K SUFFIX): KIND 0 identity, 1 uppercase-first, 2 uppercase-
+;;; all, 3 omit-first-K, 4 omit-last-K.  DICT-WORD above re-parsed the
+;;; transform's symbol name and made five temporary vectors per reference.
+(defparameter +transforms-c+
+  (map 'simple-vector
+       (lambda (tr)
+         (destructuring-bind (prefix type suffix) tr
+           (let ((name (symbol-name type)))
+             (multiple-value-bind (kind k)
+                 (cond ((eq type :identity) (values 0 0))
+                       ((eq type :upper-first) (values 1 0))
+                       ((eq type :upper-all) (values 2 0))
+                       ((eql 0 (search "OMIT-FIRST-" name))
+                        (values 3 (parse-integer name :start 11)))
+                       ((eql 0 (search "OMIT-LAST-" name))
+                        (values 4 (parse-integer name :start 10)))
+                       (t (error "unknown transform ~a" type)))
+               (vector (coerce prefix '(simple-array (unsigned-byte 8) (*)))
+                       kind k
+                       (coerce suffix '(simple-array (unsigned-byte 8) (*))))))))
+       +transforms+))
+(declaim (type simple-vector +transforms-c+))
+
+(defun dict-word-into (data pos limit len dist max-dist)
+  "Write the static-dictionary word for a (LEN, DIST) reference into DATA at
+POS, exactly as DICT-WORD would produce it, and return the new position.
+Signals BROTLI-ERROR if the word would end past LIMIT."
+  (declare (type (simple-array (unsigned-byte 8) (*)) data)
+           (type fixnum pos limit len dist max-dist)
+           (optimize (speed 3) (safety 0)))
+  (unless (<= 4 len 24) (berr "dictionary copy length ~d out of range" len))
+  (let* ((dict (load-dict))
+         (word-id (- dist (1+ max-dist)))
+         (idx (logand word-id (1- (nwords len))))
+         (off (+ (aref +doffset+ len) (* idx len)))
+         (tid (ash word-id (- (aref +ndbits+ len)))))
+    (declare (type fixnum word-id idx off tid))
+    (when (> tid 120) (berr "transform id ~d > 120" tid))
+    (let* ((tr (svref +transforms-c+ tid))
+           (prefix (svref tr 0))
+           (kind (svref tr 1))
+           (k (svref tr 2))
+           (suffix (svref tr 3))
+           (cstart off) (cend (+ off len)))
+      (declare (type (simple-array (unsigned-byte 8) (*)) prefix suffix)
+               (type fixnum kind k cstart cend))
+      (case kind
+        (3 (setf cstart (min cend (+ off k))))
+        (4 (setf cend (max off (- cend k)))))
+      (let* ((clen (- cend cstart))
+             (total (+ (length prefix) clen (length suffix))))
+        (declare (type fixnum clen total))
+        (when (> total (- limit pos))
+          (berr "dictionary word exceeds the meta-block"))
+        (replace data prefix :start1 pos)
+        (incf pos (length prefix))
+        (replace data dict :start1 pos :start2 cstart :end2 cend)
+        ;; Uppercase transforms (RFC 7932 8): in place on the copied core.
+        (case kind
+          (1 (when (plusp clen) (%ferment-at data pos (+ pos clen))))
+          (2 (let ((i pos) (e (+ pos clen)))
+               (declare (type fixnum i e))
+               (loop while (< i e) do (incf i (%ferment-at data i e))))))
+        (incf pos clen)
+        (replace data suffix :start1 pos)
+        (+ pos (length suffix))))))

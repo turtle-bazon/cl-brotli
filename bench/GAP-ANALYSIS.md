@@ -3227,3 +3227,186 @@ MEASURED (interleaved A/B, A = r169):
                                               -2.7% pair: noise)
 Note the512KiB sentinel fill on every acquisition eats part of the
 allocation saving - the net is +1..3%, not the projected +2..5%.
+
+## Session 6 Nov 2026 (uncommitted, on top of r170 + the port.lisp diff): correctness first, then decoder and cliff fixes
+
+Host changed: Ryzen 7 PRO 4750U, system SBCL 2.6.7, C Brotli 1.2.0, no
+Roswell; GPL-3 / rclone MANUAL.html are absent, so TEXT and HTML fall back
+(TEXT = tiled 4 KiB README, a degenerate corpus; HTML = fish relnotes.html).
+Numbers below are not comparable with the 3700X tables above.
+
+### Correctness and portability (found by a safety-3 build + fuzzing)
+
+Method: copy src/, `s/(safety 0)/(safety 3)/`, load that copy (a fresh
+path, so ASDF cannot reuse fasls - `restrict-compiler-policy` silently did
+nothing here for that reason), on SBCL native, SBCL `:cl-brotli-portable`,
+CCL and ECL; then a differential fuzzer (random sizes around 64 KiB, 4 data
+kinds, q0-q11; both decoders, compress-into, pooled identity, C streams) and
+a mutation fuzzer (1-4 random byte edits of C and Lisp streams, outcome
+compared with the C decoder).
+
+Encoder:
+1. `bigram-context-map` multiplied BOTH prev and cur class by 3: indices up
+   to 12 in a 9-slot histogram (an out-of-bounds heap write at safety 0 on
+   every q5+ input >= 64 bytes) and a wrong histogram, so the q5-q9
+   literal-context decision did not follow C.  Now C's
+   `histo[prev + lut[b>>6]]++, prev = lut[b>>6]*3`.
+2. `%hash4-tail` / `%hashf-tail` read DATA[N] for the last position
+   (5-byte hash, last = n-4): output depended on whatever followed the
+   vector in memory (the CCL "pooled call differs" failures).  Past-end
+   bytes now read as 0 (C's zero-filled ring-buffer slack).
+3. `%hashf-tail` computed `(logand x (ash 1 64) (1- (ash 1 64)))` = 0
+   always, and both tails omitted the `<< 24` of the SAP hashes, so tail
+   positions were stored under different buckets than they were looked up
+   in.  Both now equal the SAP hashes exactly (checked on 16k positions x 4
+   table sizes).
+4. The zopfli short-distance loop's hoisted `left` byte was read even when
+   the loop could not run (DATA[N] near the end, q10/q11).
+5. `clfreq` / `clcl-lengths` were plain T vectors declared
+   `(simple-array fixnum)`: harmless on SBCL (same tagged layout), memory
+   corruption on CCL (`WRITE-COMPRESSED-BLOCK-BODY` faulted).
+6. NIL-for-fixnum / NIL-for-simple-vector declaration lies
+   (`dict-match-at` best-idx, `lit-rcl/lit-lnl/lit-sng`).
+7. ECL rejected a DECLARE after a LABELS docstring (`push-cmd`) - legal CL,
+   rewritten as a comment.  CCL cannot see a DEFCONSTANT value in `#.` at
+   compile time (`build-huff` subtable size) - literal used.
+
+Decoder:
+8. `decompress-into`'s non-SAP branch never set OUTBUF-ORIGIN: on CCL/ECL
+   every distance with :START > 0 was classified against the wrong base
+   (dictionary words in place of copies).  Both branches now share one body.
+9. Hostile input: insert/copy lengths and dictionary words were written
+   past the reserved meta-block (heap overflow at safety 0, into the
+   caller's buffer for `decompress-into`); out-of-alphabet simple-code
+   symbols indexed 704-entry tables up to 1023; over-subscribed and
+   incomplete codes reached BUILD-HUFF.  Added C's checks
+   (BLOCK_LENGTH_*, SIMPLE_HUFFMAN_ALPHABET/SAME, CL_SPACE, HUFFMAN_SPACE).
+   With in-alphabet symbols, block types and context-map values are in
+   range by construction, as in C.  Mutation fuzz: 75,000 streams, 0
+   out-of-bounds accesses; we never reject a stream C accepts (we still
+   accept ~1.8% of corrupt streams that C rejects - padding/trailer checks).
+10. "end of input" was a plain ERROR, not BROTLI-ERROR.
+11. The INVALID-DISTANCE test passed an adjustable vector to OUT-COPY
+    (which takes an OUTBUF) and only "passed" through undefined behavior.
+
+Also: r170 as committed crashes at q2+ (`NIL is not ZPQ`); the uncommitted
+port.lisp diff already fixed that.  A load-time check now refuses Lisps
+with < 60-bit fixnums (ZLEN packs bits up to 50).
+
+Result: 241/241 on SBCL (native, safety 3, portable safety 3), CCL, ECL.
+
+### Speed
+
+Decoder (html relnotes, 1 MiB, C stream, lisp/C core, before -> after):
+q0 0.37->0.41, q1 0.30->0.34, q2 0.35->0.39, q5 0.31->0.39, q11 0.29->0.41;
+source q5 0.32->0.40, binary q2 0.58->0.70.
+- dictionary references: DICT-WORD re-parsed the transform's SYMBOL-NAME
+  with SEARCH + PARSE-INTEGER and built 5 temporaries per reference;
+  DICT-WORD-INTO writes prefix/word/suffix straight into the output from a
+  precompiled transform table (q5 +18%, q11 +34% on html alone).
+- BLK struct slots untyped -> BLK-MAYBE-SWITCH was generic arithmetic per
+  symbol on block-split streams; READ-HUFF had no result type -> every
+  comparison on a decoded symbol was generic (155 efficiency notes in
+  DECODE-COMPRESSED-META-BLOCK -> 0); BITS-AVAILABLE's (* 8 (- end pos))
+  was GENERIC-+.
+- BUILD-HUFF: fixnum count/next arrays, one pre-sized subtable vector
+  instead of VECTOR-PUSH-EXTEND + COERCE (+5%).
+- %DECODE-LIT-RUN-CTX: context-modeled literal runs with the reservoir and
+  p1/p2 in locals, per-literal READ-HUFF fallback (+3%).
+- WITH-LOCAL-BITS: command header and distance read groups with the
+  reservoir in MACROLET-updated locals (not MV-returning functions, the
+  approach that lost three times above): q1 +3..8%, q5 ~0.
+What remains (~0.4x): struct traffic around every literal run and copy,
+OUT-COPY-PREALLOCATED (13% incl. REPLACE), tree building on many-tree
+streams (BUILD-HUFF + READ-COMPLEX-PREFIX ~12% at q5).
+
+Encoder:
+- q10/q11 cliff on repetitive data: %COMPRESS-BYTES re-ran the whole
+  pipeline without the dictionary whenever the OUTPUT was < 4 KiB, i.e.
+  exactly for the most compressible inputs (1 MiB zeros -> 13 bytes paid
+  two zopfli runs).  Gate is now on the INPUT size (n < 4096).  Plus
+  LENGTH-CODE-F's long-length fallback read T vectors untyped (generic >=
+  and a full call to %SINGLE-FLOAT per evaluation - every long copy).
+  zeros q10 0.18->0.41, q11 0.16->0.35; periodic q10 0.38->0.74, q11
+  0.42->0.63 (lisp/C core; 1 MiB zeros q11 7.1 -> 16.7 MiB/s).
+- %LZ77: NCMD untyped (generic * and + per pushed command), (* 135 ml)
+  score terms and (ash best-dist 2) overflow-checked: all 72 notes with a
+  forced generic/overflow op gone.  html q2 0.45->0.48, q5 0.65->0.70,
+  source q5 0.73->0.78.
+
+Not changed: sizes (all within +-0.01 of before on the 1 MiB matrix).
+
+### Where parity stands (this host, 1 MiB, lisp/C core speed; size)
+
+compress  | q0-q1        | q2-q5          | q7      | q9-q11
+---       | ---          | ---            | ---     | ---
+html/json | 0.48-0.83x   | 0.35-0.70x     | 0.7-0.9x | 1.0-1.9x
+source/bin| 1.0-2.4x     | 0.36-0.78x     | 0.94-1.0x | 1.1-3.5x
+size      | 0.42-1.02    | 1.00-1.09      | 1.01-1.06 | 1.01-1.10
+
+decode of C streams: 0.31-0.70x on real corpora (all levels).
+
+Next levers, in measured-impact order: (1) decoder - keep the reservoir in
+locals across the WHOLE command (literal run + copy), i.e. fold
+%DECODE-LIT-RUN(-CTX) and the copy into the command loop under one
+WITH-LOCAL-BITS; (2) q2-q5 encoder speed (the H5/H6 bucket probe and the
+emit pass); (3) q10/q11 binary/text ratio (1.07-1.12: block splitting and
+context modeling at C's HQ settings); (4) periodic q5-q11 ratio 1.31-1.49.
+
+### Session 6 Nov 2026, part 2
+
+More correctness (each now has a regression test or fuzz coverage):
+12. DECOMPRESS-INTO wrote past :END into the caller's buffer: the 16-byte
+    unaligned short-copy checked (LENGTH DATA), not the output limit.
+    294 of 400 random calls clobbered bytes after END.  The copy path now
+    takes an explicit write limit (OUTBUF-LIMIT).  Test:
+    DECOMPRESS-INTO-STAYS-IN-RANGE.
+13. PARSE-AS-UTF8 accepted a 3/4-byte sequence when start+2 = end / start+3
+    = end (C: size > 2 / > 3), reading IN[END] (feeds literal costs).
+14. Test CORRUPT-STREAMS-SIGNAL-BROTLI-ERROR: 400 mutated C/Lisp streams
+    must decode or signal BROTLI-ERROR only.
+Suite: 243/243 on SBCL (native, safety 3, portable safety 3), CCL, ECL.
+
+Benchmark harness: the SOURCE dataset silently fell back to cl-brotli's
+own src/ when ~/cl-newzlib and ~/pesekey are absent, so its fingerprint
+changed with every edit (BAC6B49C, 0A5BE001, 50B669E3, 430D60EC across
+this session's runs) - SOURCE before/after numbers on such a host are
+meaningless.  The description now says FALLBACK when that happens.
+
+q2-q4 encoder: ported C's BrotliCreateBackwardReferences driver over the
+HashLongestMatchQuickly family (%LZ77-QUICK; q2 = H2 16-bit/1-way,
+q3 = H3 16-bit/2-way, q4 = H4 17-bit/4-way or H54 20-bit/4-way/7-byte
+hash at >= 1 MiB, as ChooseHasher): last distance first,
+BackwardReferenceScore selection, the lazy deferral (cost_diff_lazy 175,
+<= 4 in a row), distance-cache rotation, StoreRange, sparse-search jumps;
+no static dictionary yet (C's H2/H4 have it).  Short distance codes are
+now on for q2-q4 (C always uses them).
+  sizes lisp/C at q2: html 1.04 -> 1.00, json 1.06 -> 1.00, binary 1.05 ->
+  1.01; q3 1.00-1.02, q4 1.00-1.04 (periodic 1.06).
+  speed: frozen r170 source corpus, q2: chain3 204 MiB/s / 94,520 B ->
+  H2 port 189-196 MiB/s / 86,499 B (C: 370 MiB/s / 86,756 B).
+  Two traps found on the way: a variable-count ASH of a u64 is not
+  modular (consed a bignum per hash), and declaring %MATCH-LEN-SAP's
+  result narrower than FIXNUM makes SBCL drop the SSE2 VOP for a full
+  call - bind it as FIXNUM and narrow with THE at the use.
+
+Decoder, part 2 (html, lisp/C core): q5 0.39 -> 0.41, q11 0.41 -> 0.43.
+- OUT-COPY-PREALLOCATED's INLINE declaim came after its DEFUN, so every
+  copy was a full call; overlapping short copies used (MOD I DISTANCE)
+  per byte.  Now inline, a forward word copy with the period widened to
+  >= 8 bytes, word moves for 17-255-byte copies, doubling REPLACE for
+  >= 256 bytes (periodic decode stays 2.9-3.2x C).
+- READ-COMPLEX-PREFIX / READ-CLCL typed (21 notes -> 2); C's per-mode
+  512-byte context LUT (one OR per literal, no CASE on the mode).
+Instruction-level profile (sb-sprof annotated DISASSEMBLE of
+DECODE-COMPRESSED-META-BLOCK): the "self" time sits on return points of
+the copy, the context literal run, READ-PREFIX-CODE and DICT-WORD-INTO;
+command parsing itself is small.  C q5 html streams carry one meta-block
+with 130 literal trees, so tree setup (10-bit roots, 1024 stores each)
+is ~15%; C's 8-bit roots would cut that 4x - the next decoder lever.
+
+Matrix now (1 MiB, lisp/C core speed):
+compress  q0-q1 0.2-2.2x | q2-q3 0.40-0.47x (real corpora) | q4 0.61-0.73x
+          q5 0.51-0.79x | q7 0.78-1.02x | q9-q11 1.0-3.6x
+size      q2-q11 1.00-1.10 except periodic q5-q11 1.31-1.49
+decode    0.34-0.71x on html/json/binary at every level

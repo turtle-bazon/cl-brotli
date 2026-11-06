@@ -118,12 +118,12 @@ Shared by DECOMPRESS (growable OUT) and DECOMPRESS-INTO (bounded OUT)."
 compressed meta-blocks, plus metadata blocks; the distance ring buffer and the
 static dictionary span the whole stream."
   (let ((data (b:to-octets input)))
-    #+(and sbcl little-endian)
+    #+cl-brotli-sap
     (sb-sys:with-pinned-objects (data)
       (let ((r (b:make-brd data)))
         (setf (b:brd-sap r) (sb-sys:vector-sap data))
         (%decompress r)))
-    #-(and sbcl little-endian)
+    #-cl-brotli-sap
     (%decompress (b:make-brd data))))
 
 (defun decompress-into (input output &key (start 0) (end (length output))
@@ -143,22 +143,22 @@ ignored, as in DECOMPRESS."
     (assert (<= 0 istart iend (length data)) (istart iend)
             "brotli: invalid input range ~D..~D for ~D bytes" istart iend
             (length data))
-    #+(and sbcl little-endian)
-    (sb-sys:with-pinned-objects (data output)
-      (let ((r (b:make-brd data istart iend)))
-        (setf (b:brd-sap r) (sb-sys:vector-sap data))
-        (let ((out (make-outbuf output)))
-          (setf (outbuf-pos out) start
-                (outbuf-origin out) start
-                (outbuf-limit out) end)
-          (%decode-stream r out)
-          (outbuf-pos out))))
-    #-(and sbcl little-endian)
-    (let ((r (b:make-brd data istart iend))
-          (out (make-outbuf output)))
-      (setf (outbuf-pos out) start (outbuf-limit out) end)
-      (%decode-stream r out)
-      (outbuf-pos out))))
+    (flet ((run (r)
+             ;; One body for both branches: the origin must match START,
+             ;; or every distance is classified against the wrong base.
+             (let ((out (make-outbuf output)))
+               (setf (outbuf-pos out) start
+                     (outbuf-origin out) start
+                     (outbuf-limit out) end)
+               (%decode-stream r out)
+               (outbuf-pos out))))
+      #+cl-brotli-sap
+      (sb-sys:with-pinned-objects (data output)
+        (let ((r (b:make-brd data istart iend)))
+          (setf (b:brd-sap r) (sb-sys:vector-sap data))
+          (run r)))
+      #-cl-brotli-sap
+      (run (b:make-brd data istart iend)))))
 
 ;;; ---- compress (uncompressed/stored meta-blocks) -----------------------
 (defconstant +mlen-max+ #xFFFFFF)   ; 6 nibbles
