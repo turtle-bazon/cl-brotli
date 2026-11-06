@@ -3240,7 +3240,7 @@ mirroring %WBITS-RAW."
          (setf ,acc (ash ,acc (* -8 ,em)))
          (setf ,nbits (logand ,nbits 7))))))
 
-(defun %lz77-fragment (data sap window table-bits &optional w)
+(defun %lz77-fragment-fast (data sap window table-bits w)
   (declare (type (simple-array (unsigned-byte 8) (*)) data)
            (type sb-sys:system-area-pointer sap)
            (type fixnum window table-bits)
@@ -3252,12 +3252,7 @@ mirroring %WBITS-RAW."
          (table (make-array (ash 1 table-bits)
                             :element-type '(unsigned-byte 32)
                             :initial-element #xFFFFFFFF))
-         (cv (make-array (* 4 (max 4096 (ash n -5)))
-                         :element-type '(unsigned-byte 32)))
-         (nc 0)
-         (litf (if w (%sample-lit-histogram data n)
-                      (make-array 256 :element-type 'fixnum
-                                     :initial-element 0)))
+         (litf (%sample-lit-histogram data n))
          (cmdf (make-array 64 :element-type 'fixnum :initial-element 0))
          (distf (make-array 64 :element-type 'fixnum :initial-element 0))
          (lit-start 0) (p 1) (limit (- n k))
@@ -3271,14 +3266,14 @@ mirroring %WBITS-RAW."
          (cmd-1p-single nil)
          (dist-rc-1p +empty-fixnums+) (dist-ln-1p +empty-fixnums+)
          (dist-1p-single nil))
-    (declare (type fixnum k min-match p lit-start limit last-dist back nc)
+    (declare (type fixnum k min-match p lit-start limit last-dist back)
              ;; SHIFT = table-bits - 64 is always in -63..-1 (table-bits
              ;; 1..63), so ASH compiles to ONE sar/shr by CL instead of the
              ;; generic sign-check + clamp + branch dance (~9 instructions
              ;; and 3 branches PER HASH, and hashes run on every trawl
              ;; iteration and every interior store)
              (type (integer -63 -1) shift)
-             (type (simple-array (unsigned-byte 32) (*)) table cv)
+             (type (simple-array (unsigned-byte 32) (*)) table)
              (type (simple-array fixnum (256)) litf)
              (type (simple-array fixnum (64)) cmdf distf)
              (type fixnum slack)
@@ -3290,12 +3285,12 @@ mirroring %WBITS-RAW."
                    dist-rc-1p dist-ln-1p))
     (replace cmdf +q0-seed-cmd+)
     (replace distf +q0-seed-dist+)
-    ;; One-pass mode (C BrotliCompressFragmentFast): trees come from what C
-    ;; fixes up front - the sampled RAW-INPUT literal histogram (maxbits 8,
-    ;; like C's BuildAndStoreHuffmanTreeFast) and the fixed seed command and
-    ;; distance codes - and the header is written before the scan; the scan
-    ;; then emits directly into W.  Two-pass mode leaves all of it untouched.
-    (when w
+    ;; C BrotliCompressFragmentFast: trees come from what C fixes up front -
+    ;; the sampled RAW-INPUT literal histogram (maxbits 8, like C's
+    ;; BuildAndStoreHuffmanTreeFast) and the fixed seed command and distance
+    ;; codes - and the header is written before the scan; the scan then emits
+    ;; directly into W.
+    (progn
       (setf lit-1p (build-etree litf 256 15)
             cmd-1p (fast-cmd-etree (build-etree cmdf 64 15))
             dist-1p (build-etree distf 64 14))
@@ -3438,6 +3433,147 @@ decisions; used only when W is non-nil."
                  ;; write the threaded state back for the next call / flush
                  (setf (b::bwr-acc w) acc (b::bwr-nbits w) nbits (b::bwr-pos w) pos))
                last-dist)
+             )
+        (declare (inline hash prefix-match))
+      (when (> n k)
+        (let ((next-hash (hash p)))
+          (declare (type fixnum next-hash))
+          (block scan
+            (loop
+              ;; Step 1: trawl for a k-byte match, with C's skip heuristic.
+              (let ((skip 32) (cand #xFFFFFFFF) (next-ip p))
+                (declare (type fixnum skip next-ip)
+                         (type (unsigned-byte 32) cand))
+                (block trawl
+                  (loop
+                    (let* ((h next-hash)
+                           (step (ash skip -5)))
+                      (declare (type fixnum h step))
+                      (incf skip)
+                      (setf p next-ip)
+                      (setf next-ip (+ p step))
+                      (when (> next-ip limit) (return-from scan nil))
+                      (setf next-hash (hash next-ip))
+                      ;; C checks the previous distance before the table.
+                      (when (> last-dist 0)
+                        (let ((ld (- p last-dist)))
+                          (when (prefix-match p ld)
+                            (setf (aref table h) p
+                                  cand ld)
+                            (return-from trawl nil))))
+                      (let ((c2 (aref table h)))
+                        (setf (aref table h) p)
+                        ;; C checks the distance only once, after a
+                        ;; prefix-match succeeds; the two guards dropped
+                        ;; here are invariants of the table (see GAP 165).
+                        (when (and (/= c2 #xFFFFFFFF)
+                                   (prefix-match p c2)
+                                   (<= (- p c2) window))
+                          (setf cand c2)
+                          (return-from trawl nil))))))
+                ;; Step 2: emit the found match plus the pending literals.
+                (let* ((base p)
+                       (matched (+ min-match (%match-len-sap-frag sap (+ cand k) (+ p k) n)))
+                       (distance (- base cand))
+                       (insert (- base lit-start)))
+                  (declare (type fixnum matched distance insert))
+                  (setf last-dist
+                            (emit-one insert lit-start matched distance last-dist))
+                  (incf p matched)
+                  (setf lit-start p))
+                (when (>= p limit) (return-from scan nil))
+                ;; Insert hashes for positions inside the copy.
+                (loop for q from (max 0 (- p back)) below p
+                      do (setf (aref table (hash q)) q))
+                (let* ((cur-hash (hash p))
+                       (cand2 (aref table cur-hash)))
+                  (declare (type fixnum cur-hash)
+                           (type (unsigned-byte 32) cand2))
+                  (setf (aref table cur-hash) p)
+                  ;; Consecutive copies with no literal bytes in between.
+                  (loop while (and (/= cand2 #xFFFFFFFF)
+                                   (< cand2 p)
+                                   (<= (- p cand2) window)
+                                   (prefix-match p cand2))
+                        do
+                        (let* ((base p)
+                               (matched (+ min-match
+                                           (%match-len-sap-frag2
+                                            sap (+ cand2 k) (+ p k) n)))
+                               (distance (- base cand2)))
+                          (declare (type fixnum matched distance))
+                          (setf last-dist
+                                    (emit-one 0 p matched distance last-dist))
+                          (incf p matched)
+                          (setf lit-start p))
+                        (when (>= p limit) (return-from scan nil))
+                        (loop for q from (max 0 (- p back)) below p
+                              do (setf (aref table (hash q)) q))
+                        (setf cur-hash (hash p)
+                              cand2 (aref table cur-hash))
+                        (setf (aref table cur-hash) p))))
+              ;; No match at P: advance one byte and continue trawling.
+              (incf p)
+              (when (> p limit) (return-from scan nil))
+              (setf next-hash (hash p))))))
+      (when (< lit-start n)
+        (let ((insert (- n lit-start)))
+          (setf last-dist (emit-one insert lit-start 0 0 last-dist))))
+      nil)))
+
+(defun %lz77-fragment-two-pass (data sap window table-bits)
+  (declare (type (simple-array (unsigned-byte 8) (*)) data)
+           (type sb-sys:system-area-pointer sap)
+           (type fixnum window table-bits)
+           (optimize (speed 3) (safety 0)))
+  (let* ((n (length data))
+         (k (if (<= table-bits 16) 5 6))
+         (min-match k)
+         (hmask (1- (ash 1 table-bits)))
+         (table (make-array (ash 1 table-bits)
+                            :element-type '(unsigned-byte 32)
+                            :initial-element #xFFFFFFFF))
+         (cv (make-array (* 4 (max 4096 (ash n -5)))
+                         :element-type '(unsigned-byte 32)))
+         (nc 0)
+         (litf (make-array 256 :element-type 'fixnum
+                                     :initial-element 0))
+         (cmdf (make-array 64 :element-type 'fixnum :initial-element 0))
+         (distf (make-array 64 :element-type 'fixnum :initial-element 0))
+         (lit-start 0) (p 1) (limit (- n k))
+         (last-dist -1) (back (if (= k 5) 3 5))
+         (shift (the fixnum (- table-bits 64)))
+         )
+    (declare (type fixnum k min-match p lit-start limit last-dist back nc)
+             ;; SHIFT = table-bits - 64 is always in -63..-1 (table-bits
+             ;; 1..63), so ASH compiles to ONE sar/shr by CL instead of the
+             ;; generic sign-check + clamp + branch dance (~9 instructions
+             ;; and 3 branches PER HASH, and hashes run on every trawl
+             ;; iteration and every interior store)
+             (type (integer -63 -1) shift)
+             (type (simple-array (unsigned-byte 32) (*)) table cv)
+             (type (simple-array fixnum (256)) litf)
+             (type (simple-array fixnum (64)) cmdf distf)
+             )
+    (replace cmdf +q0-seed-cmd+)
+    (replace distf +q0-seed-dist+)
+    (labels ((hash (i)
+               ;; The 8-byte load in %HASHF-SAP reads i..i+7; within 3 bytes
+               ;; of the end that crosses the vector boundary (C's matcher
+               ;; keeps a 16-byte margin we do not have), so the tail
+               ;; positions compute the same hash from a 5-byte u40 build.
+               (if (<= (+ i 8) n)
+                   (%hashf-sap sap i shift hmask)
+                   (%hashf-tail data i shift hmask)))
+             (prefix-match (a b)
+               (and (= (sb-sys:sap-ref-32 sap a)
+                       (sb-sys:sap-ref-32 sap b))
+                    (if (= k 5)
+                        (= (sb-sys:sap-ref-8 sap (+ a 4))
+                           (sb-sys:sap-ref-8 sap (+ b 4)))
+                        (= (sb-sys:sap-ref-16 sap (+ a 4))
+                           (sb-sys:sap-ref-16 sap (+ b 4))))))
+             (mlen (a b) (%match-len-sap sap a b n))
              (push-cmd (ins ls cpy dist)
                (when (>= (* 4 nc) (length cv))
                  (let ((new (make-array (* 2 (length cv))
@@ -3493,15 +3629,12 @@ decisions; used only when W is non-nil."
                        (distance (- base cand))
                        (insert (- base lit-start)))
                   (declare (type fixnum matched distance insert))
-                  (if w
-                      (setf last-dist
-                            (emit-one insert lit-start matched distance last-dist))
-                      (progn
+                  (progn
                         (push-cmd insert lit-start matched distance)
                         (setf last-dist
                               (note-fast-command data litf cmdf distf last-dist
                                                  insert lit-start matched
-                                                 distance))))
+                                                 distance)))
                   (incf p matched)
                   (setf lit-start p))
                 (when (>= p limit) (return-from scan nil))
@@ -3525,14 +3658,11 @@ decisions; used only when W is non-nil."
                                             sap (+ cand2 k) (+ p k) n)))
                                (distance (- base cand2)))
                           (declare (type fixnum matched distance))
-                          (if w
-                              (setf last-dist
-                                    (emit-one 0 p matched distance last-dist))
-                              (progn
+                          (progn
                                 (push-cmd 0 p matched distance)
                                 (setf last-dist
                                       (note-fast-command data litf cmdf distf
-                                         last-dist 0 p matched distance))))
+                                         last-dist 0 p matched distance)))
                           (incf p matched)
                           (setf lit-start p))
                         (when (>= p limit) (return-from scan nil))
@@ -3547,15 +3677,12 @@ decisions; used only when W is non-nil."
               (setf next-hash (hash p))))))
       (when (< lit-start n)
         (let ((insert (- n lit-start)))
-          (if w
-              (setf last-dist (emit-one insert lit-start 0 0 last-dist))
-              (progn
+          (progn
                 (push-cmd insert lit-start 0 0)
                 (setf last-dist
                       (note-fast-command data litf cmdf distf last-dist
-                                         insert lit-start 0 0))))))
+                                         insert lit-start 0 0)))))
       (values cv nc litf cmdf distf))))
-
 (defun lz77 (data window &key (use-dict (text-like-data-p data)) dict-limit
                               (base-pos 0) (max-chain 128) (lazy t)
                               (skip-match nil) (insert-interior t)
@@ -3578,8 +3705,15 @@ compression ratio for encoder throughput."
       (let ((dictsap (and dictv (sb-sys:vector-sap dictv))))
         #+(and sbcl x86-64 64-bit little-endian)
         (if (and skip-match (not lazy) (not use-dict) (<= max-chain 2))
-            (%lz77-fragment data (sb-sys:vector-sap data) window
-                            (if (<= max-chain 1) 15 17) one-pass)
+            ;; C keeps BrotliCompressFragmentFast (q0, one-pass) and
+            ;; BrotliCompressFragmentTwoPass (q1) in separate translation
+            ;; units; so do we - the writer decides which variant runs.
+            (let ((tb (if (<= max-chain 1) 15 17)))
+              (if one-pass
+                  (%lz77-fragment-fast data (sb-sys:vector-sap data)
+                                       window tb one-pass)
+                  (%lz77-fragment-two-pass data (sb-sys:vector-sap data)
+                                           window tb)))
             (%lz77 data (sb-sys:vector-sap data) dictv dictsap window
                    use-dict dict-limit base-pos max-chain lazy skip-match
                    insert-interior score-p checks bt))

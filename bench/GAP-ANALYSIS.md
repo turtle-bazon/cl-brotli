@@ -3098,3 +3098,40 @@ headroom we do not have (html q7 is pinned AT 1.100).  At our hash
 width the byte-identical ring is -17%; at C's width it breaches the
 ratio gate; with C's depths it walks 2-4x further.  The prev[] chase
 stays.  Recorded so neither variant is rebuilt.
+
+## Rev 168: split %LZ77-FRAGMENT into FAST + TWO-PASS (C's separate TUs)
+
+C keeps BrotliCompressFragmentFast (q0, one-pass) and
+BrotliCompressFragmentTwoPass (q1) in separate translation units; our
+single %LZ77-FRAGMENT carried both via `if w` at nine sites (Rev 157
+recorded this as part of the 2.3x code-size gap vs C's Impl15).
+Split into two defuns generated from the same source, each dropping
+its dead half:
+
+  %LZ77-FAST (280 lines): w required (the writer).  Drops cv/nc
+    (the two-pass command vector - a 512KiB allocation q0 never
+    wrote), the PUSH-CMD label, and all three two-pass emit arms;
+    (WHEN w ...) header/tree block becomes unconditional; returns NIL
+    (the caller discards it).
+  %LZ77-TWO-PASS (162 lines): no w.  Drops EMIT-ONE (~100 lines of
+    q0 command/distance emission + slack/W-ENSURE), the one-pass
+    etree slots, and the header block; returns (VALUES CV NC LITF
+    CMDF DISTF) as before for WRITE-FAST-BLOCK-BODY.
+
+The scan loop (trawl/skip/interior stores) is unchanged in both; the
+three emit arms become straight-line (no branch on w in the hot loop).
+
+Verified: ALL 45 BYTE-IDENTICAL (q0 exercises FAST, q1 exercises
+TWO-PASS - both covered); 241/241; bt-min 8/8; repro-split; ratio45
+0 failures; compiles with zero warnings.
+
+MEASURED (interleaved A/B, A = r166 dual-path):
+  spec        A=r166        B=split      delta
+  html q0     201.6 201.6   204.9 204.9  +1.6%
+  binary q0   195.3 192.3   195.3 192.3   0.0% (exact ties)
+  html q1     152.4 152.4   152.4 158.2  +1.9%
+  source q1   304.9 304.9   312.5 312.5  +2.5%
+No regressions.  The gain is smaller than Rev 157's "part of it is
+real" implied: removing dead code + the q0 cv allocation buys ~2%,
+not 10%+ - the scan loop's per-operation cost (Rev 157/159) remains
+the structural gap at q0/q1.
