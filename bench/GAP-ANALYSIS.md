@@ -2707,3 +2707,39 @@ half (47% of q0) writes through a struct that C keeps in registers.
 Closing q0 needs C's exact loop shape - straight-line emission with
 next_emit tracking and a single-path function - i.e. the rewrite GAP
 already records as the q0/q1 structural remainder, not more micro-tuning.
+
+## Rev 158: narrow SHIFT's declared range - the generic ASH dance dies (q0 +3.3%, q9 +2.8%)
+
+Direct fallout of the Rev 157 assembly comparison.  Our hash ended with
+this sequence, executed ONCE PER HASH (every trawl iteration and every
+interior store):
+
+    MOV RCX, [RBP-104] / SAR RCX, 1     ; load + untag the shift variable
+    TEST RCX, RCX / JNS ...             ; sign check
+    NEG RCX / CMP RCX, 63 / JBE ...     ; clamp for |shift| > 63
+    XOR EAX, EAX                       ; -> 0
+    SHR RAX, CL  |  SHL RAX, CL        ; the actual variable shift
+
+That is SBCL's generic (ASH X Y) expansion for a Y of unknown sign - ~9
+instructions and 3 branches - while C emits a single `shr %cl`.  But
+SHIFT is (- table-bits 64) / (- hbits 64), i.e. always in -63..-1 for
+table-bits/hbits in 1..63 (ours are 15/17).  Declaring the actual
+range:
+
+  %LZ77-FRAGMENT: (type (integer -63 -1) shift)
+  %LZ77:          (type (integer -63 -1) shift)
+
+lets the compiler emit one SAR/SHR by CL with no sign check, no clamp
+and no branches - the arithmetic semantics are unchanged (still an
+arithmetic shift), so output cannot move.
+
+Verified: sign-dance patterns in the %LZ77-FRAGMENT disassembly 8 -> 1;
+ALL 45 cell sizes BYTE-IDENTICAL; 241/241 tests; bt-min 8/8;
+repro-split clean; ratio 0 failures.
+Measured: html q0 198.41 -> 204.92 MiB/s (+3.3%), html q9
+30.12 -> 30.94 (+2.8%), html q5/q7 flat.
+
+Lesson for this codebase: a runtime parameter that is provably bounded
+(a shift derived from a small table size) must carry that bound in its
+TYPE, or SBCL pays the generic expansion at every use - and in a hash
+called a million times per compress, that is the whole ballgame.

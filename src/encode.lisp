@@ -1767,7 +1767,12 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                    (type fixnum z-cands z-maxlen)
                    (type (or null (simple-array fixnum (*))) dc)
                    (type fixnum p lit-start last skip dict-used last-dist
-                            shift min-cop))
+                            min-cop)
+                   ;; SHIFT = hbits - 64 is always in -63..-1 (hbits 1..63),
+                   ;; so ASH compiles to ONE sar/shr by CL instead of the
+                   ;; generic sign-check + clamp + branch dance that ran on
+                   ;; EVERY hash (trawl iterations + interior stores)
+                   (type (integer -63 -1) shift))
           ;; Pooled arrays: the clears that used to ride along with
           ;; :INITIAL-ELEMENT now run here, before any bt-do/prepass
           ;; read (z-costf/zlen are filled per pass in Z-ITERATE as
@@ -3164,7 +3169,13 @@ samples, stride-29 sampling plus one-count smoothing above."
          (cmd-1p-single nil)
          (dist-rc-1p +empty-fixnums+) (dist-ln-1p +empty-fixnums+)
          (dist-1p-single nil))
-    (declare (type fixnum k min-match p lit-start limit last-dist back nc shift)
+    (declare (type fixnum k min-match p lit-start limit last-dist back nc)
+             ;; SHIFT = table-bits - 64 is always in -63..-1 (table-bits
+             ;; 1..63), so ASH compiles to ONE sar/shr by CL instead of the
+             ;; generic sign-check + clamp + branch dance (~9 instructions
+             ;; and 3 branches PER HASH, and hashes run on every trawl
+             ;; iteration and every interior store)
+             (type (integer -63 -1) shift)
              (type (simple-array (unsigned-byte 32) (*)) table cv)
              (type (simple-array fixnum (256)) litf)
              (type (simple-array fixnum (64)) cmdf distf)
