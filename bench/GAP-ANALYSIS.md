@@ -3038,3 +3038,63 @@ need +3-6%); binary q7 0.86 / source q7 0.88 (+14-16%).  The q1/q7
 profiles show no remaining single item of that size outside the
 structural work (fragment single-path split; find-match's chain shape
 vs C's H6 contiguous-bucket scan + 10-entry distance cache).
+
+## Rev 167 (experiment, reverted BOTH variants): find-match -> C's H6 bucket-ring layout
+
+The full structural rewrite of %LZ77's candidate storage to C's
+HashLongestMatch layout (hash_longest_match64_inc.h), implemented
+twice, both measured dead.  Profiles below are html q7 (the tier where
+FIND-MATCH is the wall).
+
+VARIANT A - byte-identical ring at OUR hash width (hbits 17):
+head/prev replaced by a per-key ring (buckets2^(17+RB) x u32 + a
+per-key store counter), walk visits the last min(count, max-chain)
+stores newest-first.  Same stores, same order, same depth, same
+selection -> output provably unchanged (confirmed: ALL 45 IDENTICAL,
+241/241, bt-min, repro-split, ratio45 0 failures).
+
+  INTERLEAVED A/B (A = r166 head/prev):
+    spec        A=r166        B=ring17      delta
+    html q7     46.8 45.5     37.4 38.0     -19%
+    binary q7   39.4 38.5     33.3 31.5     -17%
+    source q7   88.0 88.0     73.1 74.0     -17%
+    html q5     49.6 48.5     40.9 40.9     -17%
+  Profile split explains it exactly:
+    FIND-MATCH self  52.2% -> 36.8%   (the WALK wins -30%: contiguous
+                                        reads vs the prev[] chase)
+    EMIT-NORMAL self 12.4% -> 32.0%   (the INSERTS lose: StoreRange's
+                                        interior stores become RANDOM
+                                        writes into an 8MiB ring plus a
+                                        read-modify-write on a 1MiB
+                                        counter, where the old code did
+                                        an L2 head write + a SEQUENTIAL
+                                        prev[q] write - write-combining
+                                        friendly)
+  Net -17%: the insert penalty (random writes are costlier than the
+  reads they saved) outweighs the walk win.
+
+VARIANT B - C's exact BUCKET_BITS=15 (ratio-gated, output changes):
+key = (logand h #x7FFF), ring2^(15+RB) (2MiB at q7) + counter 256KiB -
+C's cache footprint.  Roundtrip tests pass (241/241, bt-min,
+repro-split) and size drift is small (binary q7 +0.19%) BUT:
+  ratio45: 2 cells over the cap, worst 1.108 at html q7
+  (was exactly 1.100 - the cap).  Coarser keys waste ring slots on
+  15-bit collisions that fail PROBE-OK, so fewer real candidates are
+  found at the unchanged depth 16 -> worse matches -> ratio breach.
+FAILED THE GATE - reverted.
+
+THE DEPTH ESCAPE HATCH IS ALSO DEAD: C pairs bucket_bits 15 with
+block_bits = quality-1 (64 slots at q7), which refills the candidate
+pool and is how C gets its better ratio from coarse keys.  But at our
+window sizes (1MiB inputs, 2MB+ window) the ring's early `break` on
+distance NEVER fires, so the walk visits every slot: ~32-64 steps/call
+vs our measured 16.56 today - 2-4x the walk iterations on the function
+that is already 52% of q7.  Speed-dead, and it still might not land
+under html q7's 1.100 cap.
+
+CONCLUSION (do not re-derive): C's H6 layout is coupled to C's three
+levers at once - 15-bit bucket keys, per-quality deep rings, and ratio
+headroom we do not have (html q7 is pinned AT 1.100).  At our hash
+width the byte-identical ring is -17%; at C's width it breaches the
+ratio gate; with C's depths it walks 2-4x further.  The prev[] chase
+stays.  Recorded so neither variant is rebuilt.
