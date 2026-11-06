@@ -3180,3 +3180,50 @@ Lesson for the file: a C pattern often couples TWO properties - this
 one is (size the buffer) AND (own the buffer for the encoder's
 lifetime).  Porting only the sizing ported the cost.  Check which
 half is doing the work before porting either.
+
+## Rev 170: pool HEAD/PREV (C's encoder-lifetime hasher ownership)
+
+C allocates its hasher arrays ONCE per encoder (HashMemAllocInBytes
+-> common->extra[0]); we allocated HEAD (512KiB) + PREV (Nx4 =
+4.5MiB at 1MiB) FRESH ON EVERY %LZ77 CALL - the Rev 164 allocation
+cost, paid by all18 q2-q9 cells (and the gc_alloc_large 5.7% seen in
+the html q5 profile is largely this).
+
+ACQUIRE-HEADPREV: pooled per compressor under key (- N) (negative, so
+it cannot collide with the scratch pool's positive-N keys); HEAD is
+re-filled with the #xFFFFFFFF sentinel on every acquisition (a stale
+position from another input would otherwise be read as a candidate),
+PREV needs no reset - it is only ever read at positions this input's
+INS wrote (every chain link was written by this input's own stores:
+HEAD stores and PREV links are written together in INS and the two
+StoreRange sites).  BT mode walks neither - it binds empty arrays so
+the type declares stay honest.  Plain COMPRESS still builds fresh
+arrays, exactly as before.
+
+FIRST ATTEMPT FAILED HARD (-19..-26%, byte-identical): binding
+HEAD/PREV as (CAR HP)/(CDR HP) defeated their type declarations -
+the (IF BT ... ACQUIRE-HEADPREV) initializer's type is unknown, so
+SBCL compiled every aref as an OUTLINED ACCESSOR CALL: profile showed
+VECTOR-HAIRY-DATA-VECTOR-REF/SET + OPTIMIZED-DATA-VECTOR-REF/SET at
+26% of source q7 (find-match self fell 35.7% -> 23.9% as its work
+moved into those calls).  Fix: THE at the bindings -
+  (head (the (simple-array (unsigned-byte 32) (*)) (car hp)))
+restores open-coded access; the profile's accessor entries vanish
+(find-match back to 38.7% self).
+
+LESSON: a LET-binding declaration does not survive an initializer of
+unknown type - assert with THE where the value is bound, or the
+declaration is silently outvoted at every use site.
+
+Verified (final state): ALL 45 BYTE-IDENTICAL; 241/241; bt-min;
+repro-split; ratio45 0 failures.
+
+MEASURED (interleaved A/B, A = r169):
+  spec        A=r169        B=pooled hp   delta
+  html q2     86.8 86.8     89.3 89.3     +2.9%
+  source q7   91.2 90.6     90.6 94.7     +1.5%
+  html q5     50.8 49.8     51.4 49.8     +0.6%
+  binary q7   39.4 38.7     39.4 37.7     -1.3% (one exact tie, one
+                                              -2.7% pair: noise)
+Note the512KiB sentinel fill on every acquisition eats part of the
+allocation saving - the net is +1..3%, not the projected +2..5%.

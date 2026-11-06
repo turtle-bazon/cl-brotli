@@ -1452,6 +1452,38 @@ MAKE-COMPRESSOR closure, and the MT suite runs one compressor per thread."
               (setf (gethash :bwr pool)
                     (b:make-bwr (min (+ n 1024) 65536))))))))
 
+(defun acquire-headprev (n chained hbits)
+  "Pooled hash-chain tables for %LZ77 - C's ownership model: the hasher's
+arrays live in the encoder context (HashMemAllocInBytes, allocated once),
+not per metablock.  HEAD (2^HBITS u32) is reset to the #xFFFFFFFF
+sentinel on every acquisition: a stale position from another input would
+otherwise be read as a candidate (and could index past the current data).
+PREV (N u32) is never reset - it is only ever read at positions this
+input's INS wrote.  Returns (cons HEAD . PREV); PREV is an empty array
+when CHAINED is false (nothing walks it).  Without a pool, fresh arrays
+exactly as before."
+  (declare (type fixnum n hbits) (type boolean chained)
+           (optimize (speed 3) (safety 0)))
+  (let ((pool *scratch-pool*))
+    (flet ((make-it ()
+             (cons (make-array (ash 1 hbits)
+                               :element-type '(unsigned-byte 32)
+                               :initial-element #xFFFFFFFF)
+                   (if chained
+                       (make-array n :element-type '(unsigned-byte 32))
+                       (make-array 0 :element-type '(unsigned-byte 32))))))
+      (if (null pool)
+          (make-it)
+          (let ((key (- n)))
+            (or (let ((entry (gethash key pool)))
+                  (when entry
+                    (fill (car entry) #xFFFFFFFF)
+                    entry))
+                (progn
+                  (when (>= (hash-table-count pool) +scratch-max-entries+)
+                    (clrhash pool))
+                  (setf (gethash key pool) (make-it)))))))))
+
 (defun zopfli-analytic-model (data n scratch)
   "C ZopfliCostModelSetFromLiteralCosts: estimated literal costs as a
 prefix sum + analytic command/distance costs (log2(11+i)/log2(20+i))."
@@ -1730,13 +1762,30 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                ;; same symbol-indirection reason: the short loop reads
                ;; this table 16x per position
                (zdc-jo +zdc-jo+)
-               (head (make-array (ash 1 hbits)
-                                 :element-type '(unsigned-byte 32)
-                                 :initial-element #xFFFFFFFF))
-               ;; Every entry read from PREV was written when that position
-               ;; was inserted, so no initial fill is needed.
-               (prev (and chained
-                          (make-array n :element-type '(unsigned-byte 32))))
+               ;; C owns its hasher arrays for the encoder's lifetime
+               ;; (HashMemAllocInBytes); pooled they are allocated once per
+               ;; compressor instead of fresh per call (head 512KiB + prev
+               ;; Nx4 = 4.5MiB at 1MiB inputs - the Rev 164 allocation
+               ;; cost, paid every call).  HEAD is re-sentinel'd on every
+               ;; acquisition; PREV carries no invariant (it is only read
+               ;; at positions this input's INS wrote).  BT mode walks
+               ;; neither - empty arrays keep the type declares honest.
+               (hp (if bt
+                       (cons (make-array 0 :element-type
+                                            '(unsigned-byte 32))
+                             (make-array 0 :element-type
+                                            '(unsigned-byte 32)))
+                       (acquire-headprev n chained hbits)))
+               ;; THE at the bindings: the (IF BT ... ACQUIRE-HEADPREV)
+               ;; initializer's type is unknown, which defeated the
+               ;; declarations below - every head/prev aref compiled to an
+               ;; outlined accessor call (26% of source q7 in VECTOR-HAIRY/
+               ;; OPTIMIZED-DATA-VECTOR-REF/SET).  Asserting the type where
+               ;; it is bound restores the inlined open-coded access.
+               (head (the (simple-array (unsigned-byte 32) (*))
+                          (car hp)))
+               (prev (the (simple-array (unsigned-byte 32) (*))
+                          (cdr hp)))
                ;; Initial capacity mirrors the fragment's PUSH-CMD policy
                ;; (n/32 commands, floor 4096 = 160KiB at 1MiB): sizing it
                ;; at n/8 cost 5.2MiB upfront on EVERY call, which dominated
@@ -1778,7 +1827,10 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
                ;; C accepts 2/3-byte cache hits as copies (copy length codes
                ;; start at 2); the length-maximizing path keeps min-match.
                (min-cop (if score-p 2 min-match)))
-          (declare (type (simple-array (unsigned-byte 32) (*)) head)
+          (declare (type (cons (simple-array (unsigned-byte 32) (*))
+                                (simple-array (unsigned-byte 32) (*)))
+                         hp)
+                   (type (simple-array (unsigned-byte 32) (*)) head)
                    (type (or null (simple-array (unsigned-byte 32) (*)))
                          bt-buckets bt-forest)
                    (type (or null (simple-array fixnum (128))) bt-md bt-ml)
