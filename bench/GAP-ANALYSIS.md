@@ -3798,3 +3798,109 @@ decoder's prefix-code tables (allocation, 10-bit roots for command /
 distance codes vs C's 8).  Plain COMPRESS (no make-compressor) at q5-q9
 allocates C's full H5/H6 table per call (1-32 MiB): needs a chain-form
 H5 for small inputs (identical output) to remove that cliff.
+
+Late evening: decoder fix + 1 MiB re-check (bench22).
+- Decoder bug (pre-existing, found by fuzz seed 305 on a C q3 stream):
+  a stream may end right after a code longer than the root table whose
+  subtable is wider than the code; READ-HUFF-SLOW now looks the code up
+  in the subtable with the bits that remain.  Regression test
+  HUFFMAN-LONG-CODE-AT-END-OF-INPUT.
+- Reverted the C 1.2.0 sweep layout (same sizes, ~7% slower at q4: two
+  cache lines per H54 probe); q2/q3 meta-block splitter rewritten typed
+  (it spent 22% of q3 in list access / generic +); q1 drops the trawl's
+  dependent prefetch (it stalls on the 2^17 table).
+- A 5-byte q1 hash would restore json q1 speed (0.99x, size 0.956x) but
+  costs html 256 KiB 1.025x: rejected (sizes must match C).
+
+bench22, 1 MiB, lisp/C compress (bench20 before this session's ratio work):
+    html    q0 1.54  q1 1.12  q2 0.91  q3 0.94  q4 0.93  q5 1.10  q6 1.28  q7 1.01  q8 1.02  q9 1.96
+    json    q0 0.87  q1 0.81  q2 0.85  q3 0.86  q4 0.99  q5 1.14  q6 1.23  q7 0.95  q8 0.96  q9 1.46
+    binary  q0 2.03  q1 2.08  q2 0.81  q3 0.86  q4 0.95  q5 0.88  q6 0.99  q7 0.92  q8 0.98  q9 1.43
+    zeros   q1 0.70 (was 1.16)   periodic q1 0.68 (was 1.10)
+The ratio work cost q1-q4 at 1 MiB: q2/q3 0.81-0.94 (were 0.93-1.05:
+C's per-16 KiB meta-blocks, i.e. more trees), q4 0.93-0.99 (were
+1.19-1.37: C's greedy block splitting), q1 json/zeros/periodic 0.68-0.81
+(C's 128 KiB blocks and 6-byte hash).  Sizes there are now 1.00 (were
+1.01-1.04).  Next: make per-meta-block tree work and the q5+ writer
+(now also q4's) cheaper; q1 scan/emit in the VOP.
+
+## Session 8 Nov 2026: small inputs (fixed per-call costs)
+
+Measured with bench/bench.lisp's own datasets and timing (MEASURE: median
+of samples after a full GC; C via BrotliEncoderCompress /
+BrotliDecoderDecompress) - quick checks on other data disagreed with the
+matrix by up to 20% at 4 KiB.
+
+Plain COMPRESS / COMPRESS-INTO
+- One shared spare state (pool + arena) taken with a CAS
+  (WITH-COMPRESS-STATE); pool entries over 4 MiB are dropped on return.
+  Pool accounting has to understand BWR / cons entries, or the 2-entry
+  pool limit thrashed and the state was useless.
+- Chain-form H5 VOP (:CHAIN, %ASM-H5C-Q5..9: a head per key plus a link
+  per position; the walk visits the newest min(num, 2^block-bits) entries,
+  exactly C's ring): byte-identical output in O(n) memory.  Used only for
+  plain calls at q7-q9 up to 128 KiB (pointer chasing loses to a pooled
+  ring from ~4 KiB on).  Plain q7-q9 1 KiB: 1-3.5 ms -> ~45 us.
+
+Encoder
+- libc memset for table clears (BYTE-FILL-U8/16/32/64/FIXNUM): SBCL's
+  FILL stores a word at a time, ~4x slower while the table fits in L2.
+- q0/q1 literal codes: C's BrotliBuildAndStoreHuffmanTreeFast (depth
+  limit 14, static code-length code, precomputed run encodings from
+  entropy_encode_static.h).  q1 trees are now C's bit for bit.  C's fast
+  comparator has no tie-break (ties follow its unstable shell sort); we
+  keep the deterministic order, so q0 trees may differ on ties (sizes
+  within a few bits).
+- Huffman tree building: LSD radix sort on the weights (stable; leaves
+  arrive in falling symbol order, so ties keep C's comparator order),
+  insertion sort up to 32 leaves, leaf-only lengths and codes (no
+  O(alphabet) passes after the leaf scan), leaf scan in its own function
+  (in place it reloaded operands from the stack).
+- Removed per-call waste: generic LOGIOR on code<<8|len lookup tables
+  (q0 scan, q1 emit, q2 writer: 256-1024 generic calls per call), 8 KiB
+  heap scratch in the q2 plan pass, q0/q1 output reservations sized for a
+  64 KiB chunk whatever the input, splitter arrays for streams shorter
+  than one decision (now just the histogram), RLE count smoothing of
+  sparse trees (it never changes < 16 symbols), plan-commands tallies
+  (arena), INCOMPRESSIBLE-P histogram below 231 bytes.
+
+Decoder
+- Bails near the input's end rerun in assembly on a zero-padded copy of
+  the tail (%ASM-PAD-TAIL / %ASM-UNPAD; a truncated stream that consumes
+  padding still signals end of input).  The general driver must
+  recompute the block-type-derived slots first: regression test
+  DECODE-TAIL-AFTER-BLOCK-SWITCH (fuzz seed 311 found it).
+- Huffman tables: the code-length reader records each symbol's rank
+  within its length (it reads count[len] anyway), so the builder's sort
+  is independent stores (Zen 2 forwards a store to a load in ~8 cycles:
+  every memory counter in a loop costs that much per iteration); fill in
+  canonical order with per-length loops; root tables by doubling (one
+  block copy per length, one store per code - no strided replication);
+  code-length-code tables memoised (18 x 3-bit key); 4-bit peek for the
+  code-length-code lengths.
+
+4 KiB, bench data, lisp/C after this session:
+    compress  q0 0.57-0.75  q1 0.63-0.71  q2 ~0.7  q5 0.83-0.94
+    decode    q0 0.64-0.67  q1 0.68-0.87  q5 0.76-0.79
+64 KiB: compress q0 0.72-0.82, q5 0.85-0.92; decode q0/q1 1.04-1.17,
+q5 0.90-0.96.  Open: the q0/q1 scan's per-byte speed in cache (C ~1.2-1.4
+ns/B at 64 KiB, ours ~1.5), the per-tree work of q4+ writers, the
+decoder's code-length reading (~7 ns per code-length symbol).
+
+Later (same day): run-based tree writing (the etree carries its used
+symbols; HUFFMAN-TREE-RLE works on maximal runs, so a sparse 704-symbol
+command alphabet costs its used symbols), q1 command codes from the <= 64
+used symbols, typed IMTF (context maps), typed HUFF-PARAM and block-length
+entries in the decoder setup.  Output unchanged (compared byte for byte
+with the previous encoder at q0-q11).
+
+Matrix bsm4 (4 + 64 KiB, before the run-based writer): 4 KiB compress
+q4-q8 0.79-1.07 (were 0.42-0.78), decode +0.05-0.1 everywhere; 64 KiB
+periodic/zeros q4-q8 1.05-3.0 (were ~0.65).  C's small-input timings
+are unstable: its one-shot API allocates its hash tables per call, so a
+cell can swing several-fold between processes (periodic 64 KiB q0: C 12.7
+vs 104 us).  Judge small sizes by our absolute times.
+1 MiB q0-q4 now: html 1.50 1.16 0.96 0.98 0.96, json 0.89 0.84 0.86 0.87
+1.36, binary 2.03 2.21 0.90 0.95 1.01.  json q2 at 1 MiB: 56% H2 matcher,
+19% plan pass, 15% emit pass - the remaining q0-q3 gaps are the assembly
+hot loops themselves (H2/H3/H4 matcher, trivial plan/emit, q0/q1 scan).

@@ -34,12 +34,16 @@
       :hbase :hdown :hfirst4 :hnk :rhwin :hmaxb
       ;; H5/H6 static dictionary: candidate / chosen cut code, C's
       ;; dict_num_lookups / dict_num_matches, H5's second kMargin limit
-      :olcd :lcd :dlookups :dmatches :n7b))
+      :olcd :lcd :dlookups :dmatches :n7b
+      ;; chain-form H5: the next candidate of the walk
+      :hcand))
   (defparameter *q0-ctx-slots*
     '(:data :table :out :litlut :cmdlut :inslut :copylut :clastlut :distlut
       ;; static dictionary: bytes, C hash (u16 len | word << 5), per length
       ;; u32 offset | ndbits << 24
       :dict :dhash :dlen
+      ;; chain-form H5: per-position link to the previous same-key position
+      :prevpos
       ;; q1 (record mode): command vector, histograms, code-number LUTs
       :cv :litf :cmdf :distf :inscc :copycc :clastcc
       ;; q1 second pass: per-length (extra << 16 | bits << 8 | code) words
@@ -76,7 +80,10 @@
                    cl-brotli.lisp::%asm-h6-q9
                    cl-brotli.lisp::%asm-h5-q5 cl-brotli.lisp::%asm-h5-q6
                    cl-brotli.lisp::%asm-h5-q7 cl-brotli.lisp::%asm-h5-q8
-                   cl-brotli.lisp::%asm-h5-q9)
+                   cl-brotli.lisp::%asm-h5-q9
+                   cl-brotli.lisp::%asm-h5c-q5 cl-brotli.lisp::%asm-h5c-q6
+                   cl-brotli.lisp::%asm-h5c-q7 cl-brotli.lisp::%asm-h5c-q8
+                   cl-brotli.lisp::%asm-h5c-q9)
       ((simple-array (unsigned-byte 64) (*)) simple-vector)
       (values) ()
       :overwrite-fndb-silently t)
@@ -2024,7 +2031,13 @@
 
 #+cl-brotli-x86-64
 (defmacro define-h6-vop (name translate block-bits ndist
-                         &key (hash-bytes 5) (bucket-bits 15))
+                         &key (hash-bytes 5) (bucket-bits 15) chain)
+  ;; CHAIN: the same candidates from O(n) memory - CTX[BUCKETS] holds one
+  ;; head position per key and CTX[PREVPOS] links each stored position to
+  ;; the previous one with its key; the walk visits the newest
+  ;; min(num, 2^BLOCK-BITS) of them, exactly the positions C's ring holds
+  ;; (num wraps at 2^16 the same way), newest first.  For small inputs:
+  ;; 128 KiB + 4n bytes instead of a 1-32 MiB ring table.
   ;; DEFINE-H6-MATCHER's matcher (C's H6, or H5 with HASH-BYTES 4, with
   ;; CreateBackwardReferences): same driver and exits as DEFINE-QUICK-VOP;
   ;; FindLongestMatch checks the NDIST distance-cache candidates (with C's
@@ -2070,18 +2083,30 @@
                              (inst shl dst 32)
                              (inst shr dst ,(- 64 bucket-bits)))))
                    (store (i tmp tmp2)
-                     ;; ring insert: buckets[key << BB + (num[key] & BMASK)] = i
-                     (key-of tmp i)
-                     (inst mov tmp2 (q-cx :num))
-                     (inst movzx '(:word :dword) rcx (ea +q-d+ tmp2 tmp 2))
-                     (inst lea rcx (ea 1 rcx))
-                     (inst and rcx #xFFFF)
-                     (inst mov :word (ea +q-d+ tmp2 tmp 2) rcx)
-                     (inst dec rcx)
-                     (inst and rcx ,bmask)
-                     (inst shl tmp ,block-bits)
-                     (inst add tmp rcx)
-                     (inst mov :dword (ea +q-d+ bk tmp 4) i))
+                     ,@(if chain
+                           ;; chain insert: prevpos[i] = head[key], head[key] = i
+                           '((key-of tmp i)
+                             (inst mov tmp2 (q-cx :num))
+                             (inst movzx '(:word :dword) rcx (ea +q-d+ tmp2 tmp 2))
+                             (inst inc rcx)
+                             (inst and rcx #xFFFF)
+                             (inst mov :word (ea +q-d+ tmp2 tmp 2) rcx)
+                             (inst mov :dword rcx (ea +q-d+ bk tmp 4))
+                             (inst mov tmp2 (q-cx :prevpos))
+                             (inst mov :dword (ea +q-d+ tmp2 i 4) rcx)
+                             (inst mov :dword (ea +q-d+ bk tmp 4) i))
+                           ;; ring insert: buckets[key << BB + (num[key] & BMASK)] = i
+                           `((key-of tmp i)
+                             (inst mov tmp2 (q-cx :num))
+                             (inst movzx '(:word :dword) rcx (ea +q-d+ tmp2 tmp 2))
+                             (inst lea rcx (ea 1 rcx))
+                             (inst and rcx #xFFFF)
+                             (inst mov :word (ea +q-d+ tmp2 tmp 2) rcx)
+                             (inst dec rcx)
+                             (inst and rcx ,bmask)
+                             (inst shl tmp ,block-bits)
+                             (inst add tmp rcx)
+                             (inst mov :dword (ea +q-d+ bk tmp 4) i))))
                    (prepare-dc ()
                      ,@(when (> ndist 4)
                          `((inst mov t1 (q-sv :dc0))
@@ -2198,12 +2223,13 @@
               (inst cmp t1 (q-sv :n9))
               (inst jmp :ge no-pf)
               (key-of prev t1)
-              (inst mov iv (q-cx :num))
-              (inst movzx '(:word :dword) bl (ea +q-d+ iv prev 2))
-              (inst dec bl)
-              (inst and bl ,bmask)
-              (inst shl prev ,block-bits)
-              (inst add prev bl)
+              ,@(unless chain
+                  `((inst mov iv (q-cx :num))
+                    (inst movzx '(:word :dword) bl (ea +q-d+ iv prev 2))
+                    (inst dec bl)
+                    (inst and bl ,bmask)
+                    (inst shl prev ,block-bits)
+                    (inst add prev bl)))
               (inst mov iv (q-cx :buckets))
               (inst prefetch :t0 (ea +q-d+ iv prev 4))
               (emit-label no-pf))
@@ -2237,10 +2263,10 @@
                 (key-of t1 t1)
                 (inst mov iv (q-cx :num))
                 (inst prefetch :t0 (ea +q-d+ iv t1 2))
-                (inst shl t1 ,block-bits)
+                ,@(unless chain `((inst shl t1 ,block-bits)))
                 (inst mov iv (q-cx :buckets))
                 (inst prefetch :t0 (ea +q-d+ iv t1 4))
-                ,@(when (= block-bits 5)
+                ,@(when (and (= block-bits 5) (not chain))
                     '((inst prefetch :t0 (ea (+ 64 +q-d+) iv t1 4))))
                 (emit-label no-pf))
               (store prev iv t3)
@@ -2369,15 +2395,26 @@
                 (inst mov t2 (q-cx :num))
                 (inst movzx '(:word :dword) iv (ea +q-d+ t2 t1 2))  ; nk
                 (inst mov (q-sv :hnk) iv)
-                (inst shl t1 ,block-bits)
-                (inst mov (q-sv :hbase) t1)
-                (inst lea bk (ea +q-d+ bk t1 4))         ; -> &ring[0]
-                (inst mov t2 iv)
-                (inst sub t2 ,bsize)
-                (inst jmp :g z)
-                (inst xor t2 t2)
-                (emit-label z)
-                (inst mov (q-sv :hdown) t2)
+                ,@(if chain
+                      ;; walk count min(nk, BSIZE) in IV, down to 0; the
+                      ;; key in HBASE for the insert; head in HCAND
+                      `((inst mov (q-sv :hbase) t1)
+                        (inst mov :dword t2 (ea +q-d+ bk t1 4))
+                        (inst mov (q-sv :hcand) t2)
+                        (inst mov t2 ,bsize)
+                        (inst cmp iv t2)
+                        (inst cmov :a iv t2)
+                        (inst mov :qword (q-sv :hdown) 0)
+                        (emit-label z))
+                      `((inst shl t1 ,block-bits)
+                        (inst mov (q-sv :hbase) t1)
+                        (inst lea bk (ea +q-d+ bk t1 4))         ; -> &ring[0]
+                        (inst mov t2 iv)
+                        (inst sub t2 ,bsize)
+                        (inst jmp :g z)
+                        (inst xor t2 t2)
+                        (emit-label z)
+                        (inst mov (q-sv :hdown) t2)))
                 ;; Prefetch CUR+1's newest ring entry: the next FindLongest-
                 ;; Match is usually there (lazy step / no match), and its
                 ;; ring is a random line of a 2-16 MB table (C stalls on
@@ -2395,12 +2432,13 @@
                   (inst cmp cur (q-sv :n9))
                   (inst jmp :ge no-pf)
                   (key-of t2 cur 1)
-                  (inst mov t3 (q-cx :num))
-                  (inst movzx '(:word :dword) prev (ea +q-d+ t3 t2 2))
-                  (inst dec prev)
-                  (inst and prev ,bmask)
-                  (inst shl t2 ,block-bits)
-                  (inst add t2 prev)
+                  ,@(unless chain
+                      `((inst mov t3 (q-cx :num))
+                        (inst movzx '(:word :dword) prev (ea +q-d+ t3 t2 2))
+                        (inst dec prev)
+                        (inst and prev ,bmask)
+                        (inst shl t2 ,block-bits)
+                        (inst add t2 prev)))
                   (inst mov t3 (q-cx :buckets))
                   (inst prefetch :t0 (ea +q-d+ t3 t2 4))
                   (emit-label no-pf))
@@ -2411,9 +2449,14 @@
                 (inst cmp iv (q-sv :hdown))
                 (inst jmp :le done)
                 (inst dec iv)
-                (inst mov rcx iv)
-                (inst and rcx ,bmask)
-                (inst mov :dword prev (ea 0 bk rcx 4))
+                ,@(if chain
+                      '((inst mov prev (q-sv :hcand))
+                        (inst mov t2 (q-cx :prevpos))
+                        (inst mov :dword t2 (ea +q-d+ t2 prev 4))
+                        (inst mov (q-sv :hcand) t2))
+                      `((inst mov rcx iv)
+                        (inst and rcx ,bmask)
+                        (inst mov :dword prev (ea 0 bk rcx 4))))
                 (inst mov t3 cur)
                 (inst sub t3 prev)                     ; backward
                 (inst jmp :le done)
@@ -2442,16 +2485,28 @@
                 (cur-byte)
                 (inst jmp lp)
                 (emit-label done)
-                ;; insert CUR (BK still points at the ring)
-                (inst mov iv (q-sv :hnk))
-                (inst mov t1 iv)
-                (inst and t1 ,bmask)
-                (inst mov :dword (ea 0 bk t1 4) cur)
-                (inst inc iv)
-                (inst and iv #xFFFF)
-                (key-of t1 cur)
-                (inst mov t2 (q-cx :num))
-                (inst mov :word (ea +q-d+ t2 t1 2) iv)
+                ,@(if chain
+                      ;; insert CUR: prevpos[cur] = head[key], head[key] = cur
+                      '((inst mov t1 (q-sv :hbase))
+                        (inst mov :dword t2 (ea +q-d+ bk t1 4))
+                        (inst mov t3 (q-cx :prevpos))
+                        (inst mov :dword (ea +q-d+ t3 cur 4) t2)
+                        (inst mov :dword (ea +q-d+ bk t1 4) cur)
+                        (inst mov iv (q-sv :hnk))
+                        (inst inc iv)
+                        (inst and iv #xFFFF)
+                        (inst mov t2 (q-cx :num))
+                        (inst mov :word (ea +q-d+ t2 t1 2) iv))
+                      ;; insert CUR (BK still points at the ring)
+                      `((inst mov iv (q-sv :hnk))
+                        (inst mov t1 iv)
+                        (inst and t1 ,bmask)
+                        (inst mov :dword (ea 0 bk t1 4) cur)
+                        (inst inc iv)
+                        (inst and iv #xFFFF)
+                        (key-of t1 cur)
+                        (inst mov t2 (q-cx :num))
+                        (inst mov :word (ea +q-d+ t2 t1 2) iv)))
                 (h5-dict-search)
                 (inst mov bk (q-cx :buckets))
                 (inst mov t3 (q-sv :bscore))
@@ -2476,4 +2531,15 @@
   (define-h6-vop cl-brotli-asm-h5-q8 cl-brotli.lisp::%asm-h5-q8 7 10
     :hash-bytes 4 :bucket-bits 15)
   (define-h6-vop cl-brotli-asm-h5-q9 cl-brotli.lisp::%asm-h5-q9 8 16
-    :hash-bytes 4 :bucket-bits 15))
+    :hash-bytes 4 :bucket-bits 15)
+  ;; the same H5 matchers in chain form (small inputs)
+  (define-h6-vop cl-brotli-asm-h5c-q5 cl-brotli.lisp::%asm-h5c-q5 4 4
+    :hash-bytes 4 :bucket-bits 14 :chain t)
+  (define-h6-vop cl-brotli-asm-h5c-q6 cl-brotli.lisp::%asm-h5c-q6 5 4
+    :hash-bytes 4 :bucket-bits 14 :chain t)
+  (define-h6-vop cl-brotli-asm-h5c-q7 cl-brotli.lisp::%asm-h5c-q7 6 10
+    :hash-bytes 4 :bucket-bits 15 :chain t)
+  (define-h6-vop cl-brotli-asm-h5c-q8 cl-brotli.lisp::%asm-h5c-q8 7 10
+    :hash-bytes 4 :bucket-bits 15 :chain t)
+  (define-h6-vop cl-brotli-asm-h5c-q9 cl-brotli.lisp::%asm-h5c-q9 8 16
+    :hash-bytes 4 :bucket-bits 15 :chain t))

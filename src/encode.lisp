@@ -21,6 +21,49 @@
 (defvar *hq-tree-bits-base* 30.0d0)
 
 
+;;; ---- bulk fills ---------------------------------------------------------
+;;; Hash tables of 32 KiB - 32 MiB are cleared per call (C memsets them
+;;; too).  SBCL's FILL stores one word at a time; libc's memset runs at
+;;; ~4x that while the table fits in L2 (65536 u32: 8.1 -> 2.1 us) and
+;;; 2-3x beyond.  Spans of whole bytes (0 or #xFF fills) only.
+
+(defmacro define-byte-fill (name type bytes)
+  `(progn
+     (declaim (inline ,name))
+     (defun ,name (v byte &optional (start 0) end)
+       ,(format nil "Set every byte of V[START, END) (a ~(~a~)) to BYTE; returns V." type)
+       (declare (type (simple-array ,type (*)) v) (type (unsigned-byte 8) byte)
+                (type fixnum start) (optimize (speed 3) (safety 0)))
+       (let ((end (or end (length v))))
+         (declare (type fixnum end))
+         #+sbcl
+         (if (> (* ,bytes (- end start)) 256)
+             (sb-sys:with-pinned-objects (v)
+               (sb-alien:alien-funcall
+                (sb-alien:extern-alien "memset"
+                                       (function sb-sys:system-area-pointer
+                                                 sb-sys:system-area-pointer
+                                                 sb-alien:int sb-alien:unsigned-long))
+                (sb-sys:sap+ (sb-sys:vector-sap v) (* ,bytes start))
+                byte (* ,bytes (- end start))))
+             (fill v ,(if (eq type 'fixnum)
+                          '(if (zerop byte) 0 -1)
+                          `(if (zerop byte) 0 (ldb (byte ,(* 8 bytes) 0) -1)))
+                   :start start :end end))
+         #-sbcl
+         (fill v ,(if (eq type 'fixnum)
+                      '(if (zerop byte) 0 -1)
+                      `(if (zerop byte) 0 (ldb (byte ,(* 8 bytes) 0) -1)))
+               :start start :end end)
+         v))))
+
+(define-byte-fill byte-fill-u8 (unsigned-byte 8) 1)
+(define-byte-fill byte-fill-u16 (unsigned-byte 16) 2)
+(define-byte-fill byte-fill-u32 (unsigned-byte 32) 4)
+(define-byte-fill byte-fill-u64 (unsigned-byte 64) 8)
+;; a fixnum 0 is all zero bits; #xFF bytes would be -1 shifted - zeros only
+(define-byte-fill byte-fill-fixnum fixnum 8)
+
 ;;; ---- per-call array arena ---------------------------------------------
 ;;; The writers build dozens of small code tables per call (code lengths,
 ;;; canonical and reversed codes: 64-704 fixnums each).  For a fast call
@@ -52,7 +95,7 @@
                (lst (gethash n free))
                (v (if lst
                       (progn (setf (gethash n free) (cdr lst))
-                             (fill (the (simple-array fixnum (*)) (car lst)) 0))
+                             (byte-fill-fixnum (car lst) 0))
                       (make-array n :element-type 'fixnum :initial-element 0))))
           (push v (arena-used a))
           v))))
@@ -68,7 +111,7 @@ is bound."
                (lst (gethash n free))
                (v (if lst
                       (progn (setf (gethash n free) (cdr lst))
-                             (fill (the (simple-array (unsigned-byte 64) (*)) (car lst)) 0))
+                             (byte-fill-u64 (car lst) 0))
                       (make-array n :element-type '(unsigned-byte 64) :initial-element 0))))
           (push v (arena-used-u64 a))
           v))))
@@ -228,6 +271,59 @@ lengths to symbols by frequency (most frequent -> shortest)."
                       (setf (aref tc (+ j gap)) wt
                             (aref rv (+ j gap)) sym)))))
 
+(defun %huf-radix-sort (tc rv nnz)
+  "%HUF-SHELL-SORT's order - rising TC weight, ties: larger RV symbol first -
+for leaves that arrive in falling symbol order (BUILD-CODE-LENGTHS-A's):
+a stable LSD radix sort on the weight keeps ties in arrival order.  Byte
+passes whose digit is the same for every leaf are skipped (small inputs:
+one pass).  The shell sort's data-dependent branches cost ~18 ns per leaf
+\(4.6 us for a 255-symbol literal histogram)."
+  (declare (type (simple-array (unsigned-byte 32) (*)) tc)
+           (type (simple-array fixnum (*)) rv)
+           (type fixnum nnz)
+           (optimize (speed 3) (safety 0)))
+  (let ((tc2 (make-array nnz :element-type '(unsigned-byte 32)))
+        (rv2 (make-array nnz :element-type 'fixnum))
+        (cnt (make-array 256 :element-type '(unsigned-byte 32)))
+        (all 0) (any 0) (flip nil))
+    (declare (type (simple-array (unsigned-byte 32) (*)) tc2)
+             (type (simple-array fixnum (*)) rv2)
+             (type (simple-array (unsigned-byte 32) (256)) cnt)
+             (dynamic-extent tc2 rv2 cnt)
+             (type (unsigned-byte 32) all any) (type boolean flip))
+    ;; the bits on which leaves differ: ALL = AND, ANY = OR of the weights
+    (setf all #xFFFFFFFF)
+    (dotimes (i nnz)
+      (setf all (logand all (aref tc i)) any (logior any (aref tc i))))
+    (loop for shift of-type (integer 0 32) from 0 below 32 by 8 do
+      (unless (zerop (logand (logxor all any) (ash 255 shift)))
+        (let ((src-tc (if flip tc2 tc)) (src-rv (if flip rv2 rv))
+              (dst-tc (if flip tc tc2)) (dst-rv (if flip rv rv2)))
+          (declare (type (simple-array (unsigned-byte 32) (*)) src-tc dst-tc)
+                   (type (simple-array fixnum (*)) src-rv dst-rv))
+          (fill cnt 0)
+          (dotimes (i nnz)
+            (incf (aref cnt (logand 255 (ash (aref src-tc i) (- shift))))))
+          (let ((o 0))
+            (declare (type (unsigned-byte 32) o))
+            (dotimes (d 256)
+              (let ((c (aref cnt d)))
+                (setf (aref cnt d) o)
+                (incf o c))))
+          (dotimes (i nnz)
+            (let* ((w (aref src-tc i))
+                   (d (logand 255 (ash w (- shift))))
+                   (o (aref cnt d)))
+              (declare (type (unsigned-byte 32) w o))
+              (setf (aref dst-tc o) w
+                    (aref dst-rv o) (aref src-rv i)
+                    (aref cnt d) (1+ o))))
+          (setf flip (not flip)))))
+    (when flip
+      (replace tc tc2 :end1 nnz)
+      (replace rv rv2 :end1 nnz))
+    nil))
+
 (declaim (inline %huf-set-depth))
 (defun %huf-set-depth (p0 tc il rv depth max-depth)
   "Write leaf depths into DEPTH by walking the parent pointers with the
@@ -259,9 +355,32 @@ MAX-DEPTH; the caller raises the minimum count and rebuilds."
                   (aref stack level) -1))))
     ok))
 
-(defun build-code-lengths-a (freqs n maxbits)
+(defun %huf-leaves (freqs n count-limit tc il rv)
+  "BUILD-CODE-LENGTHS-A's leaves: the symbols of nonzero FREQS in falling
+order, weights clamped up to COUNT-LIMIT.  Returns their number.  (Its own
+function: inside BUILD-CODE-LENGTHS-A the loop reloaded its operands from
+the stack - 2.6 cycles per symbol over a 704-symbol alphabet.)"
+  (declare (type (simple-array fixnum (*)) freqs il rv)
+           (type (simple-array (unsigned-byte 32) (*)) tc)
+           (type fixnum n) (type (integer 1 #.(ash 1 31)) count-limit)
+           (optimize (speed 3) (safety 0)))
+  (let ((nnz 0))
+    (declare (type fixnum nnz))
+    (loop for i of-type fixnum from (1- n) downto 0
+          do (let ((f (aref freqs i)))
+               (declare (type fixnum f))
+               (when (plusp f)
+                 (setf (aref tc nnz) (the (unsigned-byte 32) (max f count-limit))
+                       (aref il nnz) -1
+                       (aref rv nnz) i)
+                 (incf nnz))))
+    nnz))
+
+(defun build-code-lengths-a (freqs n maxbits &optional rcodes)
   "Optimal canonical code lengths (<= MAXBITS) for FREQS[0..N); Kraft-exact.
-Port of C BrotliCreateHuffmanTree; >= 2 nonzero frequencies assumed."
+Port of C BrotliCreateHuffmanTree; >= 2 nonzero frequencies assumed.  With
+RCODES true, the second value is CANONICAL-RCODES of the lengths (from the
+leaves alone: no pass over the whole alphabet)."
   (declare (type (simple-array fixnum (*)) freqs)
            (type fixnum n maxbits)
            (optimize (speed 3) (safety 0)))
@@ -281,17 +400,8 @@ Port of C BrotliCreateHuffmanTree; >= 2 nonzero frequencies assumed."
       (declare (type (integer 1 #.(ash 1 31)) count-limit))
       ;; leaves, descending symbol order so equal-weight ties sort like C's
       ;; comparator (larger symbol first) after the shell sort
-      (let ((nnz 0))
+      (let ((nnz (%huf-leaves freqs n count-limit tc il rv)))
         (declare (type fixnum nnz))
-        (loop for i of-type fixnum from (1- n) downto 0
-              do (let ((f (aref freqs i)))
-                   (declare (type fixnum f))
-                   (when (plusp f)
-                     (setf (aref tc nnz) (the (unsigned-byte 32)
-                                            (max f count-limit))
-                           (aref il nnz) -1
-                           (aref rv nnz) i)
-                     (incf nnz))))
         (cond
           ((zerop nnz)
            (return-from build-code-lengths-a
@@ -302,7 +412,20 @@ Port of C BrotliCreateHuffmanTree; >= 2 nonzero frequencies assumed."
              (setf (aref r (aref rv 0)) 1)
              (return-from build-code-lengths-a r)))
           (t
-           (%huf-shell-sort tc rv nnz)
+           (if (<= nnz 32)
+               ;; few leaves: an insertion sort (the radix sort's two
+               ;; 256-bin passes are the larger cost there)
+               (loop for a of-type fixnum from 1 below nnz do
+                 (let ((wt (aref tc a)) (sym (aref rv a)) (b (1- a)))
+                   (declare (type (unsigned-byte 32) wt) (type fixnum sym b))
+                   (loop while (and (>= b 0)
+                                    (or (> (aref tc b) wt)
+                                        (and (= (aref tc b) wt) (< (aref rv b) sym))))
+                         do (setf (aref tc (1+ b)) (aref tc b)
+                                  (aref rv (1+ b)) (aref rv b))
+                            (decf b))
+                   (setf (aref tc (1+ b)) wt (aref rv (1+ b)) sym)))
+               (%huf-radix-sort tc rv nnz))
            ;; sentinels at NNZ and NNZ+1; parents rise from NNZ+1; the
            ;; root sits at 2*NNZ-1 when the merge finishes
            (setf (aref tc nnz) #xFFFFFFFF (aref il nnz) -1 (aref rv nnz) -1)
@@ -339,13 +462,71 @@ Port of C BrotliCreateHuffmanTree; >= 2 nonzero frequencies assumed."
                                 (aref rv (+ jend 1)) -1)))))))
         ;; depth walk; on failure the DO retries with the doubled clamp
         (when (%huf-set-depth (- (* 2 nnz) 1) tc il rv depth maxbits)
+          ;; the leaves are RV[0..NNZ) (sorted); only their entries are set
           (let ((r (arena-fixnums n)))
             (declare (type (simple-array fixnum (*)) r))
-            (dotimes (s (the fixnum n))
-              (setf (aref r s)
-                    (if (plusp (aref freqs s))
-                        (aref depth s) 0)))
-            (return-from build-code-lengths-a r)))))))
+            (dotimes (k nnz)
+              (let ((s (aref rv k)))
+                (setf (aref r s) (aref depth s))))
+            (return-from build-code-lengths-a
+              (if rcodes
+                  (multiple-value-bind (rc nz) (%leaf-rcodes r rv nnz n)
+                    (values r rc nz))
+                  r))))))))
+
+(defun %leaf-rcodes (lengths syms nnz n)
+  "CANONICAL-RCODES of LENGTHS[0..N) whose nonzero entries are exactly the
+NNZ symbols in SYMS (any order): a counting sort of those symbols by
+symbol, then codes in symbol order."
+  (declare (type (simple-array fixnum (*)) lengths syms) (type fixnum nnz n)
+           (optimize (speed 3) (safety 0)))
+  (let ((count (make-array 16 :element-type 'fixnum :initial-element 0))
+        (next (make-array 16 :element-type 'fixnum))
+        (r (arena-fixnums n)))
+    (declare (type (simple-array fixnum (16)) count next)
+             (type (simple-array fixnum (*)) r) (dynamic-extent count next))
+    (dotimes (k nnz)
+      (incf (aref count (the (integer 0 15) (aref lengths (aref syms k))))))
+    (setf (aref count 0) 0)
+    (let ((code 0))
+      (declare (type fixnum code))
+      (setf (aref next 0) 0)
+      (loop for bits of-type fixnum from 1 to 15 do
+        (setf code (ash (+ code (aref count (1- bits))) 1)
+              (aref next bits) code)))
+    ;; symbols in increasing order: a walk over the alphabet, or for a
+    ;; few leaves in a large alphabet an insertion sort of the leaves.
+    ;; NZ (second value) lists them.
+    (if (or (> nnz 32) (>= (* 4 nnz) n))
+        (let ((nz (arena-fixnums nnz)) (k 0))
+          (declare (type (simple-array fixnum (*)) nz) (type fixnum k))
+          (dotimes (s n)
+            (let ((l (aref lengths s)))
+              (declare (type (integer 0 15) l))
+              (when (plusp l)
+                (setf (aref r s) (%reverse-bits (aref next l) l)
+                      (aref nz k) s)
+                (incf k)
+                (incf (aref next l)))))
+          (return-from %leaf-rcodes (values r nz)))
+        (let ((ord (make-array nnz :element-type 'fixnum)))
+          (declare (type (simple-array fixnum (*)) ord) (dynamic-extent ord))
+          (replace ord syms :end2 nnz)
+          ;; insertion sort of a few symbols (NNZ <= 32, < N/4)
+          (loop for a of-type fixnum from 1 below nnz do
+            (let ((v (aref ord a)) (b (1- a)))
+              (declare (type fixnum v b))
+              (loop while (and (>= b 0) (> (aref ord b) v))
+                    do (setf (aref ord (1+ b)) (aref ord b)) (decf b))
+              (setf (aref ord (1+ b)) v)))
+          (dotimes (k nnz)
+            (let* ((s (aref ord k)) (l (aref lengths s)))
+              (declare (type (integer 1 15) l))
+              (setf (aref r s) (%reverse-bits (aref next l) l))
+              (incf (aref next l))))
+          (return-from %leaf-rcodes
+            (values r (replace (arena-fixnums nnz) ord)))))
+    r))
 
 (defun build-code-lengths (freqs n maxlen)
   "Optimal canonical code lengths (<= MAXLEN) for FREQS.  Assumes >= 2 nonzero."
@@ -380,6 +561,9 @@ Port of C BrotliCreateHuffmanTree; >= 2 nonzero frequencies assumed."
 
 (defstruct etree
   (lengths nil :type (or null (simple-array fixnum (*))))
+  ;; the symbols with nonzero length, ascending (when the builder knew
+  ;; them): the tree writer then walks runs, not the whole alphabet
+  (nz nil :type (or null (simple-array fixnum (*))))
   (codes nil :type (or null (simple-array fixnum (*))))
   (rcodes nil :type (or null (simple-array fixnum (*))))
   single
@@ -520,14 +704,230 @@ histograms) first applies C's BrotliOptimizeHuffmanCountsForRle to a copy."
                      :rcodes (canonical-rcodes lengths size)
                      :simple sorted)))
       (t
-       (let* ((lengths (build-code-lengths-a
-                        (if rle-optimize
-                            (optimize-counts-for-rle
-                             (replace (arena-fixnums (length freqs)) freqs) size)
-                            freqs)
-                        size maxbits)))
-         (make-etree :lengths lengths
-                     :rcodes (canonical-rcodes lengths size)))))))
+       (multiple-value-bind (lengths rcodes nz)
+           (build-code-lengths-a
+            ;; OPTIMIZE-COUNTS-FOR-RLE leaves fewer than 16 used symbols
+            ;; alone: no copy, no passes
+            (if (and rle-optimize (>= nnz 16))
+                (optimize-counts-for-rle
+                 (replace (arena-fixnums (length freqs)) freqs) size)
+                freqs)
+            size maxbits t)
+         (make-etree :lengths lengths :rcodes rcodes :nz nz))))))
+
+;;; C BrotliBuildAndStoreHuffmanTreeFast (q0 and q1 literal codes): the
+;;; tree from BrotliCreateHuffmanTree's algorithm with depths <= 14, and a
+;;; complex code written with a STATIC code-length code (kCodeLengthDepth /
+;;; kCodeLengthBits) and precomputed encodings of each run length
+;;; (kZeroReps* / kNonZeroReps*, entropy_encode_static.h) - no code-length
+;;; histogram, tree or RLE optimisation.  Entries: bits | depth << 32.
+
+(deftable +c-code-length-code+
+  (coerce '(17179869184 17179869192 17179869188 17179869196 17179869186 17179869194 17179869190 17179869198 17179869185 17179869193 17179869189 17179869197
+           17179869187 21474836495 21474836511 0 17179869195 17179869191)
+          '(simple-array (unsigned-byte 64) (18))))
+(declaim (type (simple-array (unsigned-byte 64) (18)) +c-code-length-code+))
+(deftable +c-zero-reps+
+  (coerce '(0 17179869184 34359738368 30064771079 30064771095 30064771111 30064771127 30064771143 30064771159 30064771175 30064771191 47244642160
+           60129545095 60129547143 60129549191 60129551239 60129553287 60129555335 60129557383 60129543063 60129545111 60129547159 60129549207 60129551255
+           60129553303 60129555351 60129557399 60129543079 60129545127 60129547175 60129549223 60129551271 60129553319 60129555367 60129557415 60129543095
+           60129545143 60129547191 60129549239 60129551287 60129553335 60129555383 60129557431 60129543111 60129545159 60129547207 60129549255 60129551303
+           60129553351 60129555399 60129557447 60129543127 60129545175 60129547223 60129549271 60129551319 60129553367 60129555415 60129557463 60129543143
+           60129545191 60129547239 60129549287 60129551335 60129553383 60129555431 60129557479 60129543159 60129545207 60129547255 60129549303 60129551351
+           60129553399 60129555447 60129557495 90194428807 90194690951 90194953095 90195215239 90195477383 90195739527 90196001671 90196263815 90194430855
+           90194692999 90194955143 90195217287 90195479431 90195741575 90196003719 90196265863 90194432903 90194695047 90194957191 90195219335 90195481479
+           90195743623 90196005767 90196267911 90194434951 90194697095 90194959239 90195221383 90195483527 90195745671 90196007815 90196269959 90194436999
+           90194699143 90194961287 90195223431 90195485575 90195747719 90196009863 90196272007 90194439047 90194701191 90194963335 90195225479 90195487623
+           90195749767 90196011911 90196274055 90194441095 90194703239 90194965383 90195227527 90195489671 90195751815 90196013959 90196276103 90194443143
+           90194705287 90194967431 90195229575 90195491719 90195753863 90196016007 90196278151 90194428823 90194690967 90194953111 90195215255 90195477399
+           90195739543 90196001687 90196263831 90194430871 90194693015 90194955159 90195217303 90195479447 90195741591 90196003735 90196265879 90194432919
+           90194695063 90194957207 90195219351 90195481495 90195743639 90196005783 90196267927 90194434967 90194697111 90194959255 90195221399 90195483543
+           90195745687 90196007831 90196269975 90194437015 90194699159 90194961303 90195223447 90195485591 90195747735 90196009879 90196272023 90194439063
+           90194701207 90194963351 90195225495 90195487639 90195749783 90196011927 90196274071 90194441111 90194703255 90194965399 90195227543 90195489687
+           90195751831 90196013975 90196276119 90194443159 90194705303 90194967447 90195229591 90195491735 90195753879 90196016023 90196278167 90194428839
+           90194690983 90194953127 90195215271 90195477415 90195739559 90196001703 90196263847 90194430887 90194693031 90194955175 90195217319 90195479463
+           90195741607 90196003751 90196265895 90194432935 90194695079 90194957223 90195219367 90195481511 90195743655 90196005799 90196267943 90194434983
+           90194697127 90194959271 90195221415 90195483559 90195745703 90196007847 90196269991 90194437031 90194699175 90194961319 90195223463 90195485607
+           90195747751 90196009895 90196272039 90194439079 90194701223 90194963367 90195225511 90195487655 90195749799 90196011943 90196274087 90194441127
+           90194703271 90194965415 90195227559 90195489703 90195751847 90196013991 90196276135 90194443175 90194705319 90194967463 90195229607 90195491751
+           90195753895 90196016039 90196278183 90194428855 90194690999 90194953143 90195215287 90195477431 90195739575 90196001719 90196263863 90194430903
+           90194693047 90194955191 90195217335 90195479479 90195741623 90196003767 90196265911 90194432951 90194695095 90194957239 90195219383 90195481527
+           90195743671 90196005815 90196267959 90194434999 90194697143 90194959287 90195221431 90195483575 90195745719 90196007863 90196270007 90194437047
+           90194699191 90194961335 90195223479 90195485623 90195747767 90196009911 90196272055 90194439095 90194701239 90194963383 90195225527 90195487671
+           90195749815 90196011959 90196274103 90194441143 90194703287 90194965431 90195227575 90195489719 90195751863 90196014007 90196276151 90194443191
+           90194705335 90194967479 90195229623 90195491767 90195753911 90196016055 90196278199 90194428871 90194691015 90194953159 90195215303 90195477447
+           90195739591 90196001735 90196263879 90194430919 90194693063 90194955207 90195217351 90195479495 90195741639 90196003783 90196265927 90194432967
+           90194695111 90194957255 90195219399 90195481543 90195743687 90196005831 90196267975 90194435015 90194697159 90194959303 90195221447 90195483591
+           90195745735 90196007879 90196270023 90194437063 90194699207 90194961351 90195223495 90195485639 90195747783 90196009927 90196272071 90194439111
+           90194701255 90194963399 90195225543 90195487687 90195749831 90196011975 90196274119 90194441159 90194703303 90194965447 90195227591 90195489735
+           90195751879 90196014023 90196276167 90194443207 90194705351 90194967495 90195229639 90195491783 90195753927 90196016071 90196278215 90194428887
+           90194691031 90194953175 90195215319 90195477463 90195739607 90196001751 90196263895 90194430935 90194693079 90194955223 90195217367 90195479511
+           90195741655 90196003799 90196265943 90194432983 90194695127 90194957271 90195219415 90195481559 90195743703 90196005847 90196267991 90194435031
+           90194697175 90194959319 90195221463 90195483607 90195745751 90196007895 90196270039 90194437079 90194699223 90194961367 90195223511 90195485655
+           90195747799 90196009943 90196272087 90194439127 90194701271 90194963415 90195225559 90195487703 90195749847 90196011991 90196274135 90194441175
+           90194703319 90194965463 90195227607 90195489751 90195751895 90196014039 90196276183 90194443223 90194705367 90194967511 90195229655 90195491799
+           90195753943 90196016087 90196278231 90194428903 90194691047 90194953191 90195215335 90195477479 90195739623 90196001767 90196263911 90194430951
+           90194693095 90194955239 90195217383 90195479527 90195741671 90196003815 90196265959 90194432999 90194695143 90194957287 90195219431 90195481575
+           90195743719 90196005863 90196268007 90194435047 90194697191 90194959335 90195221479 90195483623 90195745767 90196007911 90196270055 90194437095
+           90194699239 90194961383 90195223527 90195485671 90195747815 90196009959 90196272103 90194439143 90194701287 90194963431 90195225575 90195487719
+           90195749863 90196012007 90196274151 90194441191 90194703335 90194965479 90195227623 90195489767 90195751911 90196014055 90196276199 90194443239
+           90194705383 90194967527 90195229671 90195491815 90195753959 90196016103 90196278247 90194428919 90194691063 90194953207 90195215351 90195477495
+           90195739639 90196001783 90196263927 90194430967 90194693111 90194955255 90195217399 90195479543 90195741687 90196003831 90196265975 90194433015
+           90194695159 90194957303 90195219447 90195481591 90195743735 90196005879 90196268023 90194435063 90194697207 90194959351 90195221495 90195483639
+           90195745783 90196007927 90196270071 90194437111 90194699255 90194961399 90195223543 90195485687 90195747831 90196009975 90196272119 90194439159
+           90194701303 90194963447 90195225591 90195487735 90195749879 90196012023 90196274167 90194441207 90194703351 90194965495 90195227639 90195489783
+           90195751927 90196014071 90196276215 90194443255 90194705399 90194967543 90195229687 90195491831 90195753975 90196016119 90196278263 120273879943
+           120307434375 120340988807 120374543239 120408097671 120441652103 120475206535 120508760967 120274142087 120307696519 120341250951 120374805383 120408359815
+           120441914247 120475468679 120509023111 120274404231 120307958663 120341513095 120375067527 120408621959 120442176391 120475730823 120509285255 120274666375
+           120308220807 120341775239 120375329671 120408884103 120442438535 120475992967 120509547399 120274928519 120308482951 120342037383 120375591815 120409146247
+           120442700679 120476255111 120509809543 120275190663 120308745095 120342299527 120375853959 120409408391 120442962823 120476517255 120510071687 120275452807
+           120309007239 120342561671 120376116103 120409670535 120443224967 120476779399 120510333831 120275714951 120309269383 120342823815 120376378247 120409932679
+           120443487111 120477041543 120510595975 120273881991 120307436423 120340990855 120374545287 120408099719 120441654151 120475208583 120508763015 120274144135
+           120307698567 120341252999 120374807431 120408361863 120441916295 120475470727 120509025159 120274406279 120307960711 120341515143 120375069575 120408624007
+           120442178439 120475732871 120509287303 120274668423 120308222855 120341777287 120375331719 120408886151 120442440583 120475995015 120509549447 120274930567
+           120308484999 120342039431 120375593863 120409148295 120442702727 120476257159 120509811591 120275192711 120308747143 120342301575 120375856007 120409410439
+           120442964871 120476519303 120510073735 120275454855 120309009287 120342563719 120376118151 120409672583)
+          '(simple-array (unsigned-byte 64) (704))))
+(declaim (type (simple-array (unsigned-byte 64) (704)) +c-zero-reps+))
+(deftable +c-nonzero-reps+
+  (coerce '(25769803787 25769803803 25769803819 25769803835 51539608267 51539609291 51539610315 51539611339 51539608283 51539609307 51539610331 51539611355
+           51539608299 51539609323 51539610347 51539611371 51539608315 51539609339 51539610363 51539611387 77309457099 77309522635 77309588171 77309653707
+           77309458123 77309523659 77309589195 77309654731 77309459147 77309524683 77309590219 77309655755 77309460171 77309525707 77309591243 77309656779
+           77309457115 77309522651 77309588187 77309653723 77309458139 77309523675 77309589211 77309654747 77309459163 77309524699 77309590235 77309655771
+           77309460187 77309525723 77309591259 77309656795 77309457131 77309522667 77309588203 77309653739 77309458155 77309523691 77309589227 77309654763
+           77309459179 77309524715 77309590251 77309655787 77309460203 77309525739 77309591275 77309656811 77309457147 77309522683 77309588219 77309653755
+           77309458171 77309523707 77309589243 77309654779 77309459195 77309524731 77309590267 77309655803 77309460219 77309525755 77309591291 77309656827
+           103082144459 103086338763 103090533067 103094727371 103082209995 103086404299 103090598603 103094792907 103082275531 103086469835 103090664139 103094858443
+           103082341067 103086535371 103090729675 103094923979 103082145483 103086339787 103090534091 103094728395 103082211019 103086405323 103090599627 103094793931
+           103082276555 103086470859 103090665163 103094859467 103082342091 103086536395 103090730699 103094925003 103082146507 103086340811 103090535115 103094729419
+           103082212043 103086406347 103090600651 103094794955 103082277579 103086471883 103090666187 103094860491 103082343115 103086537419 103090731723 103094926027
+           103082147531 103086341835 103090536139 103094730443 103082213067 103086407371 103090601675 103094795979 103082278603 103086472907 103090667211 103094861515
+           103082344139 103086538443 103090732747 103094927051 103082144475 103086338779 103090533083 103094727387 103082210011 103086404315 103090598619 103094792923
+           103082275547 103086469851 103090664155 103094858459 103082341083 103086535387 103090729691 103094923995 103082145499 103086339803 103090534107 103094728411
+           103082211035 103086405339 103090599643 103094793947 103082276571 103086470875 103090665179 103094859483 103082342107 103086536411 103090730715 103094925019
+           103082146523 103086340827 103090535131 103094729435 103082212059 103086406363 103090600667 103094794971 103082277595 103086471899 103090666203 103094860507
+           103082343131 103086537435 103090731739 103094926043 103082147547 103086341851 103090536155 103094730459 103082213083 103086407387 103090601691 103094795995
+           103082278619 103086472923 103090667227 103094861531 103082344155 103086538459 103090732763 103094927067 103082144491 103086338795 103090533099 103094727403
+           103082210027 103086404331 103090598635 103094792939 103082275563 103086469867 103090664171 103094858475 103082341099 103086535403 103090729707 103094924011
+           103082145515 103086339819 103090534123 103094728427 103082211051 103086405355 103090599659 103094793963 103082276587 103086470891 103090665195 103094859499
+           103082342123 103086536427 103090730731 103094925035 103082146539 103086340843 103090535147 103094729451 103082212075 103086406379 103090600683 103094794987
+           103082277611 103086471915 103090666219 103094860523 103082343147 103086537451 103090731755 103094926059 103082147563 103086341867 103090536171 103094730475
+           103082213099 103086407403 103090601707 103094796011 103082278635 103086472939 103090667243 103094861547 103082344171 103086538475 103090732779 103094927083
+           103082144507 103086338811 103090533115 103094727419 103082210043 103086404347 103090598651 103094792955 103082275579 103086469883 103090664187 103094858491
+           103082341115 103086535419 103090729723 103094924027 103082145531 103086339835 103090534139 103094728443 103082211067 103086405371 103090599675 103094793979
+           103082276603 103086470907 103090665211 103094859515 103082342139 103086536443 103090730747 103094925051 103082146555 103086340859 103090535163 103094729467
+           103082212091 103086406395 103090600699 103094795003 103082277627 103086471931 103090666235 103094860539 103082343163 103086537467 103090731771 103094926075
+           103082147579 103086341883 103090536187 103094730491 103082213115 103086407419 103090601723 103094796027 103082278651 103086472955 103090667259 103094861563
+           103082344187 103086538491 103090732795 103094927099 129036497611 129304933067 129573368523 129841803979 129040691915 129309127371 129577562827 129845998283
+           129044886219 129313321675 129581757131 129850192587 129049080523 129317515979 129585951435 129854386891 129036563147 129304998603 129573434059 129841869515
+           129040757451 129309192907 129577628363 129846063819 129044951755 129313387211 129581822667 129850258123 129049146059 129317581515 129586016971 129854452427
+           129036628683 129305064139 129573499595 129841935051 129040822987 129309258443 129577693899 129846129355 129045017291 129313452747 129581888203 129850323659
+           129049211595 129317647051 129586082507 129854517963 129036694219 129305129675 129573565131 129842000587 129040888523 129309323979 129577759435 129846194891
+           129045082827 129313518283 129581953739 129850389195 129049277131 129317712587 129586148043 129854583499 129036498635 129304934091 129573369547 129841805003
+           129040692939 129309128395 129577563851 129845999307 129044887243 129313322699 129581758155 129850193611 129049081547 129317517003 129585952459 129854387915
+           129036564171 129304999627 129573435083 129841870539 129040758475 129309193931 129577629387 129846064843 129044952779 129313388235 129581823691 129850259147
+           129049147083 129317582539 129586017995 129854453451 129036629707 129305065163 129573500619 129841936075 129040824011 129309259467 129577694923 129846130379
+           129045018315 129313453771 129581889227 129850324683 129049212619 129317648075 129586083531 129854518987 129036695243 129305130699 129573566155 129842001611
+           129040889547 129309325003 129577760459 129846195915 129045083851 129313519307 129581954763 129850390219 129049278155 129317713611 129586149067 129854584523
+           129036499659 129304935115 129573370571 129841806027 129040693963 129309129419 129577564875 129846000331 129044888267 129313323723 129581759179 129850194635
+           129049082571 129317518027 129585953483 129854388939 129036565195 129305000651 129573436107 129841871563 129040759499 129309194955 129577630411 129846065867
+           129044953803 129313389259 129581824715 129850260171 129049148107 129317583563 129586019019 129854454475 129036630731 129305066187 129573501643 129841937099
+           129040825035 129309260491 129577695947 129846131403 129045019339 129313454795 129581890251 129850325707 129049213643 129317649099 129586084555 129854520011
+           129036696267 129305131723 129573567179 129842002635 129040890571 129309326027 129577761483 129846196939 129045084875 129313520331 129581955787 129850391243
+           129049279179 129317714635 129586150091 129854585547 129036500683 129304936139 129573371595 129841807051 129040694987 129309130443 129577565899 129846001355
+           129044889291 129313324747 129581760203 129850195659 129049083595 129317519051 129585954507 129854389963 129036566219 129305001675 129573437131 129841872587
+           129040760523 129309195979 129577631435 129846066891 129044954827 129313390283 129581825739 129850261195 129049149131 129317584587 129586020043 129854455499
+           129036631755 129305067211 129573502667 129841938123 129040826059 129309261515 129577696971 129846132427 129045020363 129313455819 129581891275 129850326731
+           129049214667 129317650123 129586085579 129854521035 129036697291 129305132747 129573568203 129842003659 129040891595 129309327051 129577762507 129846197963
+           129045085899 129313521355 129581956811 129850392267 129049280203 129317715659 129586151115 129854586571 129036497627 129304933083 129573368539 129841803995
+           129040691931 129309127387 129577562843 129845998299 129044886235 129313321691 129581757147 129850192603 129049080539 129317515995 129585951451 129854386907
+           129036563163 129304998619 129573434075 129841869531 129040757467 129309192923 129577628379 129846063835 129044951771 129313387227 129581822683 129850258139
+           129049146075 129317581531 129586016987 129854452443 129036628699 129305064155 129573499611 129841935067 129040823003 129309258459 129577693915 129846129371
+           129045017307 129313452763 129581888219 129850323675 129049211611 129317647067 129586082523 129854517979 129036694235 129305129691 129573565147 129842000603
+           129040888539 129309323995 129577759451 129846194907 129045082843 129313518299 129581953755 129850389211 129049277147 129317712603 129586148059 129854583515
+           129036498651 129304934107 129573369563 129841805019 129040692955 129309128411 129577563867 129845999323 129044887259 129313322715 129581758171 129850193627
+           129049081563 129317517019 129585952475 129854387931 129036564187 129304999643 129573435099 129841870555 129040758491 129309193947 129577629403 129846064859
+           129044952795 129313388251 129581823707 129850259163 129049147099 129317582555 129586018011 129854453467 129036629723 129305065179 129573500635 129841936091
+           129040824027 129309259483 129577694939 129846130395 129045018331 129313453787 129581889243 129850324699)
+          '(simple-array (unsigned-byte 64) (704))))
+(declaim (type (simple-array (unsigned-byte 64) (704)) +c-nonzero-reps+))
+
+(defun %w-wide (w v n)
+  "Write N <= 48 bits."
+  (declare (type b:bwr w) (type (unsigned-byte 48) v) (type (integer 0 48) n))
+  (if (<= n 24)
+      (b:wbits w v n)
+      (progn (b:wbits w (logand v #xFFFFFF) 24)
+             (b:wbits w (ash v -24) (- n 24)))))
+
+(defun build-and-store-fast-etree (w freqs maxbits)
+  "C BrotliBuildAndStoreHuffmanTreeFast for the 256-symbol histogram FREQS:
+write the code to W, return its ETREE.  MAXBITS: the width of a simple
+code's symbols (8)."
+  (declare (type b:bwr w) (type (simple-array fixnum (*)) freqs)
+           (type (integer 1 10) maxbits)
+           (optimize (speed 3) (safety 0)))
+  (let ((count 0) (len 0) (s4 (make-array 4 :element-type 'fixnum :initial-element 0)))
+    (declare (type fixnum count len) (dynamic-extent s4))
+    (dotimes (i 256)
+      (when (plusp (aref freqs i))
+        (when (< count 4) (setf (aref s4 count) i))
+        (incf count)
+        (setf len (1+ i))))
+    (when (<= count 1)
+      (b:wbits w 1 4)
+      (b:wbits w (aref s4 0) maxbits)
+      (return-from build-and-store-fast-etree (make-etree :single (aref s4 0))))
+    ;; the depths over the first LEN symbols (C: depth limit 14), widened
+    ;; to the whole alphabet
+    (let* ((d (build-code-lengths-a freqs len 14))
+           (lengths (let ((v (arena-fixnums 256)))
+                      (replace v d :end2 len)
+                      v))
+           (et (make-etree :lengths lengths
+                           :rcodes (canonical-rcodes lengths 256))))
+      (declare (type (simple-array fixnum (*)) d lengths))
+      (if (<= count 4)
+          (progn
+            ;; simple code, symbols sorted by depth with C's swap sort
+            (b:wbits w 1 2)
+            (b:wbits w (1- count) 2)
+            (dotimes (i count)
+              (loop for j of-type fixnum from (1+ i) below count do
+                (when (< (aref lengths (aref s4 j)) (aref lengths (aref s4 i)))
+                  (rotatef (aref s4 i) (aref s4 j)))))
+            (dotimes (i count) (b:wbits w (aref s4 i) maxbits))
+            (when (= count 4)
+              (b:wbits w (if (= 1 (aref lengths (aref s4 0))) 1 0) 1))
+            (setf (etree-simple et) (coerce s4 'list)))
+          (let ((prev 8) (i 0) (cl +c-code-length-code+)
+                (zr +c-zero-reps+) (nzr +c-nonzero-reps+))
+            (declare (type fixnum prev i))
+            ;; StoreStaticCodeLengthCode: 40 bits
+            (%w-wide w #xFF55555554 40)
+            (flet ((put (e)
+                     (declare (type (unsigned-byte 64) e))
+                     (%w-wide w (logand e #xFFFFFFFF) (ash e -32))))
+              (loop while (< i len) do
+                (let* ((value (aref lengths i))
+                       (reps (let ((k (1+ i)))
+                               (declare (type fixnum k))
+                               (loop while (and (< k len) (= (aref lengths k) value))
+                                     do (incf k))
+                               (- k i))))
+                  (declare (type (integer 0 15) value) (type fixnum reps))
+                  (incf i reps)
+                  (if (zerop value)
+                      (put (aref zr reps))
+                      (progn
+                        (when (/= prev value)
+                          (put (aref cl value))
+                          (decf reps))
+                        (if (< reps 3)
+                            (dotimes (r reps) (put (aref cl value)))
+                            (put (aref nzr (- reps 3))))
+                        (setf prev value))))))))
+      et)))
 
 (defun emit-bits-msb (w code len)
   (loop for i from (1- len) downto 0 do (b:wbits w (logand (ash code (- i)) 1) 1)))
@@ -541,42 +941,76 @@ histograms) first applies C's BrotliOptimizeHuffmanCountsForRle to a copy."
 
 ;;; ---- prefix-code description writer (inverse of READ-PREFIX-CODE) ------
 
+(deftable +clcl-len-code+
+  ;; the fixed code of a code-length-code length V (0-5), LSB-first as the
+  ;; reader takes it: bits | width << 8.  0: 00, 3: 01, 4: 10, 2: 110,
+  ;; 1: 1110, 5: 1111 (read order)
+  (coerce (list (logior #b00 (ash 2 8)) (logior #b0111 (ash 4 8))
+                (logior #b011 (ash 3 8)) (logior #b10 (ash 2 8))
+                (logior #b01 (ash 2 8)) (logior #b1111 (ash 4 8)))
+          '(simple-array fixnum (6))))
+(declaim (type (simple-array fixnum (6)) +clcl-len-code+))
+
+(declaim (inline write-clcl-len))
 (defun write-clcl-len (w v)
   "Emit one code-length-code length V (0-5) with the fixed code (inverse of
-READ-CLCL): bits written in read order."
-  (ecase v
-    (0 (b:wbits w 0 1) (b:wbits w 0 1))
-    (3 (b:wbits w 0 1) (b:wbits w 1 1))
-    (4 (b:wbits w 1 1) (b:wbits w 0 1))
-    (2 (b:wbits w 1 1) (b:wbits w 1 1) (b:wbits w 0 1))
-    (1 (b:wbits w 1 1) (b:wbits w 1 1) (b:wbits w 1 1) (b:wbits w 0 1))
-    (5 (b:wbits w 1 1) (b:wbits w 1 1) (b:wbits w 1 1) (b:wbits w 1 1))))
+READ-CLCL), one write."
+  (declare (type (integer 0 5) v))
+  (let ((e (aref +clcl-len-code+ v)))
+    (b:wbits w (logand e 255) (ash e -8))))
 
-(defun huffman-tree-rle (lengths length syms extras)
+(defun huffman-tree-rle (lengths length syms extras &optional nz)
   "C BrotliWriteHuffmanTree: LENGTHS[0..LENGTH) as code-length symbols
 \(0-15 literal, 16 repeat previous, 17 repeat zero) into SYMS with their
 extra-bit values in EXTRAS (both >= LENGTH entries); returns the count.
 Repeat codes chain (the decoder multiplies consecutive repeats), the
 previous length starts at 8, and runs are coded only where C's
-DecideOverRleUse finds them worthwhile (alphabets over 50)."
+DecideOverRleUse finds them worthwhile (alphabets over 50).  Works on the
+maximal runs of equal lengths: from NZ (the nonzero-length symbols,
+ascending) when given - zero runs are its gaps, so a sparse 704-symbol
+alphabet costs its used symbols, not 704 steps - else from a scan."
   (declare (type (simple-array fixnum (*)) lengths syms extras)
            (type fixnum length)
+           (type (or null (simple-array fixnum (*))) nz)
            (optimize (speed 3) (safety 0)))
-  (let ((count 0) (prev 8) (n length) (rle-nonzero nil) (rle-zero nil))
-    (declare (type fixnum count prev n) (type boolean rle-nonzero rle-zero))
-    (loop while (and (> n 0) (zerop (aref lengths (1- n)))) do (decf n))
+  (let* ((maxruns (if nz (1+ (* 2 (length nz))) (1+ length)))
+         (rv (make-array maxruns :element-type 'fixnum))
+         (rr (make-array maxruns :element-type 'fixnum))
+         (nr 0) (count 0) (prev 8) (rle-nonzero nil) (rle-zero nil))
+    (declare (type (simple-array fixnum (*)) rv rr) (dynamic-extent rv rr)
+             (type fixnum maxruns nr count prev)
+             (type boolean rle-nonzero rle-zero))
+    (macrolet ((run (v r) `(setf (aref rv nr) ,v (aref rr nr) ,r nr (1+ nr))))
+      (if nz
+          (let ((pos 0) (m (length nz)) (k 0))
+            (declare (type fixnum pos m k))
+            (loop while (< k m) do
+              (let* ((s (aref nz k)) (v (aref lengths s)) (e (1+ s)))
+                (declare (type fixnum s v e))
+                (when (> s pos) (run 0 (- s pos)))
+                (incf k)
+                (loop while (and (< k m) (= (aref nz k) e) (= (aref lengths e) v))
+                      do (incf k) (incf e))
+                (run v (- e s))
+                (setf pos e))))
+          (let ((n length) (i 0))
+            (declare (type fixnum n i))
+            (loop while (and (> n 0) (zerop (aref lengths (1- n)))) do (decf n))
+            (loop while (< i n) do
+              (let ((v (aref lengths i)) (e (1+ i)))
+                (declare (type fixnum v e))
+                (loop while (and (< e n) (= (aref lengths e) v)) do (incf e))
+                (run v (- e i))
+                (setf i e))))))
     (when (> length 50)
       ;; C DecideOverRleUse
-      (let ((tz 0) (tnz 0) (cz 1) (cnz 1) (i 0))
-        (declare (type fixnum tz tnz cz cnz i))
-        (loop while (< i n) do
-          (let ((v (aref lengths i)) (reps 1))
+      (let ((tz 0) (tnz 0) (cz 1) (cnz 1))
+        (declare (type fixnum tz tnz cz cnz))
+        (dotimes (j nr)
+          (let ((v (aref rv j)) (reps (aref rr j)))
             (declare (type fixnum v reps))
-            (loop for k of-type fixnum from (1+ i) below n
-                  while (= (aref lengths k) v) do (incf reps))
             (when (and (>= reps 3) (zerop v)) (incf tz reps) (incf cz))
-            (when (and (>= reps 4) (/= v 0)) (incf tnz reps) (incf cnz))
-            (incf i reps)))
+            (when (and (>= reps 4) (/= v 0)) (incf tnz reps) (incf cnz))))
         (setf rle-nonzero (> tnz (* 2 cnz)) rle-zero (> tz (* 2 cz)))))
     (macrolet ((put (sym x)
                  `(progn (setf (aref syms count) ,sym (aref extras count) ,x)
@@ -596,31 +1030,32 @@ DecideOverRleUse finds them worthwhile (alphabets over 50)."
                        for j of-type fixnum downfrom (1- count)
                        while (< i j)
                        do (rotatef (aref extras i) (aref extras j))))))
-        (let ((i 0))
-          (declare (type fixnum i))
-          (loop while (< i n) do
-            (let ((v (aref lengths i)) (reps 1))
-              (declare (type fixnum v reps))
-              (when (if (zerop v) rle-zero rle-nonzero)
-                (loop for k of-type fixnum from (1+ i) below n
-                      while (= (aref lengths k) v) do (incf reps)))
-              (incf i reps)
-              (if (zerop v)
-                  (progn
-                    (when (= reps 11) (put 0 0) (decf reps))
-                    (if (< reps 3)
-                        (loop repeat reps do (put 0 0))
-                        (repeat-codes 17 reps 3)))
-                  (progn
-                    (when (/= prev v) (put v 0) (decf reps))
-                    (when (= reps 7) (put v 0) (decf reps))
-                    (if (< reps 3)
-                        (loop repeat reps do (put v 0))
-                        (repeat-codes 16 reps 2))
-                    (setf prev v))))))))
+        (flet ((emit (v reps)
+                 (declare (type fixnum v reps))
+                 (if (zerop v)
+                     (progn
+                       (when (= reps 11) (put 0 0) (decf reps))
+                       (if (< reps 3)
+                           (loop repeat reps do (put 0 0))
+                           (repeat-codes 17 reps 3)))
+                     (progn
+                       (when (/= prev v) (put v 0) (decf reps))
+                       (when (= reps 7) (put v 0) (decf reps))
+                       (if (< reps 3)
+                           (loop repeat reps do (put v 0))
+                           (repeat-codes 16 reps 2))
+                       (setf prev v)))))
+          ;; a run is one RLE unit where its kind uses RLE, else symbol by
+          ;; symbol (C's loop with reps = 1)
+          (dotimes (j nr)
+            (let ((v (aref rv j)) (r (aref rr j)))
+              (declare (type fixnum v r))
+              (if (if (zerop v) rle-zero rle-nonzero)
+                  (emit v r)
+                  (dotimes (q r) (emit v 1))))))))
     count))
 
-(defun write-complex-code (w lengths size)
+(defun write-complex-code (w lengths size &optional nz)
   "C BrotliStoreHuffmanTree: the code lengths LENGTHS (>= 2 used symbols)
 as code-length symbols under a code-length code built for them.  When
 only one code-length symbol occurs (e.g. 256 literals all of length 8)
@@ -634,7 +1069,7 @@ stored and the symbols themselves cost only their extra bits."
         (num-codes 0) (code 0))
     (declare (dynamic-extent syms extras hist)
              (type fixnum num-codes code))
-    (let ((count (huffman-tree-rle lengths size syms extras)))
+    (let ((count (huffman-tree-rle lengths size syms extras nz)))
       (declare (type fixnum count))
       (dotimes (i count) (incf (aref hist (aref syms i))))
       (loop for i of-type fixnum below 18
@@ -691,7 +1126,7 @@ in LENGTHS, else 0 (all 2)."
     ((etree-simple et)
      (write-simple-code w (etree-simple et) size (etree-lengths et)))
     (t
-     (write-complex-code w (etree-lengths et) size))))
+     (write-complex-code w (etree-lengths et) size (etree-nz et)))))
 
 ;;; ---- command / distance code computation ------------------------------
 
@@ -2049,7 +2484,7 @@ exactly as before."
           (let ((key (- n)))
             (or (let ((entry (gethash key pool)))
                   (when entry
-                    (fill (car entry) #xFFFFFFFF)
+                    (byte-fill-u32 (car entry) #xFF)
                     entry))
                 (progn
                   (when (>= (hash-table-count pool) +scratch-max-entries+)
@@ -2474,9 +2909,9 @@ C's BackwardReferenceScore over the CHECKS-entry prepared distance cache
           ;; before; forest/zins/zsc/znext/prefix/zflat are strictly
           ;; read-after-write).
           (when scratch
-            (fill (scr-bt-buckets scratch) #xFFFFFFFF)
+            (byte-fill-u32 (scr-bt-buckets scratch) #xFF)
             (when (>= bt 64)
-              (fill (scr-z-nm scratch) 0)))
+              (byte-fill-u32 (scr-z-nm scratch) 0)))
           (labels ((hash (i)
                      ;; the 8-byte load in %hash4-sap needs the tail branch
                      ;; for i within 3 bytes of the end
@@ -3672,7 +4107,7 @@ under KEY (fresh when there is no pool)."
   (let* ((pool *scratch-pool*)
          (v (and pool (gethash key pool))))
     (if (and v (= (length (the (simple-array (unsigned-byte 16) (*)) v)) size))
-        (fill (the (simple-array (unsigned-byte 16) (*)) v) 0)
+        (byte-fill-u16 v 0)
         (let ((new (make-array size :element-type '(unsigned-byte 16)
                                     :initial-element 0)))
           (when pool (setf (gethash key pool) new))
@@ -3687,8 +4122,11 @@ not read what it has not written."
   (let* ((pool *scratch-pool*)
          (v (and pool (gethash key pool))))
     (if (and v (>= (length (the (simple-array (unsigned-byte 32) (*)) v)) size))
-        (progn (when fill (fill (the (simple-array (unsigned-byte 32) (*)) v)
-                                fill :end size))
+        (progn (when fill
+                 (if (or (eql fill 0) (eql fill #xFFFFFFFF))
+                     (byte-fill-u32 v (logand fill 255) 0 size)
+                     (fill (the (simple-array (unsigned-byte 32) (*)) v)
+                           fill :end size)))
                v)
         (let ((new (if fill
                        (make-array size :element-type '(unsigned-byte 32)
@@ -3738,7 +4176,7 @@ input <= 2^BITS / 32), a pooled table is cleared only where DATA hashes."
                                   (ash 1 (- bits 5))))
                     (progn (%quick-partial-clear entry data bits sweep hash-len)
                            entry)
-                    (fill (the (simple-array (unsigned-byte 32) (*)) entry) 0))
+                    (byte-fill-u32 entry 0))
                 (progn
                   (when (>= (hash-table-count pool) +scratch-max-entries+)
                     (clrhash pool))
@@ -3799,7 +4237,7 @@ input <= 2^BITS / 32), a pooled table is cleared only where DATA hashes."
              (%lz77-quick-body)))))))
 
 #+cl-brotli-x86-64
-(defun %asm-h6-drive (data window block-bits buckets run htl)
+(defun %asm-h6-drive (data window block-bits buckets run htl &optional prevpos)
   "DEFINE-H6-MATCHER's matcher through the assembly RUN (src/evops.lisp),
 like %ASM-QUICK-DRIVE.  HTL is the hasher's HashTypeLength = StoreLookahead
 \(8 for H6, 4 for H5)."
@@ -3826,7 +4264,8 @@ like %ASM-QUICK-DRIVE.  HTL is the hasher's HashTypeLength = StoreLookahead
     (setf (svref ctx +q0c-data+) data (svref ctx +q0c-buckets+) buckets
           (svref ctx +q0c-num+) num
           (svref ctx +q0c-dict+) (load-dict) (svref ctx +q0c-dhash+) (c-dict-hash)
-          (svref ctx +q0c-dlen+) +c-dict-len-info+)
+          (svref ctx +q0c-dlen+) +c-dict-len-info+
+          (svref ctx +q0c-prevpos+) prevpos)
     ;; C's limits: loop while pos + HashTypeLength < n, store_end =
     ;; n - StoreLookahead + 1, random-heuristics jumps stop at
     ;; n - max(lookahead - 1, 4) / n - max(lookahead - 1, 2)
@@ -4129,6 +4568,15 @@ insert) is added here.  Same commands, same (values CMDS USED)."
       ;; (values CMDS USED): only CMDS[0..USED) is this input's commands.
       (values cmds (* 5 ncmd)))))
 
+(defvar *plain-call* nil
+  "True inside a plain COMPRESS / COMPRESS-INTO call (not a MAKE-COMPRESSOR
+closure): pool entries over +SPARE-MAX-ENTRY-BYTES+ do not survive it.")
+;; H5's chain form (same output, O(n) memory) instead of a ring table that
+;; would be allocated just for this call: plain calls at q7-q9 (8-32 MiB
+;; rings, not kept) on inputs up to 128 KiB.  A pooled ring is faster from
+;; ~4 KiB on (the chain walk chases pointers: 0.5-0.9x at 64-512 KiB).
+(defconstant +h5-chain-max+ 131072)
+
 ;; C's H6 (hash_longest_match64_inc.h) for q5-q9 on >= 1 MiB inputs with
 ;; lgwin >= 19, and H5 (hash_longest_match_inc.h, HASH-BYTES 4) below 1 MiB
 ;; (ChooseHasher): 2^BUCKET-BITS keys, a ring of 2^BLOCK-BITS candidates
@@ -4155,7 +4603,8 @@ insert) is added here.  Same commands, same (values CMDS USED)."
          ;; the assembly matcher of this hasher and quality (q = block bits + 1)
          (asm (intern (format nil "%ASM-~A-Q~D" (if (= hash-bytes 5) "H6" "H5")
                               (1+ block-bits))
-                      "CL-BROTLI.LISP")))
+                      "CL-BROTLI.LISP"))
+         (asm-chain (intern (format nil "%ASM-H5C-Q~D" (1+ block-bits)) "CL-BROTLI.LISP")))
     `(progn
        (defun ,sr (sap buckets num start end)
          (declare (type ptr sap)
@@ -4176,10 +4625,25 @@ insert) is added here.  Same commands, same (values CMDS USED)."
                   (optimize (speed 3) (safety 0)))
          #+cl-brotli-x86-64
          (return-from ,name
-           (%asm-h6-drive data window ,block-bits
-                          (pooled-u32 ,bkey ,bcount nil)
-                          (lambda (st ctx) (,asm st ctx))
-                          ,htl))
+           ,(if (= hash-bytes 4)
+                ;; H5: chain form for small inputs (same candidates, O(n)
+                ;; memory instead of the 1-32 MiB ring table)
+                `(if (and *plain-call*
+                          ,(> (* 4 bcount) (* 4 1048576))
+                          (<= (length data) +h5-chain-max+))
+                     (%asm-h6-drive data window ,block-bits
+                                    (pooled-u32 :h5-head ,(ash 1 bucket-bits) nil)
+                                    (lambda (st ctx) (,asm-chain st ctx))
+                                    ,htl
+                                    (pooled-u32 :h5-prevpos (length data) nil))
+                     (%asm-h6-drive data window ,block-bits
+                                    (pooled-u32 ,bkey ,bcount nil)
+                                    (lambda (st ctx) (,asm st ctx))
+                                    ,htl))
+                `(%asm-h6-drive data window ,block-bits
+                                (pooled-u32 ,bkey ,bcount nil)
+                                (lambda (st ctx) (,asm st ctx))
+                                ,htl)))
          (let* ((n (length data))
                 (buckets (pooled-u32 ,bkey ,bcount nil))
                 (num (pooled-u32 :h6-num 32768 0))
@@ -4498,12 +4962,20 @@ once (constant, shared: never handed to the arena)."
   (if (etree-single et)
       (make-etree :single (aref +q0-cmd-map+ (etree-single et)))
       (let ((full (arena-fixnums 704))
-            (fl (etree-lengths et)))
+            (fl (etree-lengths et))
+            (syms (make-array 64 :element-type 'fixnum))
+            (k 0))
+        (declare (type (simple-array fixnum (*)) full fl) (type fixnum k)
+                 (dynamic-extent syms))
         (dotimes (c 64)
           (let ((d (aref fl c)))
             (when (plusp d)
-              (setf (aref full (aref +q0-cmd-map+ c)) d))))
-        (make-fixed-etree full 704))))
+              (setf (aref full (aref +q0-cmd-map+ c)) d
+                    (aref syms k) (aref +q0-cmd-map+ c))
+              (incf k))))
+        ;; codes and the used-symbol list from the <= 64 used symbols
+        (multiple-value-bind (rc nz) (%leaf-rcodes full syms k 704)
+          (make-etree :lengths full :rcodes rc :nz nz)))))
 
 (declaim (inline q0-insert-len q0-copy-len q0-copy-last-len q0-distance))
 (defun q0-insert-len (insert)
@@ -4743,10 +5215,10 @@ their extra bits, distance codes 0..63."
           (dist (u64s 64)))
       (dotimes (c 64)
         (let ((m (aref +q0-cmd-map+ c)))
-          (setf (aref cmd c) (logior (ash (aref cmd-rc m) 8) (aref cmd-ln m)
+          (setf (aref cmd c) (logior (ash (the (unsigned-byte 16) (aref cmd-rc m)) 8) (the (unsigned-byte 8) (aref cmd-ln m))
                                      (if (>= m 128) 128 0)))))
       (dotimes (c 64)
-        (setf (aref dist c) (logior (ash (aref dist-rc c) 8) (aref dist-ln c))))
+        (setf (aref dist c) (logior (ash (the (unsigned-byte 16) (aref dist-rc c)) 8) (the (unsigned-byte 8) (aref dist-ln c)))))
       (flet ((combine (cc e nb)
                (let* ((w (aref cmd cc)) (len (logand w 127)))
                  (logior (ash (logior (ash w -8) (ash e len)) 8)
@@ -4789,13 +5261,13 @@ chunks.  Returns the final LIT-START and LAST-DIST."
            (type (simple-array fixnum (*)) lit-rc lit-ln cmd-rc cmd-ln dist-rc dist-ln)
            (optimize (speed 3) (safety 0)))
   (destructuring-bind (cmd ins copy clast dist) (%q0-luts cmd-rc cmd-ln dist-rc dist-ln)
-    (let ((lit (make-array 256 :element-type '(unsigned-byte 64) :initial-element 0))
+    (let ((lit (arena-u64s 256))
           (st (arena-u64s +q0-st-size+))
           (ctx (arena-svec +q0-ctx-size+)))
       (declare (type (simple-array (unsigned-byte 64) (*)) lit st) (type simple-vector ctx))
       (unless lit-single
         (dotimes (c 256)
-          (setf (aref lit c) (logior (ash (aref lit-rc c) 8) (aref lit-ln c)))))
+          (setf (aref lit c) (logior (ash (the (unsigned-byte 16) (aref lit-rc c)) 8) (the (unsigned-byte 8) (aref lit-ln c))))))
       (setf (svref ctx +q0c-data+) data (svref ctx +q0c-table+) table
             (svref ctx +q0c-litlut+) lit (svref ctx +q0c-cmdlut+) cmd
             (svref ctx +q0c-inslut+) ins (svref ctx +q0c-copylut+) copy
@@ -4808,11 +5280,13 @@ chunks.  Returns the final LIT-START and LAST-DIST."
             (aref st +q0-back+) back (aref st +q0-n8+) (- n 8))
       (loop
         (let* ((at (if (= (aref st +q0-mode+) 1) (aref st +q0-next-ip+) (aref st +q0-p+)))
-               (chunk-end (+ at 65536))
+               (chunk-end (min (1+ n) (+ at 65536)))
                (lit-start (aref st +q0-lit-start+)))
           (declare (type fixnum at chunk-end lit-start))
           ;; at most 2 bytes per literal and 13 per command (>= k input
-          ;; bytes each), 8 bytes past the last store
+          ;; bytes each), 8 bytes past the last store.  The chunk stops
+          ;; past the input's end (no position reaches N + 1): a 4 KiB
+          ;; input reserved 5 x 64 KiB of output - a grown buffer per call
           (b:w-ensure w (+ 1024 (* 5 (- chunk-end lit-start))))
           (%bwr-settle w)
           (setf (aref st +q0-chunk-end+) chunk-end
@@ -4888,7 +5362,7 @@ chunks.  Returns the final LIT-START and NC (the records) and CV."
             (aref st +q0-c39flag+) (if (>= (aref +q0-cmd-map+ 39) 128) 128 0))
       (loop
         (let* ((at (if (= (aref st +q0-mode+) 1) (aref st +q0-next-ip+) (aref st +q0-p+)))
-               (chunk-end (+ at 65536))
+               (chunk-end (min (1+ bend) (+ at 65536)))
                (need (* 4 (+ (aref st +q0-nc+) 16
                              (floor (- chunk-end (aref st +q0-lit-start+)) k)))))
           (declare (type fixnum at chunk-end need))
@@ -4920,7 +5394,7 @@ chunks.  Returns the final LIT-START and NC (the records) and CV."
          (hmask (1- (ash 1 table-bits)))
          ;; C GetHashTable: zeroed (a fresh entry is a candidate at 0)
          (table (let ((v (pooled-u32 :frag1-table #.(ash 1 15) nil)))
-                  (fill v 0 :end (ash 1 table-bits))
+                  (byte-fill-u32 v 0 0 (ash 1 table-bits))
                   v))
          (litf (%sample-lit-histogram data n))
          (cmdf (make-array 64 :element-type 'fixnum :initial-element 0))
@@ -4961,7 +5435,14 @@ chunks.  Returns the final LIT-START and NC (the records) and CV."
     ;; codes - and the header is written before the scan; the scan then emits
     ;; directly into W.
     (progn
-      (setf lit-1p (build-etree litf 256 15))
+      ;; header: NBLTYPES 1/1/1, NPOSTFIX, NDIRECT, mode, NTREESL, NTREESD
+      ;; + literal (C's fast build-and-store), command, distance codes
+      (b:wbits w 0 1) (b:wbits w 0 1) (b:wbits w 0 1)
+      (b:wbits w 0 2)
+      (b:wbits w 0 4)
+      (b:wbits w 0 2)
+      (b:wbits w 0 1) (b:wbits w 0 1)
+      (setf lit-1p (build-and-store-fast-etree w litf 8))
       (multiple-value-setq (cmd-1p dist-1p) (q0-default-etrees))
       (setf lit-rc-1p (or (etree-rcodes lit-1p) +empty-fixnums+)
             lit-ln-1p (or (etree-lengths lit-1p) +empty-fixnums+)
@@ -4972,14 +5453,6 @@ chunks.  Returns the final LIT-START and NC (the records) and CV."
             dist-rc-1p (or (etree-rcodes dist-1p) +empty-fixnums+)
             dist-ln-1p (or (etree-lengths dist-1p) +empty-fixnums+)
             dist-1p-single (etree-single dist-1p))
-      ;; header: NBLTYPES 1/1/1, NPOSTFIX, NDIRECT, mode, NTREESL, NTREESD
-      ;; + literal, command, distance codes (write-fast-block-body's shape)
-      (b:wbits w 0 1) (b:wbits w 0 1) (b:wbits w 0 1)
-      (b:wbits w 0 2)
-      (b:wbits w 0 4)
-      (b:wbits w 0 2)
-      (b:wbits w 0 1) (b:wbits w 0 1)
-      (write-etree w lit-1p 256)
       (let ((code +q0-default-code-bytes+))
         (dotimes (i 56) (b:wbits w (aref code i) 8))))
     (labels ((hash (i)
@@ -5372,7 +5845,7 @@ the window bits."
          (cv (pooled-u32 :frag2-cv (* 4 (max 4096 (ash (min n 131072) -4))) nil)))
     (declare (type fixnum n tbits k)
              (type (simple-array (unsigned-byte 32) (*)) table cv))
-    (fill table 0 :end (ash 1 tbits))       ; C GetHashTable: memset 0
+    (byte-fill-u32 table 0 0 (ash 1 tbits))       ; C GetHashTable: memset 0
     (with-ptrs ((sap data))
       (loop for start of-type fixnum from 0 below n by 131072 do
         (let* ((bend (min n (+ start 131072)))
@@ -5472,6 +5945,11 @@ compression ratio for encoder throughput."
                  use-dict dict-limit base-pos max-chain lazy skip-match
                  insert-interior score-p checks bt))))))
 
+(defvar *q2-static-codes* nil)
+(defvar *triv-static-words* nil
+  "(RCODES . WORDS) for the q2 static command and distance codes: their
+%ASM-TRIV-EMIT-DRIVE tables, built once (Q2-STATIC-ETREES fills it).")
+
 ;;; A "trivial" entropy path for q2-q4: one literal/command/distance tree,
 ;;; no context maps, no block splits.  Unlike PLAN-COMMANDS it does not
 ;;; allocate or write a 10-fixnum record per command; the code values are
@@ -5501,7 +5979,9 @@ advanced as the second pass would advance it."
   (destructuring-bind (inslc cpylc insbase insbits cpybase cpybits cmdsym) +triv-tables+
     (let ((st (arena-u64s +q0-st-size+))
           (ctx (arena-svec +q0-ctx-size+))
-          (lit4 (make-array 1024 :element-type '(unsigned-byte 64) :initial-element 0)))
+          ;; four literal-count lanes (arena: an 8 KiB zeroed heap vector
+          ;; per call cost ~1 us of GC and fill)
+          (lit4 (arena-u64s 1024)))
       (declare (type (simple-array (unsigned-byte 64) (*)) st lit4) (type simple-vector ctx))
       (setf (svref ctx +q0c-lit4+) lit4)
       (setf (svref ctx +q0c-data+) data (svref ctx +q0c-cmds+) cmds
@@ -5515,9 +5995,13 @@ advanced as the second pass would advance it."
             (aref st +q0-ring2+) (aref rb 2) (aref st +q0-ring3+) (aref rb 3)
             (aref st +q0-ringidx+) (aref rb 4))
       (%asm-triv-plan st ctx)
+      ;; lane counts are < 2^32 (typed: untyped u64 sums were generic
+      ;; additions with bignum checks, 512 per call)
       (dotimes (b 256)
-        (incf (aref litf b) (the fixnum (+ (aref lit4 b) (aref lit4 (+ 256 b))
-                                            (aref lit4 (+ 512 b)) (aref lit4 (+ 768 b))))))
+        (incf (aref litf b) (+ (the (unsigned-byte 32) (aref lit4 b))
+                               (the (unsigned-byte 32) (aref lit4 (+ 256 b)))
+                               (the (unsigned-byte 32) (aref lit4 (+ 512 b)))
+                               (the (unsigned-byte 32) (aref lit4 (+ 768 b))))))
       (setf (aref rb 0) (aref st +q0-ring0+) (aref rb 1) (aref st +q0-ring1+)
             (aref rb 2) (aref st +q0-ring2+) (aref rb 3) (aref st +q0-ring3+)
             (aref rb 4) (aref st +q0-ringidx+)))))
@@ -5529,11 +6013,19 @@ advanced as the second pass would advance it."
            (type (simple-array fixnum (*)) cmds lit-rc lit-ln cmd-rc cmd-ln dist-rc dist-ln)
            (type fixnum nc) (optimize (speed 3) (safety 0)))
   (flet ((words (rc ln n)
+           ;; code << 8 | length per symbol.  Codes are < 2^15 (typed: an
+           ;; untyped (ASH code 8) made every entry a generic LOGIOR -
+           ;; a quarter of a 256-byte q2 call).  The q2 static codes'
+           ;; tables are built once (*TRIV-STATIC-WORDS*).
            (declare (type (simple-array fixnum (*)) rc ln) (type fixnum n))
-           (let ((v (arena-u64s n)))
-             (when (plusp (length ln))
-               (dotimes (i n) (setf (aref v i) (logior (ash (aref rc i) 8) (aref ln i)))))
-             v)))
+           (or (and *q2-static-codes* (cdr (assoc rc *triv-static-words* :test #'eq)))
+               (let ((v (arena-u64s n)))
+                 (when (plusp (length ln))
+                   (dotimes (i n)
+                     (setf (aref v i)
+                           (logior (ash (the (unsigned-byte 16) (aref rc i)) 8)
+                                   (the (unsigned-byte 8) (aref ln i))))))
+                 v))))
     (let ((st (arena-u64s +q0-st-size+))
           (ctx (arena-svec +q0-ctx-size+)))
       (declare (type (simple-array (unsigned-byte 64) (*)) st) (type simple-vector ctx))
@@ -5572,7 +6064,6 @@ advanced as the second pass would advance it."
 ;; 0..447 9 bits, 448..703 11 bits; kStaticDistanceCodeDepth: 6 bits),
 ;; stored as C's constant bit strings - no command or distance tree is
 ;; built.  Bound true by %COMPRESS-BYTES for q2.
-(defvar *q2-static-codes* nil)
 (defvar *q2-static-etrees* nil)
 (defun q2-static-etrees ()
   (let ((c *q2-static-etrees*))
@@ -5584,6 +6075,15 @@ advanced as the second pass would advance it."
           (let* ((*arena* nil)
                  (cmd (make-fixed-etree cl 704))
                  (dist (make-fixed-etree dl 64)))
+            (flet ((words (et n)
+                     (let ((v (make-array n :element-type '(unsigned-byte 64)))
+                           (rc (etree-rcodes et)) (ln (etree-lengths et)))
+                       (declare (type (simple-array fixnum (*)) rc ln))
+                       (dotimes (i n v)
+                         (setf (aref v i) (logior (ash (the (unsigned-byte 16) (aref rc i)) 8) (the (unsigned-byte 8) (aref ln i))))))))
+              (setf *triv-static-words*
+                    (list (cons (etree-rcodes cmd) (words cmd 704))
+                          (cons (etree-rcodes dist) (words dist 64)))))
             (setf *q2-static-etrees* (cons cmd dist))
             (values cmd dist))))))
 (defun write-q2-static-trees (w)
@@ -5603,9 +6103,9 @@ advanced as the second pass would advance it."
            (type (simple-array fixnum (*)) rb cmds)
            (type fixnum n5)
            (optimize (speed 3) (safety 0)))
-  (let* ((litf (make-array 256 :element-type 'fixnum :initial-element 0))
-         (cmdf (make-array 704 :element-type 'fixnum :initial-element 0))
-         (distf (make-array 64 :element-type 'fixnum :initial-element 0))
+  (let* ((litf (arena-fixnums 256))
+         (cmdf (arena-fixnums 704))
+         (distf (arena-fixnums 64))
          (probe-rb (copy-seq rb))
          ;; LENGTH-CODE's five table args are DEFPARAMETERS; bound once
          ;; (4 calls per command across the two passes re-read 20 globals
@@ -5822,20 +6322,20 @@ whenever it stops for room."
            (type (simple-array fixnum (*)) lit-rc lit-ln cmd-rc cmd-ln dist-rc dist-ln)
            (optimize (speed 3) (safety 0)))
   (destructuring-bind (insx copyx clastx) +fast-x-luts+
-    (let ((lit (make-array 256 :element-type '(unsigned-byte 64) :initial-element 0))
-          (cmd (make-array 64 :element-type '(unsigned-byte 64) :initial-element 0))
-          (dist (make-array 64 :element-type '(unsigned-byte 64) :initial-element 0))
+    (let ((lit (arena-u64s 256))
+          (cmd (arena-u64s 64))
+          (dist (arena-u64s 64))
           (st (arena-u64s +q0-st-size+))
           (ctx (arena-svec +q0-ctx-size+)))
       (declare (type (simple-array (unsigned-byte 64) (*)) lit cmd dist st)
                (type simple-vector ctx))
       (unless lit-single
         (dotimes (c 256)
-          (setf (aref lit c) (logior (ash (aref lit-rc c) 8) (aref lit-ln c)))))
+          (setf (aref lit c) (logior (ash (the (unsigned-byte 16) (aref lit-rc c)) 8) (the (unsigned-byte 8) (aref lit-ln c))))))
       (dotimes (c 64)
         (let ((m (aref +q0-cmd-map+ c)))
-          (setf (aref cmd c) (logior (ash (aref cmd-rc m) 8) (aref cmd-ln m))
-                (aref dist c) (logior (ash (aref dist-rc c) 8) (aref dist-ln c)))))
+          (setf (aref cmd c) (logior (ash (the (unsigned-byte 16) (aref cmd-rc m)) 8) (the (unsigned-byte 8) (aref cmd-ln m)))
+                (aref dist c) (logior (ash (the (unsigned-byte 16) (aref dist-rc c)) 8) (the (unsigned-byte 8) (aref dist-ln c))))))
       (setf (svref ctx +q0c-data+) data (svref ctx +q0c-cv+) cv
             (svref ctx +q0c-litlut+) lit (svref ctx +q0c-cmdlut+) cmd
             (svref ctx +q0c-distlut+) dist (svref ctx +q0c-insx+) insx
@@ -5963,9 +6463,18 @@ histograms.  The MLEN header must already have been written."
            (type (simple-array fixnum (256)) litf)
            (type (simple-array fixnum (64)) cmdf distf)
            (optimize (speed 3) (safety 0)))
-  (let* ((lit (build-etree litf 256 15))
-           (cmd-et (fast-cmd-etree (build-etree cmdf 64 15)))
+  (let* ((cmd-et (fast-cmd-etree (build-etree cmdf 64 15)))
            (dist-et (build-etree distf 64 14))
+           ;; NBLTYPES 1/1/1, NPOSTFIX=0, NDIRECT=0, context mode 0,
+           ;; NTREESL=1, NTREESD=1; then literal (C's fast build-and-store),
+           ;; command, distance codes
+           (lit (progn
+                  (b:wbits w 0 1) (b:wbits w 0 1) (b:wbits w 0 1)
+                  (b:wbits w 0 2)
+                  (b:wbits w 0 4)
+                  (b:wbits w 0 2)
+                  (b:wbits w 0 1) (b:wbits w 0 1)
+                  (build-and-store-fast-etree w litf 8)))
            (lit-single (etree-single lit))
            (cmd-single (etree-single cmd-et))
            (dist-single (etree-single dist-et))
@@ -5980,14 +6489,6 @@ histograms.  The MLEN header must already have been written."
       (declare (type fixnum last-dist slack)
                (type (simple-array fixnum (*))
                      lit-rc lit-ln cmd-rc cmd-ln cmd-map dist-rc dist-ln))
-      ;; NBLTYPES 1/1/1, NPOSTFIX=0, NDIRECT=0, context mode 0,
-      ;; NTREESL=1, NTREESD=1; then literal, command, distance codes.
-      (b:wbits w 0 1) (b:wbits w 0 1) (b:wbits w 0 1)
-      (b:wbits w 0 2)
-      (b:wbits w 0 4)
-      (b:wbits w 0 2)
-      (b:wbits w 0 1) (b:wbits w 0 1)
-      (write-etree w lit 256)
       (write-etree w cmd-et 704)
       (write-etree w dist-et 64)
       #+cl-brotli-x86-64
@@ -6111,10 +6612,11 @@ per command."
                    (literal-contexts data quality))))
          (lit-k (first ctx))
          (lit-cmap (second ctx))
-         (litfreq (make-array (* lit-k 256) :element-type 'fixnum
-                                            :initial-element 0))
-         (cmdfreq (make-array 704 :element-type 'fixnum :initial-element 0))
-         (distfreq (make-array 64 :element-type 'fixnum :initial-element 0))
+         ;; per-call tallies from the arena (up to 26 KiB of zeroed heap
+         ;; per call otherwise)
+         (litfreq (arena-fixnums (* lit-k 256)))
+         (cmdfreq (arena-fixnums 704))
+         (distfreq (arena-fixnums 64))
          ;; LENGTH-CODE is inline, but its five table args are
          ;; DEFPARAMETERS: every call re-reads them from global cells.
          ;; Bound once here (the zopfli path already does this).
@@ -6419,62 +6921,107 @@ the parse's literals, merged greedily while a merge saves estimated bits
                  (cid (logior (aref lut (+ lb p1)) (aref lut (+ lb 256 p2)))))
             (declare (type fixnum p1 p2 cid))
             (incf (aref h (+ (* cid 256) (aref data i))))))))
-    ;; clusters: OWNER[c] = representative context, COST[c] for representatives
+    ;; clusters: OWNER[c] = representative context, COST[c] for
+    ;; representatives.  Per context also TOTAL, SLOG = sum c log2 c, NNZ
+    ;; and a 256-bit mask of the nonzero bins: a merged cost then only
+    ;; visits the bins both histograms use (sparse on small inputs, where
+    ;; the old dense 2 x 256-bin pass per pair cost ~2 ms per call).
     (let ((owner (make-array 64 :element-type 'fixnum))
           (cost (make-array 64 :element-type 'double-float))
           (alive (make-array 64 :element-type 'bit :initial-element 0))
-          (tmp (make-array 256 :element-type 'fixnum)))
-      (declare (type (simple-array fixnum (64)) owner)
-               (type (simple-array double-float (64)) cost)
+          (total (make-array 64 :element-type 'fixnum :initial-element 0))
+          (slog (make-array 64 :element-type 'double-float :initial-element 0.0d0))
+          (nnz (make-array 64 :element-type 'fixnum :initial-element 0))
+          (mask (make-array 256 :element-type '(unsigned-byte 64) :initial-element 0))
+          (tb (the double-float *hq-tree-bits-base*))
+          (tp (the double-float *hq-tree-bits-per-symbol*)))
+      (declare (type (simple-array fixnum (64)) owner total nnz)
+               (type (simple-array double-float (64)) cost slog)
                (type (simple-array bit (64)) alive)
-               (type (simple-array fixnum (256)) tmp))
-      (dotimes (c 64)
-        (setf (aref owner c) c (aref cost c) (%histo-cost h (* c 256)))
-        (when (loop for i from (* c 256) below (* (1+ c) 256)
-                    thereis (plusp (aref h i)))
-          (setf (aref alive c) 1)))
-      (let ((gain (make-array (* 64 64) :element-type 'double-float
-                                        :initial-element 0.0d0)))
-        (declare (type (simple-array double-float (4096)) gain))
-      (flet ((merged-cost (a b)
-               (declare (type fixnum a b))
-               (dotimes (i 256)
-                 (setf (aref tmp i) (+ (aref h (+ (* a 256) i))
-                                       (aref h (+ (* b 256) i)))))
-               (%histo-cost tmp 0)))
-        ;; GAIN[a*64+b] (a < b) caches the saving of merging a and b; a
-        ;; merge only invalidates the pairs that involve the merged cluster.
-        (flet ((refresh (a b)
+               (type (simple-array (unsigned-byte 64) (256)) mask)
+               (type double-float tb tp))
+      (labels ((clog (c) (declare (type fixnum c))
+                 (if (plusp c) (* c (the double-float (%approx-log2 c))) 0.0d0))
+               (stats (c)
+                 ;; recompute TOTAL / SLOG / NNZ / MASK / COST of context C
+                 (declare (type fixnum c))
+                 (let ((tot 0) (sl 0.0d0) (nz 0))
+                   (declare (type fixnum tot nz) (type double-float sl))
+                   (dotimes (w 4) (setf (aref mask (+ (* c 4) w)) 0))
+                   (dotimes (i 256)
+                     (let ((v (aref h (+ (* c 256) i))))
+                       (declare (type fixnum v))
+                       (when (plusp v)
+                         (incf tot v) (incf nz) (incf sl (clog v))
+                         (setf (aref mask (+ (* c 4) (ash i -6)))
+                               (logior (aref mask (+ (* c 4) (ash i -6)))
+                                       (ash 1 (logand i 63)))))))
+                   (setf (aref total c) tot (aref slog c) sl (aref nnz c) nz
+                         (aref cost c) (cost-of tot sl nz))))
+               (cost-of (tot sl nz)
+                 (declare (type fixnum tot nz) (type double-float sl))
+                 (if (<= nz 1)
+                     (if (zerop nz) 0.0d0 12.0d0)
+                     (+ (- (clog tot) sl) tb (* tp nz))))
+               (merged-cost (a b)
                  (declare (type fixnum a b))
-                 (when (> a b) (rotatef a b))
-                 (setf (aref gain (+ (* a 64) b))
-                       (- (+ (aref cost a) (aref cost b)) (merged-cost a b)))))
-          (dotimes (a 64)
-            (when (= 1 (aref alive a))
-              (loop for b of-type fixnum from (1+ a) below 64 do
-                (when (= 1 (aref alive b)) (refresh a b)))))
-        (loop
-          (let ((best-gain 0.0d0) (ba -1) (bb -1))
-            (declare (type double-float best-gain) (type fixnum ba bb))
+                 (let ((sl (+ (aref slog a) (aref slog b))) (common 0))
+                   (declare (type double-float sl) (type fixnum common))
+                   (dotimes (w 4)
+                     (let ((m (logand (aref mask (+ (* a 4) w)) (aref mask (+ (* b 4) w)))))
+                       (declare (type (unsigned-byte 64) m))
+                       (loop until (zerop m) do
+                         (let* ((bit (1- (integer-length (logand m (- m)))))
+                                (s (+ (* w 64) bit))
+                                (ca (aref h (+ (* a 256) s)))
+                                (cb (aref h (+ (* b 256) s))))
+                           (declare (type fixnum bit s ca cb))
+                           (incf common)
+                           (incf sl (- (clog (+ ca cb)) (clog ca) (clog cb)))
+                           (setf m (logand m (1- m)))))))
+                   (cost-of (+ (aref total a) (aref total b)) sl
+                            (- (+ (aref nnz a) (aref nnz b)) common)))))
+        (dotimes (c 64)
+          (setf (aref owner c) c)
+          (stats c)
+          (when (plusp (aref nnz c))
+            (setf (aref alive c) 1)))
+        (let ((gain (make-array (* 64 64) :element-type 'double-float
+                                          :initial-element 0.0d0)))
+          (declare (type (simple-array double-float (4096)) gain))
+          ;; GAIN[a*64+b] (a < b) caches the saving of merging a and b; a
+          ;; merge only invalidates the pairs that involve the merged cluster.
+          (flet ((refresh (a b)
+                   (declare (type fixnum a b))
+                   (when (> a b) (rotatef a b))
+                   (setf (aref gain (+ (* a 64) b))
+                         (- (+ (aref cost a) (aref cost b)) (merged-cost a b)))))
             (dotimes (a 64)
               (when (= 1 (aref alive a))
                 (loop for b of-type fixnum from (1+ a) below 64 do
-                  (when (= 1 (aref alive b))
-                    (let ((g (aref gain (+ (* a 64) b))))
-                      (declare (type double-float g))
-                      (when (> g best-gain)
-                        (setf best-gain g ba a bb b)))))))
-            (when (< ba 0) (return))
-            ;; merge BB into BA
-            (dotimes (i 256)
-              (incf (aref h (+ (* ba 256) i)) (aref h (+ (* bb 256) i)))
-              (setf (aref h (+ (* bb 256) i)) 0))
-            (setf (aref cost ba) (%histo-cost h (* ba 256))
-                  (aref alive bb) 0)
-            (dotimes (c 64)
-              (when (and (= 1 (aref alive c)) (/= c ba)) (refresh ba c)))
-            (dotimes (c 64)
-              (when (= (aref owner c) bb) (setf (aref owner c) ba))))))))
+                  (when (= 1 (aref alive b)) (refresh a b)))))
+            (loop
+              (let ((best-gain 0.0d0) (ba -1) (bb -1))
+                (declare (type double-float best-gain) (type fixnum ba bb))
+                (dotimes (a 64)
+                  (when (= 1 (aref alive a))
+                    (loop for b of-type fixnum from (1+ a) below 64 do
+                      (when (= 1 (aref alive b))
+                        (let ((g (aref gain (+ (* a 64) b))))
+                          (declare (type double-float g))
+                          (when (> g best-gain)
+                            (setf best-gain g ba a bb b)))))))
+                (when (< ba 0) (return))
+                ;; merge BB into BA
+                (dotimes (i 256)
+                  (incf (aref h (+ (* ba 256) i)) (aref h (+ (* bb 256) i)))
+                  (setf (aref h (+ (* bb 256) i)) 0))
+                (stats ba)
+                (setf (aref alive bb) 0)
+                (dotimes (c 64)
+                  (when (and (= 1 (aref alive c)) (/= c ba)) (refresh ba c)))
+                (dotimes (c 64)
+                  (when (= (aref owner c) bb) (setf (aref owner c) ba))))))))
       ;; dense cluster ids in first-use order; empty contexts join cluster 0
       (let ((ids (make-array 64 :element-type 'fixnum :initial-element -1))
             (cmap (make-array 64 :initial-element 0))
@@ -6695,6 +7242,18 @@ NTYPES); LENGTHS are in symbol units and may overshoot N at the tail
            (type fixnum n alphabet min-block)
            (type double-float threshold)
            (optimize (speed 3) (safety 0)))
+  (when (< n min-block)
+    ;; fewer symbols than one decision's worth: the splitter can only
+    ;; close one first block (length MIN-BLOCK) of type 0 - just its
+    ;; histogram, without the splitter's per-call alphabet-sized arrays
+    (let ((h (arena-fixnums alphabet)) (histos (make-array 1)))
+      (declare (type (simple-array fixnum (*)) h))
+      (dotimes (i n) (incf (aref h (aref syms i))))
+      (setf (svref histos 0) h)
+      (return-from split-block
+        (values (make-array 1 :element-type '(unsigned-byte 8) :initial-element 0)
+                (make-array 1 :element-type 'fixnum :initial-element min-block)
+                1 1 histos))))
   (%greedy-splitter-body n alphabet min-block threshold
     (dotimes (i n)
       (declare (type fixnum i))
@@ -7424,10 +7983,10 @@ compresses extremely well."
          ;; typed fixnum: the untyped simple-vector made every one of the
          ;; 16K sample iterations do a boxed read + boxed write (this runs
          ;; on EVERY compress call); same counting, no boxing
-         (seen (make-array 256 :element-type 'fixnum :initial-element 0))
          (unique 0) (maxfreq 0))
-    (declare (type (simple-array fixnum (256)) seen))
-    (when (< sample 4) (return-from incompressible-p nil))
+    (declare (type fixnum n sample unique maxfreq))
+    ;; the verdict needs more than 230 distinct byte values
+    (when (<= sample 230) (return-from incompressible-p nil))
     ;; Fast exit for the common case: 16+ repeated 4-byte groups among the
     ;; first KiB's 256 already mean compressible (a 2^15-bit set holds 256
     ;; random keys with ~1 false repeat).  Only a NIL can come early, and
@@ -7451,9 +8010,9 @@ compresses extremely well."
                 (setf (aref bits byte) (logior (aref bits byte) mask)))))))
     ;; counts in four interleaved lanes (a run of one byte value made each
     ;; increment wait on the last), then UNIQUE and MAXFREQ from the sums
-    (let ((lanes (make-array 1024 :element-type 'fixnum :initial-element 0))
+    (let ((lanes (make-array 1024 :element-type '(unsigned-byte 32) :initial-element 0))
           (i 0))
-      (declare (type (simple-array fixnum (1024)) lanes) (type fixnum i)
+      (declare (type (simple-array (unsigned-byte 32) (1024)) lanes) (type fixnum i)
                (dynamic-extent lanes))
       (loop while (<= (+ i 4) sample)
             do (incf (aref lanes (aref data i)))
@@ -7466,11 +8025,10 @@ compresses extremely well."
         (let ((c (+ (aref lanes b) (aref lanes (+ 256 b))
                     (aref lanes (+ 512 b)) (aref lanes (+ 768 b)))))
           (declare (type fixnum c))
-          (setf (aref seen b) c)
           (when (plusp c) (incf unique))
           (when (> c maxfreq) (setf maxfreq c)))))
     (and (> unique 230)
-         (< maxfreq (/ sample 10))
+         (< (* 10 maxfreq) sample)
          ;; A 2^21-bit hashed set: equal 4-byte keys collide exactly, and
          ;; the false-collision rate for 16K keys is ~64, below the
          ;; acceptance threshold.  Far cheaper than an EQL hash table.
@@ -7480,7 +8038,7 @@ compresses extremely well."
          (let ((bits (make-array (ash 1 16) :element-type '(unsigned-byte 8)
                                  :initial-element 0))
                (duplicates 0)
-               (limit (max 16 (/ sample 100))))
+               (limit (max 16 (ceiling sample 100))))
            (declare (type (simple-array (unsigned-byte 8) (65536)) bits)
                     (type fixnum duplicates) (dynamic-extent bits))
            (loop for i from 0 below (- sample 3) by 4 do
@@ -7659,6 +8217,61 @@ returning fresh octets.  Shared by COMPRESS and COMPRESS-INTO."
               (when (< (length stored) (length best)) (setf best stored))))
           best)))
 
+;;; Plain COMPRESS / COMPRESS-INTO keep ONE spare compressor state (pool +
+;;; arena) between calls: a call takes it with an atomic swap (the slot
+;;; becomes empty), uses it privately, and puts it back - a concurrent call
+;;; finds the slot empty and works with fresh arrays, as before.  Without
+;;; it every plain call allocated its hash tables (1 KiB at q2: 67 us vs
+;;; 23 us; q5 4x; q9 60x).  Entries over +SPARE-MAX-ENTRY-BYTES+ (q7-q9's
+;;; 8-32 MiB tables, zopfli arrays of big inputs) are dropped before the
+;;; state is returned, bounding what stays allocated; MAKE-COMPRESSOR keeps
+;;; everything.  SBCL only (portable CAS); elsewhere plain calls allocate.
+(defconstant +spare-max-entry-bytes+ (* 4 1048576))
+#+sbcl (sb-ext:defglobal **spare-state** nil)
+
+(defun %take-spare-state ()
+  #+sbcl (loop (let ((s **spare-state**))
+                 (when (null s) (return nil))
+                 (when (eq (sb-ext:compare-and-swap (symbol-value '**spare-state**) s nil) s)
+                   (return s))))
+  #-sbcl nil)
+
+(defun %pool-entry-bytes (key v)
+  "Approximate bytes a pool entry keeps alive (arrays, the pooled writer,
+cons pairs of arrays, zopfli scratch keyed by input length)."
+  (typecase v
+    ((simple-array (unsigned-byte 8) (*)) (length v))
+    ((simple-array (unsigned-byte 16) (*)) (* 2 (length v)))
+    ((simple-array (unsigned-byte 32) (*)) (* 4 (length v)))
+    ((simple-array * (*)) (* 8 (length v)))
+    (b:bwr (length (b:bwr-out v)))
+    (cons (+ (%pool-entry-bytes nil (car v)) (%pool-entry-bytes nil (cdr v))))
+    (null 0)
+    (t (if (integerp key) (scratch-estimate-bytes key) most-positive-fixnum))))
+
+(defun %return-spare-state (state)
+  #+sbcl (let ((pool (car state)))
+           (maphash (lambda (k v)
+                      (when (> (%pool-entry-bytes k v) +spare-max-entry-bytes+)
+                        (remhash k pool)))
+                    pool)
+           (sb-ext:compare-and-swap (symbol-value '**spare-state**) nil state))
+  #-sbcl (progn state nil))
+
+(defmacro with-compress-state (() &body body)
+  "BODY with a compressor state bound: the caller's (inside a
+MAKE-COMPRESSOR closure), else the spare one, else a fresh one."
+  (let ((state (gensym "STATE")))
+    `(if *scratch-pool*
+         (progn ,@body)
+         (let ((,state (or (%take-spare-state)
+                           (cons (make-hash-table :test 'eql) (make-arena)))))
+           (let ((*scratch-pool* (car ,state)) (*arena* (cdr ,state))
+                 (*plain-call* t))
+             (unwind-protect (progn ,@body)
+               (arena-release (cdr ,state))
+               (%return-spare-state ,state)))))))
+
 (defun compress (input &key (quality 11))
   "Compress INPUT to a brotli stream.  QUALITY is an effort level 0..11:
 0-1 use the fast-fragment matcher, 2-4 a short greedy hash chain with the
@@ -7668,14 +8281,17 @@ entropy-coded candidates are not already smaller than the input."
   (let* ((data (b:to-octets input))
          (n (length data))
          (params (quality-params quality)))
-    (%compress-bytes data n params)))
+    (with-compress-state ()
+      (%compress-bytes data n params))))
 
 (defun make-compressor ()
   "Return a reusable compressor: a function with COMPRESS's call shape
 \(INPUT &key QUALITY) that keeps a private scratch pool for the big
 encoder arrays across calls, so steady-state compression allocates
-almost nothing and triggers no GC (plain COMPRESS re-allocates ~72
-bytes per input byte on every call).
+almost nothing and triggers no GC.  (Plain COMPRESS reuses one shared
+spare state when no other thread holds it, minus arrays over 4 MiB -
+q7-q9's hash tables, zopfli arrays of large inputs - which it allocates
+per call.)
 
 Thread safety - no locks, no implementation-specific threading code:
 the pool is captured in the closure's lexical environment and bound to
@@ -7709,6 +8325,7 @@ OUTPUT; entropy-coded inputs use a bounded temporary that is copied once."
   (let* ((data (b:to-octets input))
          (n (length data))
          (params (quality-params quality)))
+   (with-compress-state ()
     (if (or (eq (getf params :mode) :stored) (incompressible-p data))
         (let ((w (b:make-bwr-into output start end)))
           (compress-stored data :w w)
@@ -7721,4 +8338,4 @@ OUTPUT; entropy-coded inputs use a bounded temporary that is copied once."
                                   (+ start len))
                      :needed (+ start len)))
             (replace output best :start1 start)
-            (+ start len))))))
+            (+ start len)))))))

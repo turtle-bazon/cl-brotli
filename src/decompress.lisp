@@ -36,12 +36,19 @@
   (let ((s (read-huff r blen-huff))) (+ (aref +blen-base+ s) (b:rbits r (aref +blen-bits+ s)))))
 
 (defun imtf (v n)
-  (let ((mtf (make-array 256)))
+  "Inverse move-to-front of the context map V[0..N) (typed: the untyped
+version spent ~1 us per small context map in generic vector accessors)."
+  (declare (type (simple-array (unsigned-byte 8) (*)) v) (type fixnum n)
+           (optimize (speed 3) (safety 0)))
+  (let ((mtf (make-array 256 :element-type '(unsigned-byte 8))))
+    (declare (dynamic-extent mtf))
     (dotimes (i 256) (setf (aref mtf i) i))
     (dotimes (i n)
       (let* ((idx (aref v i)) (val (aref mtf idx)))
+        (declare (type (unsigned-byte 8) idx val))
         (setf (aref v i) val)
-        (loop for j from idx above 0 do (setf (aref mtf j) (aref mtf (1- j))))
+        (loop for j of-type fixnum from idx above 0
+              do (setf (aref mtf j) (aref mtf (1- j))))
         (setf (aref mtf 0) val)))))
 
 (defun read-context-map (r size ntrees)
@@ -571,7 +578,11 @@ ONCE: decode a single command (the assembly loop's fallback)."
   "A tree's parameters as the assembly loops want them: mask | root bits
 << 16."
   (declare (type huff h))
-  (logior (huff-mask h) (ash (huff-table-bits h) 16)))
+  ;; typed: as fixnums the shift could overflow, and every use was a
+  ;; generic LOGIOR with a bignum check (once per tree per meta-block)
+  (the (unsigned-byte 32)
+       (logior (the (unsigned-byte 16) (huff-mask h))
+               (ash (the (integer 0 15) (huff-table-bits h)) 16))))
 
 (defmacro with-asm-state ((st) &body body)
   `(let ((,st (make-array +st-size+ :element-type '(unsigned-byte 64) :initial-element 0)))
@@ -623,6 +634,41 @@ ONCE: decode a single command (the assembly loop's fallback)."
         (aref rb 3) (the fixnum (aref st (+ +st-ring0+ 3)))
         (aref rb 4) (the fixnum (aref st +st-ring-idx+)))
   (the fixnum (aref st +st-pos+)))
+
+(defun %asm-pad-tail (st r ctx)
+  "The assembly loops bail when fewer than 8 input bytes are readable at P -
+in a valid stream the only reason a command bails.  Point CTX[IN] at a copy
+of the input from the reader's position on, followed by 16 zero bytes, with
+P and END8 relative to it.  A valid stream never consumes a padding bit, so
+it never bails on the copy for want of input (P <= K + 7 at every refill);
+%ASM-UNPAD catches a truncated stream that did.  Returns the copy's base."
+  (declare (type (simple-array (unsigned-byte 64) (*)) st) (type b:brd r)
+           (type simple-vector ctx) (optimize (speed 3) (safety 0)))
+  (let* ((base (b:brd-pos r))
+         (k (max 0 (- (b:brd-end r) base)))
+         (pad (make-array (+ k 16) :element-type '(unsigned-byte 8)
+                                   :initial-element 0)))
+    (declare (type fixnum base k))
+    (replace pad (b:brd-bytes r) :start2 base :end2 (+ base k))
+    (setf (svref ctx +ctx-in+) pad
+          (aref st +st-end8+) (+ k 8))
+    base))
+
+(declaim (inline %asm-unpad))
+(defun %asm-unpad (st r base)
+  "ST's P on the padded copy back to the input; a P past the input's end
+holds padding bits in ACC above the real ones - drop them from NB, or
+signal the end of the input if some were consumed."
+  (declare (type (simple-array (unsigned-byte 64) (*)) st) (type b:brd r)
+           (type fixnum base))
+  (let ((p (+ (the fixnum (aref st +st-p+)) base)) (end (b:brd-end r)))
+    (declare (type fixnum p end))
+    (if (> p end)
+        (let ((nb (- (the fixnum (aref st +st-nb+)) (* 8 (- p end)))))
+          (declare (type fixnum nb))
+          (when (minusp nb) (berr "end of input"))
+          (setf (aref st +st-nb+) nb (aref st +st-p+) end))
+        (setf (aref st +st-p+) p))))
 
 (defvar *asm-dict* nil)
 (defun %asm-dict ()
@@ -703,17 +749,26 @@ is decoded by the Lisp loop, one at a time."
       (setf (aref st +st-cmd-param+) (huff-param ctree)
             (aref st +st-lparam+) (huff-param ltree)
             (aref st +st-dparam+) (huff-param dtree))
-      (loop
-        (%asm-sync-in st r rb pos)
-        (%asm-simple-meta-block st ctx)
-        (setf pos (%asm-sync-out st r rb))
-        (case (aref st +st-exit+)
-          (0 (return pos))
-          (2 (setf pos (%asm-dict-word st data window)))
-          (t (setf pos (%decode-simple-meta-block-lisp
-                        r data pos target origin window rb
-                        ctree ltree dtree npostfix ndirect t))))
-        (when (or (minusp pos) (>= pos target)) (return pos))))))
+      ;; BASE: -1 on the input itself, else the offset of the padded copy
+      ;; of its tail (%ASM-PAD-TAIL) the loop runs on after a first bail
+      (let ((base -1))
+        (declare (type fixnum base))
+        (loop
+          (%asm-sync-in st r rb pos)
+          (unless (minusp base)
+            (setf (aref st +st-p+) (- (b:brd-pos r) base)))
+          (%asm-simple-meta-block st ctx)
+          (unless (minusp base) (%asm-unpad st r base))
+          (setf pos (%asm-sync-out st r rb))
+          (case (aref st +st-exit+)
+            (0 (return pos))
+            (2 (setf pos (%asm-dict-word st data window)))
+            (t (if (minusp base)
+                   (setf base (%asm-pad-tail st r ctx))
+                   (setf pos (%decode-simple-meta-block-lisp
+                              r data pos target origin window rb
+                              ctree ltree dtree npostfix ndirect t)))))
+          (when (or (minusp pos) (>= pos target)) (return pos)))))))
 
 #+cl-brotli-x86-64
 (defun %decode-general-meta-block-asm (r data pos target origin window rb
@@ -795,7 +850,7 @@ it leaves to Lisp is decoded by the Lisp loop, one at a time."
                 (aref st +st-dbl-param+) (bl-param blkD))
           (dotimes (k 26)
             (setf (aref st (+ +st-blen0+ k))
-                  (logior (aref +blen-base+ k) (ash (aref +blen-bits+ k) 32))))
+                  (logior (the (unsigned-byte 16) (aref +blen-base+ k)) (ash (the (unsigned-byte 5) (aref +blen-bits+ k)) 32))))
           (flet ((blocks-in ()
                    ;; block state Lisp -> ST, with the values derived from it
                    (let ((lt (blk-type blkL)) (it (blk-type blkI)) (dt (blk-type blkD)))
@@ -823,14 +878,26 @@ it leaves to Lisp is decoded by the Lisp loop, one at a time."
             (blocks-in)
             ;; pinned: the literal loop indexes these through raw pointers
             (sb-sys:with-pinned-objects (lit-tables +ctx-lut+)
+            (let ((base -1))
+              (declare (type fixnum base))
             (loop
               (%asm-sync-in st r rb pos)
+              (unless (minusp base)
+                (setf (aref st +st-p+) (- (b:brd-pos r) base)))
               (%asm-general-meta-block st ctx)
+              (unless (minusp base) (%asm-unpad st r base))
               (setf pos (%asm-sync-out st r rb))
               (case (aref st +st-exit+)
                 (0 (blocks-out) (return pos))
                 (2 (setf pos (%asm-dict-word st data window)))
-                (t (blocks-out)
+                (t (if (minusp base)
+                       ;; retry on the padded tail.  The bail restored the
+                       ;; block types but not the values derived from them
+                       ;; (LUTOFF, LITROW, TRIV, CMD-PARAM, DROW): recompute
+                       (progn (blocks-out) (blocks-in)
+                              (setf base (%asm-pad-tail st r ctx)))
+                       (progn
+                   (blocks-out)
                    (when (and (null lit-trees) (null single-lit-tree))
                      (setf lit-trees (make-array (length cmapl)))
                      (dotimes (i (length cmapl))
@@ -841,8 +908,8 @@ it leaves to Lisp is decoded by the Lisp loop, one at a time."
                               (or lit-trees #()) lit-tables htreei htreed cmapd
                               single-lit-tree cmd-tree dist-tree npostfix ndirect
                               postfix-mask t))
-                   (blocks-in)))
-              (when (or (minusp pos) (>= pos target)) (return pos))))))))))
+                   (blocks-in)))))
+              (when (or (minusp pos) (>= pos target)) (return pos)))))))))))
 
 (defun blk-switch-ool (r b)
   "BLK-MAYBE-SWITCH out of line, for the general loop: its inline expansion

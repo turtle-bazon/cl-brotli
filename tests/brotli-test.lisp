@@ -430,3 +430,25 @@ overlapping copies, the shapes that exercise the wide copy paths."
             (is (= 2 (length bytes)))
             (cl-brotli.lisp.bitio:rbits r 6)
             (is (= sym (cl-brotli.lisp::read-huff r h)))))))))
+
+(test decode-tail-after-block-switch
+  ;; Near the end of the input the assembly decoder retries a command on a
+  ;; zero-padded copy of the input's tail.  When the retried command had
+  ;; switched block types, the retry must start from the restored types'
+  ;; derived state (context table offset, literal row, command tree) -
+  ;; it once reused the switched-to values and decoded garbage or ran past
+  ;; the end (q5/q9 streams of ~2-4 KiB of mixed data, about half of these).
+  (let ((seed 0))
+    (flet ((rnd (n)
+             (setf seed (mod (+ (* seed 6364136223846793005) 1442695040888963407)
+                             (expt 2 64)))
+             (mod (ash seed -33) n)))
+      (loop for n from 1500 to 4000 by 100 do
+        (setf seed n)
+        (let ((v (make-array n :element-type '(unsigned-byte 8))))
+          (dotimes (i n)
+            (setf (aref v i) (if (< (rnd 10) 7)
+                                 (aref v (max 0 (- i 1 (rnd 300))))
+                                 (rnd 256))))
+          (dolist (q '(5 9))
+            (is (equalp v (cl-brotli:decompress (cl-brotli:compress v :quality q))))))))))
