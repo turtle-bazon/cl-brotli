@@ -64,22 +64,33 @@ which READ-HUFF uses to tell this case apart near the end of the input."
 ;;; were live), and the length histogram is now passed in by the reader
 ;;; that already knows it.
 
-(defun %huff-sort (lengths n offs sorted)
+(defun %huff-sort (lengths n offs sorted &optional nzs (nnz 0))
   "SORTED <- the symbols with nonzero length, by (length, symbol); OFFS
-holds each length's first index (and is advanced)."
+holds each length's first index (and is advanced).  NZS, when given, lists
+the NNZ nonzero-length symbols in increasing order (the reader collected
+them), so only those are visited - not the whole N-symbol alphabet."
   (declare (type (simple-array (unsigned-byte 8) (*)) lengths)
-           (type (integer 0 1024) n)
+           (type (integer 0 1024) n nnz)
            (type (simple-array fixnum (16)) offs)
            (type (simple-array (unsigned-byte 16) (*)) sorted)
+           (type (or null (simple-array (unsigned-byte 16) (*))) nzs)
            (optimize (speed 3) (safety 0)))
-  (dotimes (s n)
-    (let ((l (aref lengths s)))
-      (declare (type (integer 0 15) l))
-      (when (plusp l)
-        (let ((o (aref offs l)))
-          (declare (type (integer 0 1023) o))
-          (setf (aref sorted o) s
-                (aref offs l) (1+ o)))))))
+  (if nzs
+      (dotimes (k nnz)
+        (let* ((s (aref nzs k)) (l (aref lengths s)))
+          (declare (type (integer 0 15) l))
+          (let ((o (aref offs l)))
+            (declare (type (integer 0 1023) o))
+            (setf (aref sorted o) s
+                  (aref offs l) (1+ o)))))
+      (dotimes (s n)
+        (let ((l (aref lengths s)))
+          (declare (type (integer 0 15) l))
+          (when (plusp l)
+            (let ((o (aref offs l)))
+              (declare (type (integer 0 1023) o))
+              (setf (aref sorted o) s
+                    (aref offs l) (1+ o))))))))
 
 (defun %huff-root (table sorted next count tbits maxlen)
   "Root entries of the codes of up to TBITS bits, replicated.  Returns the
@@ -152,7 +163,7 @@ return the total table size; else fill it (symbols from SORTED[K])."
           (incf code))))
     end))
 
-(defun build-huff (lengths n &optional count)
+(defun build-huff (lengths n &optional count nzs (nnz 0))
   "Canonical Huffman from code LENGTHS[0:n-1] (0 = absent), C's table layout
 (BrotliBuildHuffmanTable): one (unsigned-byte 16) array holding a root table
 of 2^TABLE-BITS entries, then one second-level table per root prefix of the
@@ -165,6 +176,8 @@ written."
   (declare (type (simple-array (unsigned-byte 8) (*)) lengths)
            (type (integer 0 1024) n)
            (type (or null (simple-array fixnum (16))) count)
+           (type (or null (simple-array (unsigned-byte 16) (*))) nzs)
+           (type (integer 0 1024) nnz)
            (optimize (speed 3) (safety 0)))
   (let ((own (make-array (1+ +max-bits+) :element-type 'fixnum :initial-element 0)))
     (declare (dynamic-extent own))
@@ -210,7 +223,7 @@ written."
                 (aref next bits) code
                 (aref offs bits) o)
           (incf o (aref count bits))))
-      (%huff-sort lengths n offs sorted)
+      (%huff-sort lengths n offs sorted nzs nnz)
       (let* ((total (if (> maxlen table-bits)
                         (%huff-long nil sorted next count table-bits maxlen 0)
                         (ash 1 table-bits))))
@@ -249,19 +262,36 @@ written."
   "Fewer bits remain than READ-HUFF's lookup needs.  A code of length L <=
 K (the K < TABLE-BITS remaining bits) is replicated over every root index
 whose low L bits are its bits, so the zero-padded index of the remaining
-bits finds it; anything longer means the stream ends inside a code."
+bits finds it.  The same holds one level down: a long code whose root
+entry points to a subtable is replicated over the subtable indexes that
+share its low bits, so with fewer bits left than the subtable's full width
+the zero-padded index of what remains still finds it (C's
+BrotliSafeReadSymbol: a stream may legitimately end right after such a
+code).  Anything longer means the stream ends inside a code."
   (declare (type huff h) (optimize (speed 1) (safety 1)))
   (let* ((table (huff-table h))
          (tb (huff-table-bits h))
-         (k (min (b:bits-available r) tb)))
+         (avail (b:bits-available r))
+         (k (min avail tb)))
     (declare (type (simple-array (unsigned-byte 16) (*)) table)
-             (type (integer 0 10) tb k))
+             (type (integer 0 10) tb k) (type fixnum avail))
     (let* ((entry (aref table (b:peek-bits r k)))
            (len (logand entry 15)))
       (declare (type (unsigned-byte 16) entry) (type (integer 0 15) len))
       (when (and (plusp len) (<= len k))
         (consume-bits r len)
         (return-from read-huff-slow (ash entry -4)))
+      (when (and (> len tb) (> avail tb))
+        ;; subtable of width LEN - TB; K2 of its bits remain
+        (let* ((k2 (min (- avail tb) (- len tb)))
+               (idx (ash (b:peek-bits r (+ tb k2)) (- tb)))
+               (entry2 (aref table (+ (ash entry -4) idx)))
+               (len2 (logand entry2 15)))
+          (declare (type fixnum k2 idx) (type (unsigned-byte 16) entry2)
+                   (type (integer 0 15) len2))
+          (when (and (plusp len2) (<= len2 k2))
+            (consume-bits r (+ tb len2))
+            (return-from read-huff-slow (ash entry2 -4)))))
       ;; truncated: let the reader report the end of its input
       (b:rbits r (min 24 (1+ (b:bits-available r))))
       (berr "invalid prefix code"))))
@@ -520,21 +550,29 @@ refill loop and a +WIDE-MASKS+ symbol-value fetch to every call site)."
                                   :initial-element 0))
           (symbol 0) (prev-code-len 8) (repeat 0) (repeat-code-len 0) (space 32768)
           ;; length histogram for BUILD-HUFF (it would count them again)
-          (count (make-array (1+ +max-bits+) :element-type 'fixnum :initial-element 0)))
+          (count (make-array (1+ +max-bits+) :element-type 'fixnum :initial-element 0))
+          ;; the nonzero-length symbols in order (C's symbol lists): the
+          ;; table builder then visits only these
+          (nzs (make-array alphabet-size :element-type '(unsigned-byte 16)))
+          (nnz 0))
       (declare (type fixnum symbol repeat space)
                (type (integer 0 15) prev-code-len repeat-code-len)
                (type (simple-array fixnum (16)) count)
-               ;; BUILD-HUFF keeps neither
-               (dynamic-extent lengths count))
+               (type (simple-array (unsigned-byte 16) (*)) nzs)
+               (type (integer 0 1024) nnz)
+               ;; BUILD-HUFF keeps none of them
+               (dynamic-extent lengths count nzs))
       (with-local-bits (r)
       (loop while (and (< symbol alphabet-size) (> space 0)) do
         (let ((c (lsym clh)))
           (declare (type (integer 0 17) c))
           (if (< c 16)
-              (progn (setf repeat 0 (aref lengths symbol) c) (incf symbol)
+              (progn (setf repeat 0 (aref lengths symbol) c)
                      (when (plusp c)
+                       (setf (aref nzs nnz) symbol) (incf nnz)
                        (incf (aref count c))
-                       (setf prev-code-len c) (decf space (ash 32768 (- c)))))
+                       (setf prev-code-len c) (decf space (ash 32768 (- c))))
+                     (incf symbol))
               (let* ((extra-bits (- c 14))                  ; 16->2, 17->3
                      (new-len (if (= c 16) prev-code-len 0)))
                 (declare (type (integer 2 3) extra-bits) (type (integer 0 15) new-len))
@@ -550,12 +588,15 @@ refill loop and a +WIDE-MASKS+ symbol-value fetch to every call site)."
                       (when (plusp written)
                         (incf (aref count new-len) written)
                         (fill lengths new-len :start symbol :end (+ symbol written))
+                        (when (plusp new-len)
+                          (loop for q of-type fixnum from symbol below (+ symbol written)
+                                do (setf (aref nzs nnz) q) (incf nnz)))
                         (incf symbol written))))))))))
       ;; C: BROTLI_DECODER_ERROR_FORMAT_HUFFMAN_SPACE - the code must be
       ;; exactly complete.
       (unless (zerop space)
         (cl-brotli.lisp::berr "incomplete or oversubscribed prefix code"))
-      (build-huff lengths alphabet-size count))))
+      (build-huff lengths alphabet-size count nzs nnz))))
 
 (defun read-prefix-code (r alphabet-size)
   "Read a prefix code (simple or complex); return a HUFF."

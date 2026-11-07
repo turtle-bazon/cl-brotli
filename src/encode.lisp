@@ -132,6 +132,32 @@ emitted MSB-first; DEFLATE canonical assignment)."
         (when (plusp l) (setf (aref codes s) (aref next l)) (incf (aref next l)))))
     codes))
 
+(defun canonical-rcodes (lengths n)
+  "CANONICAL-CODES and REVERSED-CODES in one pass: each symbol's code bit-
+reversed (the LSB-first emission order)."
+  (declare (type (simple-array fixnum (*)) lengths) (type fixnum n)
+           (optimize (speed 3) (safety 0)))
+  (let ((count (make-array (1+ +max-bits+) :element-type 'fixnum
+                           :initial-element 0))
+        (next (make-array (1+ +max-bits+) :element-type 'fixnum
+                          :initial-element 0))
+        (r (arena-fixnums n)))
+    (declare (type (simple-array fixnum (16)) count next)
+             (type (simple-array fixnum (*)) r)
+             (dynamic-extent count next))
+    (dotimes (s n) (let ((l (aref lengths s))) (declare (type (integer 0 15) l)) (when (plusp l) (incf (aref count l)))))
+    (let ((code 0))
+      (declare (type fixnum code))
+      (loop for bits of-type fixnum from 1 to +max-bits+ do
+        (setf code (ash (+ code (aref count (1- bits))) 1)
+              (aref next bits) code)))
+    (dotimes (s n r)
+      (let ((l (aref lengths s)))
+        (declare (type (integer 0 15) l))
+        (when (plusp l)
+          (setf (aref r s) (%reverse-bits (aref next l) l))
+          (incf (aref next l)))))))
+
 (defun limit-lengths (lengths freqs n maxlen)
   "Clamp code LENGTHS to <= MAXLEN, restoring the Kraft equality, then reassign
 lengths to symbols by frequency (most frequent -> shortest)."
@@ -252,6 +278,7 @@ Port of C BrotliCreateHuffmanTree; >= 2 nonzero frequencies assumed."
     ;; (the count-limit clamp flattens the histogram until the tree fits).
     (do ((count-limit 1 (* 2 count-limit)))
         (nil)
+      (declare (type (integer 1 #.(ash 1 31)) count-limit))
       ;; leaves, descending symbol order so equal-weight ties sort like C's
       ;; comparator (larger symbol first) after the shell sort
       (let ((nnz 0))
@@ -385,87 +412,98 @@ the decoder's two-byte table reversal.)"
   "C BrotliOptimizeHuffmanCountsForRle (q4+ histograms, BrotliOptimize-
 Histograms): smooth COUNTS[0..LENGTH) in place so the code lengths form
 runs the tree header's repeat codes compress; small or sparse histograms
-are left alone."
-  (declare (type (simple-array fixnum (*)) counts) (type fixnum length)
+are left alone.  (Counts are histogram entries, < 2^32; every intermediate
+is typed - the untyped version spent most of its time in generic >=,
+FLOOR and + calls.)"
+  (declare (type (simple-array fixnum (*)) counts) (type (integer 0 1024) length)
            (optimize (speed 3) (safety 0)))
-  (let ((nonzero-count (loop for i below length count (plusp (aref counts i))))
-        (streak-limit 1240))
-    (when (< nonzero-count 16)
-      (return-from optimize-counts-for-rle counts))
-    (loop while (and (/= length 0) (zerop (aref counts (1- length))))
-          do (decf length))
-    (when (zerop length)
-      (return-from optimize-counts-for-rle counts))
-    (let ((nonzeros 0) (smallest (ash 1 30)))
-      (dotimes (i length)
-        (let ((c (aref counts i)))
-          (when (/= c 0)
-            (incf nonzeros)
-            (setf smallest (min smallest c)))))
-      (when (< nonzeros 5)
+  (macrolet ((cnt (i) `(the (unsigned-byte 32) (aref counts ,i))))
+    (let ((nonzero-count (let ((c 0))
+                           (declare (type fixnum c))
+                           (dotimes (i length c) (when (plusp (cnt i)) (incf c)))))
+          (streak-limit 1240))
+      (declare (type fixnum nonzero-count streak-limit))
+      (when (< nonzero-count 16)
         (return-from optimize-counts-for-rle counts))
-      (when (< smallest 4)
-        (when (< (- length nonzeros) 6)
-          (loop for i from 1 below (1- length) do
-            (when (and (/= (aref counts (1- i)) 0) (zerop (aref counts i))
-                       (/= (aref counts (1+ i)) 0))
-              (setf (aref counts i) 1)))))
-      (when (< nonzeros 28)
-        (return-from optimize-counts-for-rle counts)))
-    ;; mark the runs that already RLE-encode well
-    (let ((good (make-array length :element-type 'bit :initial-element 0)))
-      (let ((symbol (aref counts 0)) (step 0))
-        (loop for i from 0 to length do
-          (if (or (= i length) (/= (aref counts i) symbol))
-              (progn
-                (when (or (and (zerop symbol) (>= step 5))
-                          (and (/= symbol 0) (>= step 7)))
-                  (dotimes (k step) (setf (aref good (- i k 1)) 1)))
-                (setf step 1)
-                (when (/= i length) (setf symbol (aref counts i))))
-              (incf step))))
-      ;; replace counts that lead to more RLE codes (24.8 fixed point)
-      (let ((stride 0)
-            (limit (+ (floor (* 256 (+ (aref counts 0) (aref counts 1)
-                                       (aref counts 2)))
-                             3)
-                      420))
-            (sum 0))
-        (loop for i from 0 to length do
-          (when (or (= i length) (= (aref good i) 1)
-                    (and (/= i 0) (= (aref good (1- i)) 1))
-                    ;; C's size_t test: |256 c - limit| >= streak-limit
-                    (let ((d (+ (- (* 256 (aref counts i)) limit) streak-limit)))
-                      (or (< d 0) (>= d (* 2 streak-limit)))))
-            (when (or (>= stride 4) (and (>= stride 3) (zerop sum)))
-              (let ((count (max 1 (floor (+ sum (floor stride 2)) stride))))
-                (when (zerop sum) (setf count 0))
-                (dotimes (k stride)
-                  (setf (aref counts (- i k 1)) count))))
-            (setf stride 0 sum 0)
-            (setf limit
-                  (cond ((< i (- length 2))
-                         (+ (floor (* 256 (+ (aref counts i) (aref counts (+ i 1))
-                                             (aref counts (+ i 2))))
-                                   3)
-                            420))
-                        ((< i length) (* 256 (aref counts i)))
-                        (t 0))))
-          (incf stride)
-          (when (/= i length)
-            (incf sum (aref counts i))
-            (when (>= stride 4)
-              (setf limit (floor (+ (* 256 sum) (floor stride 2)) stride)))
-            (when (= stride 4)
-              (incf limit 120))))))
-    counts))
+      (loop while (and (/= length 0) (zerop (cnt (1- length))))
+            do (decf length))
+      (when (zerop length)
+        (return-from optimize-counts-for-rle counts))
+      (let ((nonzeros 0) (smallest (ash 1 32)))
+        (declare (type fixnum nonzeros) (type (unsigned-byte 33) smallest))
+        (dotimes (i length)
+          (let ((c (cnt i)))
+            (when (/= c 0)
+              (incf nonzeros)
+              (setf smallest (min smallest c)))))
+        (when (< nonzeros 5)
+          (return-from optimize-counts-for-rle counts))
+        (when (< smallest 4)
+          (when (< (- length nonzeros) 6)
+            (loop for i of-type fixnum from 1 below (1- length) do
+              (when (and (/= (cnt (1- i)) 0) (zerop (cnt i))
+                         (/= (cnt (1+ i)) 0))
+                (setf (aref counts i) 1)))))
+        (when (< nonzeros 28)
+          (return-from optimize-counts-for-rle counts)))
+      ;; mark the runs that already RLE-encode well
+      (let ((good (make-array 1025 :element-type 'bit :initial-element 0)))
+        (declare (dynamic-extent good))
+        (let ((symbol (cnt 0)) (step 0))
+          (declare (type (unsigned-byte 32) symbol) (type fixnum step))
+          (loop for i of-type fixnum from 0 to length do
+            (if (or (= i length) (/= (cnt i) symbol))
+                (progn
+                  (when (or (and (zerop symbol) (>= step 5))
+                            (and (/= symbol 0) (>= step 7)))
+                    (dotimes (k step) (setf (aref good (- i k 1)) 1)))
+                  (setf step 1)
+                  (when (/= i length) (setf symbol (cnt i))))
+                (incf step))))
+        ;; replace counts that lead to more RLE codes (24.8 fixed point)
+        (let ((stride 0)
+              (limit (+ (floor (* 256 (+ (cnt 0) (cnt 1) (cnt 2))) 3) 420))
+              (sum 0))
+          (declare (type fixnum stride)
+                   (type (unsigned-byte 52) limit sum))
+          (loop for i of-type fixnum from 0 to length do
+            (when (or (= i length) (= (aref good i) 1)
+                      (and (/= i 0) (= (aref good (1- i)) 1))
+                      ;; C's size_t test: |256 c - limit| >= streak-limit
+                      (let ((d (+ (- (* 256 (cnt i)) limit) streak-limit)))
+                        (declare (type (signed-byte 60) d))
+                        (or (< d 0) (>= d (* 2 streak-limit)))))
+              (when (or (>= stride 4) (and (>= stride 3) (zerop sum)))
+                (let ((count (max 1 (floor (+ sum (floor stride 2)) stride))))
+                  (declare (type (unsigned-byte 52) count))
+                  (when (zerop sum) (setf count 0))
+                  (dotimes (k stride)
+                    (setf (aref counts (- i k 1)) count))))
+              (setf stride 0 sum 0)
+              (setf limit
+                    (cond ((< i (- length 2))
+                           (+ (floor (* 256 (+ (cnt i) (cnt (+ i 1)) (cnt (+ i 2)))) 3)
+                              420))
+                          ((< i length) (* 256 (cnt i)))
+                          (t 0))))
+            (incf stride)
+            (when (/= i length)
+              (incf sum (cnt i))
+              (when (>= stride 4)
+                (setf limit (floor (+ (* 256 sum) (floor stride 2)) stride)))
+              (when (= stride 4)
+                (incf limit 120))))))
+      counts)))
 
 (defun build-etree (freqs size maxbits &optional rle-optimize)
   "Prefix code for FREQS[0..SIZE) (C BuildAndStoreHuffmanTree's choice):
 one symbol -> single, 2-4 -> simple code (C's depths, symbols ordered by
 depth), else complex.  RLE-OPTIMIZE (q4+ literal / command / distance
 histograms) first applies C's BrotliOptimizeHuffmanCountsForRle to a copy."
-  (let* ((nnz (loop for s below size count (plusp (aref freqs s))))
+  (declare (type (simple-array fixnum (*)) freqs) (type fixnum size maxbits))
+  (let* ((nnz (let ((c 0))
+                (declare (type fixnum c) (optimize (speed 3) (safety 0)))
+                (dotimes (s size c) (when (plusp (aref freqs s)) (incf c)))))
          ;; the symbol list only where it is used (single / simple codes)
          (nz (when (<= nnz 4)
                (loop for s below size when (plusp (aref freqs s)) collect s))))
@@ -477,10 +515,9 @@ histograms) first applies C's BrotliOptimizeHuffmanCountsForRle to a copy."
        ;; 3 -> 1 2 2, 4 -> 2 2 2 2 or 1 2 3 3) and writes the symbols
        ;; sorted by depth (StoreSimpleHuffmanTree)
        (let* ((lengths (build-code-lengths-a freqs size maxbits))
-              (sorted (stable-sort (copy-list nz) #'< :key (lambda (s) (aref lengths s))))
-              (codes (canonical-codes lengths size)))
-         (make-etree :lengths lengths :codes codes
-                     :rcodes (reversed-codes codes lengths size)
+              (sorted (stable-sort (copy-list nz) #'< :key (lambda (s) (aref lengths s)))))
+         (make-etree :lengths lengths
+                     :rcodes (canonical-rcodes lengths size)
                      :simple sorted)))
       (t
        (let* ((lengths (build-code-lengths-a
@@ -488,10 +525,9 @@ histograms) first applies C's BrotliOptimizeHuffmanCountsForRle to a copy."
                             (optimize-counts-for-rle
                              (replace (arena-fixnums (length freqs)) freqs) size)
                             freqs)
-                        size maxbits))
-              (codes (canonical-codes lengths size)))
-         (make-etree :lengths lengths :codes codes
-                     :rcodes (reversed-codes codes lengths size)))))))
+                        size maxbits)))
+         (make-etree :lengths lengths
+                     :rcodes (canonical-rcodes lengths size)))))))
 
 (defun emit-bits-msb (w code len)
   (loop for i from (1- len) downto 0 do (b:wbits w (logand (ash code (- i)) 1) 1)))
@@ -1152,6 +1188,181 @@ one-per-run snapshot - no globals are read here."
                          (return))))))))))))
         count))
 
+;;; ---- C's encoder dictionary hash (enc/dictionary_hash.c) ---------------
+;;; The q2-q9 hashers (C H2, H4, H5, H6) probe the static dictionary through
+;;; a 2^15-entry table indexed by (Hash14 << 1) + slot, where slot 1 holds a
+;;; word shorter than 8 bytes.  BrotliEncoderInitDictionaryHash fills it
+;;; longest words first, highest index first; a word takes its slot unless
+;;; an earlier "frozen" word holds it.  The frozen bit set (one bit per
+;;; dictionary word, 1688 bytes) is C's own, so this table - and every
+;;; dictionary match the hashers find - is C's.  Entry: len | word << 5
+;;; (0 = empty).
+
+(deftable +c-dict-frozen-hex+
+  (concatenate 'string
+   "000008A420381FBF24048051448491810000001C00080101400301000000000004400102"
+   "800084310000000000000000110000000100249800000000800800008000000800004000"
+   "000000000000000008000000010040850020000080010000000004040420108200800800"
+   "0000000040004000A0009435000000000080008200000008000000000030000000000000"
+   "20012081000C000100000000000000100000001020000000000000000001000008000002"
+   "00000000002000000002428000001000000000400106800800C0182000000804808002A0"
+   "00A000400000020000000000000000002001000040000000000000200042000200040008"
+   "000200002108000000080080A2048000022100A00008004000A000810400002000002000"
+   "02000000000000800000000000400A000000002040000000000010001010000050020000"
+   "000008000010000800000008408000000008D00000000000000020000000000000200008"
+   "00800000000100000010080188000024004009000120080040408310E02004000405A000"
+   "830004600000B8C000B1CD60000000000200200000000000000000400000800000080000"
+   "000001040001000000040000000000000400004045000008024220400000000000010080"
+   "11000000000000000000000C001000000480400000000000000000E00008000082104080"
+   "02400000008002C040004100000010000000200402024C000000044834832C4C00000000"
+   "400110940400100A40000200010080404400000000004090000800020000000000000340"
+   "0000000001800000204200000028001200000000002100002000002000800440918C0000"
+   "008000020000140050260000200020400404000400000081040000901120821084188600"
+   "004002053208C221014475010820A1360082220000004080000002000000002001000000"
+   "030E00000000001004000000000000000060011812000180180040000400108000400000"
+   "004000080000000000428000000000000000000000000000000010004002000000000600"
+   "0808020040000000008002020C400040000800802000000A000020008020210888006040"
+   "000000000040041004080000001000020000018000401000000000000000000800000200"
+   "100004000800000000001400000000010000000000000000000000088800000000000800"
+   "000000000200000040000001000200000000000000000080000000000400000000410000"
+   "000000000000000004000000000000000000000002800000000802000080001002000004"
+   "00200000010440400004000100100020440404410A001425120194002080030800400000"
+   "0000000004001001800000008010000000000180000080408040008200A4080000014080"
+   "00120002960008000040005100001080020824208104900D000003080100020000400005"
+   "0001220120021080808000000002000412080C2220C00640E02100008948400018088080"
+   "0010002080808408000010004000000400001000048040000001000440209082028000C0"
+   "00405240012080800200540020002C184850201000002C106040014883000000100000A5"
+   "008102313040400C40B0405408801440D5886801290F53AA00002901404000C140400800"
+   "800000400840080110000800000201801C548D6100004400008108001008200040000000"
+   "18000000C000088000000000004000010000000028018040000402200000000000000000"
+   "000000008020080020000000101100020400002180020000000081000200000024002002"
+   "000000000000200000000004000000000000000420400000000000002000002080000000"
+   "00000000000000801000000000000000010088000018C080030011120200420004180009"
+   "D0A70090144000824000021088084A2000A8004120080C01030140B40300400008000020"
+   "4100041004104420402420182101800000080020405100010A1308000004059000000880"
+   "000004000000000000010000000800000000005001000021002042040200012B02000004"
+   "20100040000320000240407400413440001140C060080A08020400114000040000048000"
+   "00090000820200C000308040006000400001102000012006800220000C00003020080000"
+   "80001200001C182910052000000000000000100000000000000000000000000000010000"
+   "001000000000400000000008000000001080000000100000000000000800000000000000"
+   "000000000000210000000000000000000000000000100000000000000000000000000000"
+   "0000000000000000000000000000000000000000000000000000000000000000"))
+
+(declaim (type (or null (simple-array (unsigned-byte 16) (32768))) *c-dict-hash*))
+(defvar *c-dict-hash* nil)
+
+(declaim (inline c-hash14))
+(defun c-hash14 (b0 b1 b2 b3)
+  "C Hash14 of the four bytes B0..B3 (little-endian u32 * kHashMul32 >> 18)."
+  (declare (type (unsigned-byte 8) b0 b1 b2 b3) (optimize (speed 3) (safety 0)))
+  (ash (logand (* (logior b0 (ash b1 8) (ash b2 16) (ash b3 24)) #x1E35A7BD)
+               #xFFFFFFFF)
+       -18))
+
+(defun c-dict-hash ()
+  "C's kStaticDictionaryHashWords/Lengths as one u16 table, built once."
+  (or *c-dict-hash*
+      (let* ((dict (load-dict))
+             (hex +c-dict-frozen-hex+)
+             (frozen (let ((v (make-array 1688 :element-type '(unsigned-byte 8))))
+                       (dotimes (i 1688 v)
+                         (setf (aref v i)
+                               (parse-integer hex :start (* 2 i) :end (+ 2 (* 2 i))
+                                                  :radix 16)))))
+             (lens (make-array 32768 :element-type '(unsigned-byte 8) :initial-element 0))
+             (words (make-array 32768 :element-type '(unsigned-byte 16) :initial-element 0))
+             (tab (make-array 32768 :element-type '(unsigned-byte 16) :initial-element 0))
+             (g 0))
+        (declare (type fixnum g))
+        (loop for len of-type fixnum from 24 downto 4 do
+          (let ((nw (nwords len)) (base (aref +doffset+ len)))
+            (declare (type fixnum nw base))
+            (dotimes (i nw)
+              (let* ((j (- nw 1 i))
+                     (w (+ base (* len j)))
+                     (idx (+ (ash (c-hash14 (aref dict w) (aref dict (+ w 1))
+                                            (aref dict (+ w 2)) (aref dict (+ w 3)))
+                                  1)
+                             (if (< len 8) 1 0))))
+                (when (zerop (logand (aref lens idx) #x80))
+                  (setf (aref words idx) j
+                        (aref lens idx) (+ len (if (logbitp (mod g 8) (aref frozen (floor g 8)))
+                                                   #x80 0))))
+                (incf g)))))
+        (dotimes (i 32768)
+          (let ((l (logand (aref lens i) #x7F)))
+            (unless (zerop l)
+              (setf (aref tab i) (logior l (ash (aref words i) 5))))))
+        (setf *c-dict-hash* tab))))
+
+(deftable +c-cut-tid+
+  ;; C kCutoffTransforms: transform id of "omit last CUT" for CUT 0..9
+  (make-array 10 :element-type 'fixnum
+                 :initial-contents '(0 12 27 23 42 63 56 48 59 64)))
+(declaim (type (simple-array fixnum (10)) +c-cut-tid+))
+
+(defmacro c-dict-search ((data cur max-length maxb tab dict lookups matches shallow)
+                         score &body on-match)
+  "C SearchInStaticDictionary at DATA[CUR] (call it only when the hasher
+found nothing better than the minimum score SCORE, a place).  LOOKUPS and
+MATCHES are the hasher's counters (places).  For each accepted item BODY
+runs with LEN (output bytes), LCD (1 + bytes cut from the word: the
+command's DICTP) and DIST bound, after SCORE was raised to its score.
+SHALLOW probes one slot (H2/H4), otherwise two (H5/H6)."
+  (let ((key (gensym "KEY")) (slot (gensym "SLOT")) (e (gensym "E"))
+        (wl (gensym "WL")) (word (gensym "WORD")) (off (gensym "OFF"))
+        (ml (gensym "ML")) (cut (gensym "CUT")) (sc (gensym "SC")) (i (gensym "I")))
+    `(unless (< ,matches (ash ,lookups -7))
+       (let ((,key (ash (c-hash14 (aref ,data ,cur) (aref ,data (+ ,cur 1))
+                                  (aref ,data (+ ,cur 2)) (aref ,data (+ ,cur 3)))
+                        1)))
+         (declare (type fixnum ,key))
+         (dotimes (,slot ,(if shallow 1 2))
+           (incf ,lookups)
+           (let ((,e (aref ,tab (+ ,key ,slot))))
+             (declare (type fixnum ,e))
+             (unless (zerop ,e)
+               (let ((,wl (logand ,e 31)) (,word (ash ,e -5)))
+                 (declare (type fixnum ,wl ,word))
+                 (when (<= ,wl ,max-length)
+                   (let* ((,off (+ (aref +doffset+ ,wl) (* ,wl ,word)))
+                          (,ml (let ((,i 0))
+                                 (declare (type fixnum ,i))
+                                 (loop while (and (< ,i ,wl)
+                                                  (= (aref ,data (+ ,cur ,i))
+                                                     (aref ,dict (+ ,off ,i))))
+                                       do (incf ,i))
+                                 ,i)))
+                     (declare (type fixnum ,off ,ml))
+                     (unless (or (zerop ,ml) (<= (+ ,ml 10) ,wl))
+                       (let* ((,cut (- ,wl ,ml))
+                              (dist (+ ,maxb 1 ,word
+                                       (ash (aref +c-cut-tid+ ,cut) (aref +ndbits+ ,wl))))
+                              (,sc (- (+ 1920 (* 135 ,ml))
+                                      (* 30 (1- (integer-length dist))))))
+                         (declare (type fixnum ,cut dist ,sc))
+                         (unless (< ,sc ,score)
+                           (setf ,score ,sc)
+                           (incf ,matches)
+                           (let ((len ,ml) (lcd (1+ ,cut)))
+                             (declare (type fixnum len lcd) (ignorable len lcd dist))
+                             ,@on-match))))))))))))))
+
+;; per word length: C offsets_by_length | size_bits_by_length << 24 (for the
+;; assembly dictionary probe)
+(deftable +c-dict-len-info+
+  (let ((v (make-array 25 :element-type '(unsigned-byte 32) :initial-element 0)))
+    (loop for len from 4 to 24
+          do (setf (aref v len) (logior (aref +doffset+ len) (ash (aref +ndbits+ len) 24))))
+    v))
+
+(declaim (inline copy-code-len))
+(defun copy-code-len (cpy dictp)
+  "The copy length a command's length code encodes: CPY, or for a static-
+dictionary reference (DICTP = 1 + bytes cut) the dictionary word's length."
+  (declare (type fixnum cpy dictp))
+  (if (> dictp 1) (+ cpy dictp -1) cpy))
+
 (defun text-like-data-p (data)
   "T when DATA is mostly printable ASCII/whitespace, where the static
 dictionary is worth consulting."
@@ -1465,6 +1676,20 @@ order)."
         ((>= c 192) (min 1 clamp))
         (t (if (< last #xE0) 0 (min 2 clamp)))))
 
+(defmacro lit-prefix-step (prefix i x carry)
+  "C's compensated literal-cost prefix sum (ZopfliCostModelSetFromLiteral-
+Costs / SetFromCommands): CARRY keeps the float rounding residual across the
+whole array, so PREFIX[I+1] - PREFIX[J] stays accurate for runs deep into a
+block (a plain float sum drifts by bits after a few thousand bytes, enough
+to flip copy-vs-literal decisions on cheap literals)."
+  (let ((nv (gensym "NV")))
+    `(progn
+       (incf ,carry ,x)
+       (let ((,nv (+ (aref ,prefix ,i) ,carry)))
+         (declare (type single-float ,nv))
+         (setf (aref ,prefix (1+ ,i)) ,nv)
+         (decf ,carry (- ,nv (aref ,prefix ,i)))))))
+
 (defun estimate-literal-costs (data start end costs)
   "C BrotliEstimateBitCostsForLiterals -> COSTS, C's literal_costs
 convention: raw costs land at indices 1..END-START (index 0 is the
@@ -1486,8 +1711,10 @@ position classification computes exactly the same values."
          (fl2tab +fast-log2-table+)
          (c1 0) (c2 0)
          (mostly nil)
-         (max-utf8 0))
-    (declare (type fixnum len c1 c2 max-utf8) (type boolean mostly))
+         (max-utf8 0)
+         (carry 0.0f0))
+    (declare (type fixnum len c1 c2 max-utf8) (type boolean mostly)
+             (type single-float carry))
     (multiple-value-setq (mostly c1 c2) (utf8-stats data start end))
     ;; C keeps max_utf8 at 1 even with >=500 three-byte stats ("should be
     ;; 2, but 1 compresses better"); only the sparse-multibyte case drops
@@ -1528,7 +1755,7 @@ position classification computes exactly the same values."
                (declare (type double-float cost))
                (when (< cost 1.0d0)
                  (setf cost (+ (* 0.5d0 cost) 0.5d0)))
-               (setf (aref costs (1+ i)) (+ (aref costs i) (float cost 1.0f0))))))))
+               (lit-prefix-step costs i (float cost 1.0f0) carry))))))
       ((zerop max-utf8)
        ;; Single-row fast path (window 495 + prologue bump): byte-identical
        ;; to the general UTF8 loop because UTF8Position(.., 0) == 0 always.
@@ -1571,7 +1798,7 @@ position classification computes exactly the same values."
                  (setf cost (+ (* 0.5d0 cost) 0.5d0)))
                (when (< i 2000)
                  (incf cost (+ 0.35d0 (* 0.000175d0 i))))
-               (setf (aref costs (1+ i)) (+ (aref costs i) (float cost 1.0f0))))))
+               (lit-prefix-step costs i (float cost 1.0f0) carry))))
            (loop for i of-type fixnum from r1 below r2 do
            (let ((p (+ start i)))
              (declare (type fixnum p))
@@ -1588,7 +1815,7 @@ position classification computes exactly the same values."
                  (setf cost (+ (* 0.5d0 cost) 0.5d0)))
                (when (< i 2000)
                  (incf cost (+ 0.35d0 (* 0.000175d0 i))))
-               (setf (aref costs (1+ i)) (+ (aref costs i) (float cost 1.0f0))))))
+               (lit-prefix-step costs i (float cost 1.0f0) carry))))
            (loop for i of-type fixnum from r2 below len do
            (let ((p (+ start i)))
              (declare (type fixnum p))
@@ -1609,7 +1836,7 @@ position classification computes exactly the same values."
                  (setf cost (+ (* 0.5d0 cost) 0.5d0)))
                (when (< i 2000)
                  (incf cost (+ 0.35d0 (* 0.000175d0 i))))
-               (setf (aref costs (1+ i)) (+ (aref costs i) (float cost 1.0f0)))))))))
+               (lit-prefix-step costs i (float cost 1.0f0) carry)))))))
       (t
        ;; General UTF8 path: 3x256 position histograms, window 495.
        (let* ((window 495)
@@ -1660,7 +1887,7 @@ position classification computes exactly the same values."
                  (setf cost (+ (* 0.5d0 cost) 0.5d0)))
                (when (< i 2000)
                  (incf cost (+ 0.35d0 (* 0.000175d0 i))))
-               (setf (aref costs (1+ i)) (+ (aref costs i) (float cost 1.0f0)))))))))
+               (lit-prefix-step costs i (float cost 1.0f0) carry)))))))
     costs))
 
 ;;;; ---- per-compressor scratch pool for the big z-state arrays ----
@@ -1978,14 +2205,13 @@ The final insert-only trailing command is not part of C's command stream
           (declare (type single-float v))
           (when (< v mc) (setf mc v))))
       (setf (zmodel-min-cost-cmd model) mc))
-    ;; Literal costs: plain prefix of cost_literal[data[i]] (C's carry
-    ;; dance resets every iteration, i.e. reduces to this).
-    (let ((prefix (zmodel-lit-prefix model)))
-      (declare (type (simple-array single-float (*)) prefix))
+    ;; Literal costs: C's compensated prefix of cost_literal[data[i]]
+    (let ((prefix (zmodel-lit-prefix model)) (carry 0.0f0))
+      (declare (type (simple-array single-float (*)) prefix)
+               (type single-float carry))
       (setf (aref prefix 0) 0.0f0)
       (dotimes (i n)
-        (setf (aref prefix (1+ i))
-              (+ (aref prefix i) (aref ct (aref data i))))))
+        (lit-prefix-step prefix i (aref ct (aref data i)) carry)))
     model))
 (defun %chain-store-range (sap head prev start end shift hmask chained)
   "C StoreRange for %LZ77's hash chains (H5/H6-like): insert START..END.
@@ -3471,10 +3697,33 @@ not read what it has not written."
           (when pool (setf (gethash key pool) new))
           new))))
 
-(defun acquire-quick-buckets (bits sweep)
+(defun %quick-partial-clear (buckets data bits sweep hash-len)
+  "C's partial Prepare: zero only the buckets DATA's positions hash to (the
+sweep slots included).  The matchers read only keys of positions <= n - 9,
+so the result reads exactly like a fully zeroed table."
+  (declare (type (simple-array (unsigned-byte 32) (*)) buckets)
+           (type (simple-array (unsigned-byte 8) (*)) data)
+           (type (integer 1 24) bits) (type (integer 1 4) sweep)
+           (type (integer 5 8) hash-len)
+           (optimize (speed 3) (safety 0)))
+  (let ((n (length data)) (mask (1- (ash 1 bits))) (shift (- bits 64)))
+    (declare (type fixnum n mask) (type (integer -63 -40) shift))
+    (with-ptrs ((sap data))
+      (loop for i of-type fixnum from 0 to (- n 8) do
+        (let* ((w (ptr-u64 sap i))
+               (x (if (= hash-len 5)
+                      (logand (ash w 24) #xFFFFFFFFFFFFFFFF)
+                      (logand (ash w 8) #xFFFFFFFFFFFFFFFF)))
+               (key (ash (logand (* x #x1FE35A7BD3579BD3) #xFFFFFFFFFFFFFFFF) shift)))
+          (declare (type (unsigned-byte 64) w x) (type fixnum key))
+          (dotimes (j sweep)
+            (setf (aref buckets (logand (+ key (ash j 3)) mask)) 0)))))))
+
+(defun acquire-quick-buckets (bits sweep &optional data (hash-len 5))
   "Zeroed bucket table for %LZ77-QUICK (2^BITS + SWEEP u32; C zeroes its
 buckets in Prepare and treats 0 as a real position).  Pooled per
-compressor like ACQUIRE-HEADPREV."
+compressor like ACQUIRE-HEADPREV.  With DATA small next to the table (C:
+input <= 2^BITS / 32), a pooled table is cleared only where DATA hashes."
   (declare (type (integer 1 24) bits) (type (integer 1 4) sweep))
   (let ((pool *scratch-pool*) (size (+ (ash 1 bits) sweep)))
     (flet ((make-it () (make-array size :element-type '(unsigned-byte 32)
@@ -3485,7 +3734,11 @@ compressor like ACQUIRE-HEADPREV."
                  (entry (gethash key pool)))
             (if (and entry (= (length (the (simple-array (unsigned-byte 32) (*)) entry))
                               size))
-                (fill (the (simple-array (unsigned-byte 32) (*)) entry) 0)
+                (if (and data (<= (length (the (simple-array (unsigned-byte 8) (*)) data))
+                                  (ash 1 (- bits 5))))
+                    (progn (%quick-partial-clear entry data bits sweep hash-len)
+                           entry)
+                    (fill (the (simple-array (unsigned-byte 32) (*)) entry) 0))
                 (progn
                   (when (>= (hash-table-count pool) +scratch-max-entries+)
                     (clrhash pool))
@@ -3494,7 +3747,7 @@ compressor like ACQUIRE-HEADPREV."
 ;; One specialized matcher per C hasher: BUCKET_BITS / BUCKET_SWEEP /
 ;; HASH_LEN are compile-time constants in C, and as runtime arguments here
 ;; every store reloaded them from stack slots and branched on them.
-(defmacro define-quick-matcher (name bits sweep hash-len)
+(defmacro define-quick-matcher (name bits sweep hash-len &optional use-dict)
   (let ((sr (intern (format nil "~A-STORE-RANGE" (symbol-name name)))))
     `(progn
        ;; C StoreRange as its own function: inside the matcher it ran out of
@@ -3516,7 +3769,9 @@ compressor like ACQUIRE-HEADPREV."
              (declare (type (unsigned-byte 64) w x) (type fixnum key))
              (setf (aref buckets ,(if (= sweep 1)
                                       'key
-                                      `(+ key (logand (ash i -3) ,(1- sweep)))))
+                                      ;; C 1.2.0: slot (key + (j << 3)) & mask
+                                      `(logand (+ key (logand i ,(ash (1- sweep) 3)))
+                                               ,(1- (ash 1 bits)))))
                    i))))
        (declaim (notinline ,sr))
        (defun ,name (data sap window)
@@ -3532,20 +3787,23 @@ compressor like ACQUIRE-HEADPREV."
                                                  (subseq (symbol-name name)
                                                          (length "%LZ77-QUICK-")))
                                          "CL-BROTLI.LISP")
-                                st ctx))))
+                                st ctx))
+                             ,hash-len))
          #-cl-brotli-x86-64
-         (symbol-macrolet ((bits ,bits) (sweep ,sweep) (hash-len ,hash-len))
+         (symbol-macrolet ((bits ,bits) (sweep ,sweep) (hash-len ,hash-len)
+                           (use-dict ,use-dict))
            (macrolet ((%store-range (sap buckets start end)
                         (list ',sr sap buckets start end)))
              (%lz77-quick-body)))))))
 
 #+cl-brotli-x86-64
-(defun %asm-h6-drive (data window block-bits buckets run)
+(defun %asm-h6-drive (data window block-bits buckets run htl)
   "DEFINE-H6-MATCHER's matcher through the assembly RUN (src/evops.lisp),
-like %ASM-QUICK-DRIVE."
+like %ASM-QUICK-DRIVE.  HTL is the hasher's HashTypeLength = StoreLookahead
+\(8 for H6, 4 for H5)."
   (declare (type (simple-array (unsigned-byte 8) (*)) data)
            (type (simple-array (unsigned-byte 32) (*)) buckets)
-           (type fixnum window block-bits) (type function run)
+           (type fixnum window block-bits htl) (type function run)
            (optimize (speed 3) (safety 0)))
   (let* ((n (length data))
          ;; u16 like C's num_ (the counters wrap at 2^16): half the cache
@@ -3564,13 +3822,21 @@ like %ASM-QUICK-DRIVE."
     (declare (type (simple-array fixnum (*)) cmds)
              (type (simple-array (unsigned-byte 64) (*)) st) (type simple-vector ctx))
     (setf (svref ctx +q0c-data+) data (svref ctx +q0c-buckets+) buckets
-          (svref ctx +q0c-num+) num)
+          (svref ctx +q0c-num+) num
+          (svref ctx +q0c-dict+) (load-dict) (svref ctx +q0c-dhash+) (c-dict-hash)
+          (svref ctx +q0c-dlen+) +c-dict-len-info+)
+    ;; C's limits: loop while pos + HashTypeLength < n, store_end =
+    ;; n - StoreLookahead + 1, random-heuristics jumps stop at
+    ;; n - max(lookahead - 1, 4) / n - max(lookahead - 1, 2)
     (setf (aref st +q0-pos+) 0 (aref st +q0-lit-start+) 0 (aref st +q0-ncmd+) 0
           (aref st +q0-apply-rh+) rh-window (aref st +q0-rhwin+) rh-window
           (aref st +q0-n+) n (aref st +q0-window+) window
-          (aref st +q0-store-end+) (if (>= n 8) (- n 7) 0)
-          (aref st +q0-n9+) (ldb (byte 64 0) (- n 9))
-          (aref st +q0-n7+) (ldb (byte 64 0) (- n 7))
+          (aref st +q0-store-end+) (if (>= n htl) (- n (1- htl)) 0)
+          (aref st +q0-n9+) (ldb (byte 64 0) (- n (1+ htl)))
+          (aref st +q0-n7+) (ldb (byte 64 0) (- n (max (1- htl) 4)))
+          (aref st +q0-n7b+) (ldb (byte 64 0) (- n (max (1- htl) 2)))
+          (aref st +q0-olcd+) 0 (aref st +q0-lcd+) 0
+          (aref st +q0-dlookups+) 0 (aref st +q0-dmatches+) 0
           (aref st +q0-mulc+) #x1FE35A7BD3579BD3)
     ;; C's initial distance cache and its derived candidates
     (let ((dc '(4 11 15 16)))
@@ -3578,7 +3844,7 @@ like %ASM-QUICK-DRIVE."
       (loop for off in '(-1 1 -2 2 -3 3) for k from 4
             do (setf (aref st (+ +q0-dc0+ k)) (ldb (byte 64 0) (+ 4 off))
                      (aref st (+ +q0-dc0+ k 6)) (ldb (byte 64 0) (+ 11 off)))))
-    (when (< 8 n)
+    (when (< htl n)
       ;; pinned: the matcher walks a key's ring through a raw pointer
       (sb-sys:with-pinned-objects (buckets)
         (loop
@@ -3605,7 +3871,7 @@ like %ASM-QUICK-DRIVE."
       (values cmds (* 5 ncmd)))))
 
 #+cl-brotli-x86-64
-(defun %asm-quick-drive (data window bits sweep run)
+(defun %asm-quick-drive (data window bits sweep run &optional (hash-len 5))
   "%LZ77-QUICK-BODY through the assembly matcher RUN (src/evops.lisp),
 growing the command vector between runs; the tail (the last 8 bytes'
 insert) is added here.  Same commands, same (values CMDS USED)."
@@ -3613,7 +3879,7 @@ insert) is added here.  Same commands, same (values CMDS USED)."
            (type fixnum window bits sweep) (type function run)
            (optimize (speed 3) (safety 0)))
   (let* ((n (length data))
-         (buckets (acquire-quick-buckets bits sweep))
+         (buckets (acquire-quick-buckets bits sweep data hash-len))
          (cmds (let ((pool *scratch-pool*) (want (* 5 (max 4096 (ash n -5)))))
                  (or (and pool
                           (let ((v (gethash :quick-cmds pool)))
@@ -3625,7 +3891,11 @@ insert) is added here.  Same commands, same (values CMDS USED)."
          (ctx (arena-svec +q0-ctx-size+)))
     (declare (type (simple-array fixnum (*)) cmds)
              (type (simple-array (unsigned-byte 64) (*)) st) (type simple-vector ctx))
-    (setf (svref ctx +q0c-data+) data (svref ctx +q0c-buckets+) buckets)
+    (setf (svref ctx +q0c-data+) data (svref ctx +q0c-buckets+) buckets
+          (svref ctx +q0c-dict+) (load-dict) (svref ctx +q0c-dhash+) (c-dict-hash)
+          (svref ctx +q0c-dlen+) +c-dict-len-info+)
+    (setf (aref st +q0-olcd+) 0 (aref st +q0-lcd+) 0
+          (aref st +q0-dlookups+) 0 (aref st +q0-dmatches+) 0)
     (setf (aref st +q0-pos+) 0 (aref st +q0-lit-start+) 0 (aref st +q0-ncmd+) 0
           (aref st +q0-c0+) 4 (aref st +q0-c1+) 11 (aref st +q0-c2+) 15 (aref st +q0-c3+) 16
           (aref st +q0-apply-rh+) 64 (aref st +q0-n+) n (aref st +q0-window+) window
@@ -3661,7 +3931,7 @@ insert) is added here.  Same commands, same (values CMDS USED)."
   ;; the body of every DEFINE-QUICK-MATCHER instance; BITS, SWEEP and
   ;; HASH-LEN are symbol macros there (constants)
   '(let* ((n (length data))
-         (buckets (acquire-quick-buckets bits sweep))
+         (buckets (acquire-quick-buckets bits sweep data hash-len))
          (hshift (- bits 64))
          ;; Pooled per compressor and returned untrimmed with its used
          ;; length: the doubling growth + final SUBSEQ were ~20% of q2.
@@ -3678,13 +3948,18 @@ insert) is added here.  Same commands, same (values CMDS USED)."
          (pos 0) (insert 0)
          (rh-window 64)                          ; LiteralSpreeLengthForSparseSearch, q < 9
          (apply-rh 64)
-         (kmin 2020))                            ; BROTLI_SCORE_BASE + 100
+         (kmin 2020)                             ; BROTLI_SCORE_BASE + 100
+         (dict (load-dict)) (dtab (c-dict-hash))
+         (dlookups 0) (dmatches 0))
     (declare (type (simple-array (unsigned-byte 32) (*)) buckets)
              (type (integer -63 -40) hshift)
              (type (simple-array fixnum (*)) cmds)
              (type (integer 0 #.(ash 1 40)) ncmd)
-             (type fixnum c0 c1 c2 c3 store-end pos insert rh-window apply-rh kmin)
-             (ignorable c1 c2 c3))
+             (type fixnum c0 c1 c2 c3 store-end pos insert rh-window apply-rh kmin
+                   dlookups dmatches)
+             (type (simple-array (unsigned-byte 8) (*)) dict)
+             (type (simple-array (unsigned-byte 16) (32768)) dtab)
+             (ignorable c1 c2 c3 dict dtab))
     (labels ((hash (i)
                (declare (type fixnum i))
                ;; Constant shifts: a variable ASH of a u64 is not modular
@@ -3703,10 +3978,12 @@ insert) is added here.  Same commands, same (values CMDS USED)."
                  (declare (type fixnum key))
                  (setf (aref buckets (if (= sweep 1)
                                          key
-                                         (+ key (logand (ash i -3) (1- sweep)))))
+                                         ;; C 1.2.0: slot (key + (j << 3)) & mask
+                                         (logand (+ key (logand i (ash (1- sweep) 3)))
+                                                 (1- (ash 1 bits)))))
                        i)))
-             (push-cmd (ins ls cpy dist)
-               (declare (type fixnum ins ls cpy dist))
+             (push-cmd (ins ls cpy dist dictp)
+               (declare (type fixnum ins ls cpy dist dictp))
                (when (>= (* 5 (1+ ncmd)) (length cmds))
                  (let ((new (make-array (* 2 (length cmds)) :element-type 'fixnum)))
                    (replace new cmds)
@@ -3716,7 +3993,7 @@ insert) is added here.  Same commands, same (values CMDS USED)."
                  (declare (type fixnum b))
                  (setf (aref cmds b) ins (aref cmds (+ b 1)) ls
                        (aref cmds (+ b 2)) cpy (aref cmds (+ b 3)) dist
-                       (aref cmds (+ b 4)) 0))
+                       (aref cmds (+ b 4)) dictp))
                (incf ncmd))
              (char-at (i)
                ;; C reads past the end into ring-buffer slack; a byte that
@@ -3724,16 +4001,17 @@ insert) is added here.  Same commands, same (values CMDS USED)."
                (declare (type fixnum i))
                (if (< i n) (aref data i) -1))
              (find-longest (cur best-len-in)
-               ;; C FindLongestMatch: (values len distance score).
+               ;; C FindLongestMatch: (values len distance score lcd), LCD =
+               ;; 1 + cut for a static-dictionary word (USE-DICT hashers).
                (declare (type fixnum cur best-len-in))
                (let* ((maxb (min cur window))
                       (key (hash cur))
                       (best-len best-len-in)
                       (best-score kmin)
-                      (out-len 0) (out-dist 0) (out-score kmin)
+                      (out-len 0) (out-dist 0) (out-score kmin) (out-lcd 0)
                       (compare (char-at (+ cur best-len))))
                  (declare (type fixnum maxb key best-len best-score out-len
-                                out-dist out-score compare))
+                                out-dist out-score out-lcd compare))
                  ;; the last distance first
                  (let ((prev (- cur c0)))
                    (declare (type fixnum prev))
@@ -3749,7 +4027,7 @@ insert) is added here.  Same commands, same (values CMDS USED)."
                              (when (= sweep 1)
                                (setf (aref buckets key) cur)
                                (return-from find-longest
-                                 (values out-len out-dist out-score)))
+                                 (values out-len out-dist out-score 0)))
                              (setf best-len len best-score score
                                    compare (char-at (+ cur len)))))))))
                  (if (= sweep 1)
@@ -3766,11 +4044,19 @@ insert) is added here.  Same commands, same (values CMDS USED)."
                                              (* 30 (1- (integer-length backward))))))
                                (declare (type fixnum score))
                                (when (< best-score score)
-                                 (setf out-len len out-dist backward
-                                       out-score score)))))))
+                                 (return-from find-longest
+                                   (values len backward score 0)))))
+                           ;; C H2 reaches its dictionary probe only here:
+                           ;; every other path returned early
+                           (when use-dict
+                             (c-dict-search (data cur (- n cur) maxb dtab dict
+                                                  dlookups dmatches t)
+                                 out-score
+                               (setf out-len len out-dist dist out-lcd lcd))))))
                      (progn
                        (loop for i of-type fixnum below sweep do
-                         (let* ((prev (aref buckets (+ key i)))
+                         (let* ((prev (aref buckets (logand (+ key (ash i 3))
+                                                            (1- (ash 1 bits)))))
                                 (backward (- cur prev)))
                            (declare (type fixnum prev backward))
                            (when (and (= compare (aref data (+ prev best-len)))
@@ -3786,32 +4072,39 @@ insert) is added here.  Same commands, same (values CMDS USED)."
                                            out-len len out-dist backward
                                            out-score score
                                            compare (char-at (+ cur len))))))))))
-                       (setf (aref buckets (+ key (logand (ash cur -3) (1- sweep))))
+                       (when (and use-dict (= out-score kmin))
+                         (c-dict-search (data cur (- n cur) maxb dtab dict
+                                              dlookups dmatches t)
+                             out-score
+                           (setf out-len len out-dist dist out-lcd lcd)))
+                       (setf (aref buckets (logand (+ key (logand cur (ash (1- sweep) 3)))
+                                                   (1- (ash 1 bits))))
                              cur)))
-                 (values out-len out-dist out-score))))
+                 (values out-len out-dist out-score out-lcd))))
       (declare (inline hash store char-at find-longest))
       (loop while (< (+ pos 8) n) do
-        (multiple-value-bind (len dist score) (find-longest pos 0)
-          (declare (type fixnum len dist score))
+        (multiple-value-bind (len dist score lcd) (find-longest pos 0)
+          (declare (type fixnum len dist score lcd))
           (if (> score kmin)
               (let ((delayed 0))
                 (declare (type fixnum delayed))
                 ;; C: look for a better match one byte ahead
                 (loop
-                  (multiple-value-bind (l2 d2 s2)
+                  (multiple-value-bind (l2 d2 s2 c2)
                       (find-longest (1+ pos) (min (1- len) (- n pos 1)))
-                    (declare (type fixnum l2 d2 s2))
+                    (declare (type fixnum l2 d2 s2 c2))
                     (if (>= s2 (+ score 175))
                         (progn
                           (incf pos) (incf insert)
-                          (setf len l2 dist d2 score s2)
+                          (setf len l2 dist d2 score s2 lcd c2)
                           (unless (and (< (incf delayed) 4) (< (+ pos 8) n))
                             (return)))
                         (return))))
                 (setf apply-rh (+ pos (* 2 len) rh-window))
-                (when (/= dist c0)           ; ComputeDistanceCode > 0
+                ;; ComputeDistanceCode > 0, and not a dictionary word
+                (when (and (zerop lcd) (/= dist c0))
                   (setf c3 c2 c2 c1 c1 c0 c0 dist))
-                (push-cmd insert (- pos insert) len dist)
+                (push-cmd insert (- pos insert) len dist lcd)
                 (setf insert 0)
                 (let ((rs (+ pos 2)) (re (min (+ pos len) store-end)))
                   (declare (type fixnum rs re))
@@ -3834,19 +4127,37 @@ insert) is added here.  Same commands, same (values CMDS USED)."
                           (store pos) (incf insert 2) (incf pos 2)))))))))
       (incf insert (- n pos))
       (when (plusp insert)
-        (push-cmd insert (- n insert) 0 0))
+        (push-cmd insert (- n insert) 0 0 0))
       ;; (values CMDS USED): only CMDS[0..USED) is this input's commands.
       (values cmds (* 5 ncmd)))))
 
 ;; C's H6 (hash_longest_match64_inc.h) for q5-q9 on >= 1 MiB inputs with
-;; lgwin >= 19 (ChooseHasher): 2^15 keys, a ring of 2^BLOCK-BITS candidates
-;; per key (BLOCK-BITS = quality - 1), the 5-byte 64-bit hash, NDIST distance
-;; cache candidates (4 / 10 / 16).  Same driver as DEFINE-QUICK-MATCHER
-;; (BrotliCreateBackwardReferences) with q >= 5's lazy search.  No static
-;; dictionary.
-(defmacro define-h6-matcher (name block-bits ndist)
-  (let ((sr (intern (format nil "~A-STORE-RANGE" (symbol-name name))))
-        (bsize (ash 1 block-bits)) (bmask (1- (ash 1 block-bits))))
+;; lgwin >= 19, and H5 (hash_longest_match_inc.h, HASH-BYTES 4) below 1 MiB
+;; (ChooseHasher): 2^BUCKET-BITS keys, a ring of 2^BLOCK-BITS candidates
+;; per key (BLOCK-BITS = quality - 1), H6's 5-byte 64-bit hash or H5's
+;; 4-byte 32-bit one, NDIST distance cache candidates (4 / 10 / 16), and
+;; C's static-dictionary probe when nothing scored.  Same driver as
+;; DEFINE-QUICK-MATCHER (BrotliCreateBackwardReferences) with q >= 5's lazy
+;; search.  Commands carry DICTP = 1 + cut for dictionary words.
+(defmacro define-h6-matcher (name block-bits ndist &key (hash-bytes 5) (bucket-bits 15))
+  (let* ((sr (intern (format nil "~A-STORE-RANGE" (symbol-name name))))
+         (bsize (ash 1 block-bits)) (bmask (1- (ash 1 block-bits)))
+         (htl (if (= hash-bytes 5) 8 4))          ; HashTypeLength = StoreLookahead
+         (hash-form
+           (if (= hash-bytes 5)
+               `(ash (logand (* (logand (ptr-u64 sap i) #xFFFFFFFFFF)
+                                #x1FE35A7BD3579BD3)
+                             #xFFFFFFFFFFFFFFFF)
+                     ,(- bucket-bits 64))
+               `(ash (logand (* (ptr-u32 sap i) #x1E35A7BD) #xFFFFFFFF)
+                     ,(- bucket-bits 32))))
+         (tag (format nil "~A-~D" (if (= hash-bytes 5) "H6" "H5") block-bits))
+         (bkey (intern (format nil "~A-BUCKETS" tag) :keyword))
+         (bcount (ash 1 (+ bucket-bits block-bits)))
+         ;; the assembly matcher of this hasher and quality (q = block bits + 1)
+         (asm (intern (format nil "%ASM-~A-Q~D" (if (= hash-bytes 5) "H6" "H5")
+                              (1+ block-bits))
+                      "CL-BROTLI.LISP")))
     `(progn
        (defun ,sr (sap buckets num start end)
          (declare (type ptr sap)
@@ -3854,10 +4165,7 @@ insert) is added here.  Same commands, same (values CMDS USED)."
                   (type fixnum start end)
                   (optimize (speed 3) (safety 0)))
          (loop for i of-type fixnum from start below end do
-           (let* ((key (ash (logand (* (logand (ptr-u64 sap i) #xFFFFFFFFFF)
-                                       #x1FE35A7BD3579BD3)
-                                    #xFFFFFFFFFFFFFFFF)
-                            -49))
+           (let* ((key ,hash-form)
                   (nk (aref num key)))
              (declare (type fixnum key nk))
              (setf (aref buckets (+ (ash key ,block-bits) (logand nk ,bmask))) i
@@ -3871,16 +4179,11 @@ insert) is added here.  Same commands, same (values CMDS USED)."
          #+cl-brotli-x86-64
          (return-from ,name
            (%asm-h6-drive data window ,block-bits
-                          (pooled-u32 ,(intern (format nil "H6-BUCKETS-~D" block-bits) :keyword)
-                                      ,(ash 1 (+ 15 block-bits)) nil)
-                          (lambda (st ctx)
-                            (,(intern (format nil "%ASM-H6-~A"
-                                              (subseq (symbol-name name) (length "%LZ77-H6-")))
-                                      "CL-BROTLI.LISP")
-                             st ctx))))
+                          (pooled-u32 ,bkey ,bcount nil)
+                          (lambda (st ctx) (,asm st ctx))
+                          ,htl))
          (let* ((n (length data))
-                (buckets (pooled-u32 ,(intern (format nil "H6-BUCKETS-~D" block-bits) :keyword)
-                                     ,(ash 1 (+ 15 block-bits)) nil))
+                (buckets (pooled-u32 ,bkey ,bcount nil))
                 (num (pooled-u32 :h6-num 32768 0))
                 (cmds (let ((pool *scratch-pool*) (want (* 5 (max 4096 (ash n -5)))))
                         (or (and pool
@@ -3891,25 +4194,26 @@ insert) is added here.  Same commands, same (values CMDS USED)."
                               v))))
                 (ncmd 0)
                 (dc (make-array 16 :element-type 'fixnum :initial-element 0))
-                (store-end (if (>= n 8) (- n 7) 0))
+                (store-end (if (>= n ,htl) (- n ,(1- htl)) 0))
                 (pos 0) (insert 0)
                 (rh-window ,(if (< block-bits 8) 64 512))  ; q < 9 : 64
                 (apply-rh 0)
-                (kmin 2020))
+                (kmin 2020)
+                (dict (load-dict)) (dtab (c-dict-hash))
+                (dlookups 0) (dmatches 0))
            (declare (type (simple-array (unsigned-byte 32) (*)) buckets num)
                     (type (simple-array fixnum (*)) cmds)
                     (type (simple-array fixnum (16)) dc)
                     (type (integer 0 #.(ash 1 40)) ncmd)
-                    (type fixnum store-end pos insert rh-window apply-rh kmin))
+                    (type fixnum store-end pos insert rh-window apply-rh kmin
+                          dlookups dmatches)
+                    (type (simple-array (unsigned-byte 8) (*)) dict)
+                    (type (simple-array (unsigned-byte 16) (32768)) dtab))
            (setf (aref dc 0) 4 (aref dc 1) 11 (aref dc 2) 15 (aref dc 3) 16
                  apply-rh rh-window)
            (labels ((hash (i)
                       (declare (type fixnum i))
-                      (the fixnum
-                           (ash (logand (* (logand (ptr-u64 sap i) #xFFFFFFFFFF)
-                                           #x1FE35A7BD3579BD3)
-                                        #xFFFFFFFFFFFFFFFF)
-                                -49)))
+                      (the fixnum ,hash-form))
                     (store (i)
                       (declare (type fixnum i))
                       (let* ((key (hash i)) (nk (aref num key)))
@@ -3930,8 +4234,8 @@ insert) is added here.  Same commands, same (values CMDS USED)."
                                     (aref dc 12) (- d1 2) (aref dc 13) (+ d1 2)
                                     (aref dc 14) (- d1 3) (aref dc 15) (+ d1 3)))))
                       nil)
-                    (push-cmd (ins ls cpy dist)
-                      (declare (type fixnum ins ls cpy dist))
+                    (push-cmd (ins ls cpy dist dictp)
+                      (declare (type fixnum ins ls cpy dist dictp))
                       (when (>= (* 5 (1+ ncmd)) (length cmds))
                         (let ((new (make-array (* 2 (length cmds)) :element-type 'fixnum)))
                           (replace new cmds)
@@ -3941,15 +4245,17 @@ insert) is added here.  Same commands, same (values CMDS USED)."
                         (declare (type fixnum b))
                         (setf (aref cmds b) ins (aref cmds (+ b 1)) ls
                               (aref cmds (+ b 2)) cpy (aref cmds (+ b 3)) dist
-                              (aref cmds (+ b 4)) 0))
+                              (aref cmds (+ b 4)) dictp))
                       (incf ncmd))
                     (find-longest (cur)
-                      ;; C FindLongestMatch (H6): (values len distance score)
+                      ;; C FindLongestMatch (H5/H6): (values len distance
+                      ;; score lcd), LCD = 1 + cut for a dictionary word
                       (declare (type fixnum cur))
                       (let ((maxb (min cur window))
                             (best-len 0) (best-score kmin)
-                            (out-len 0) (out-dist 0) (out-score kmin))
-                        (declare (type fixnum maxb best-len best-score out-len out-dist out-score))
+                            (out-len 0) (out-dist 0) (out-score kmin) (out-lcd 0))
+                        (declare (type fixnum maxb best-len best-score out-len out-dist
+                                       out-score out-lcd))
                         ;; distance cache first
                         (loop for i of-type fixnum below ,ndist do
                           (let* ((backward (aref dc i))
@@ -4001,31 +4307,38 @@ insert) is added here.  Same commands, same (values CMDS USED)."
                                             out-len len out-dist backward out-score score)))))))
                           (setf (aref buckets (+ base (logand nk ,bmask))) cur
                                 (aref num key) (logand (1+ nk) #xFFFF)))
-                        (values out-len out-dist out-score))))
+                        ;; C SearchInStaticDictionary (shallow = false)
+                        (when (= out-score kmin)
+                          (c-dict-search (data cur (- n cur) maxb dtab dict
+                                               dlookups dmatches nil)
+                              out-score
+                            (setf out-len len out-dist dist out-lcd lcd)))
+                        (values out-len out-dist out-score out-lcd))))
              (declare (inline hash store prepare-dc find-longest))
              (prepare-dc)
-             (loop while (< (+ pos 8) n) do
-               (multiple-value-bind (len dist score) (find-longest pos)
-                 (declare (type fixnum len dist score))
+             (loop while (< (+ pos ,htl) n) do
+               (multiple-value-bind (len dist score lcd) (find-longest pos)
+                 (declare (type fixnum len dist score lcd))
                  (if (> score kmin)
                      (let ((delayed 0))
                        (declare (type fixnum delayed))
                        (loop
-                         (multiple-value-bind (l2 d2 s2) (find-longest (1+ pos))
-                           (declare (type fixnum l2 d2 s2))
+                         (multiple-value-bind (l2 d2 s2 c2) (find-longest (1+ pos))
+                           (declare (type fixnum l2 d2 s2 c2))
                            (if (>= s2 (+ score 175))
                                (progn
                                  (incf pos) (incf insert)
-                                 (setf len l2 dist d2 score s2)
-                                 (unless (and (< (incf delayed) 4) (< (+ pos 8) n))
+                                 (setf len l2 dist d2 score s2 lcd c2)
+                                 (unless (and (< (incf delayed) 4) (< (+ pos ,htl) n))
                                    (return)))
                                (return))))
                        (setf apply-rh (+ pos (* 2 len) rh-window))
-                       (when (/= dist (aref dc 0))
+                       ;; a dictionary word's distance is not pushed
+                       (when (and (zerop lcd) (/= dist (aref dc 0)))
                          (setf (aref dc 3) (aref dc 2) (aref dc 2) (aref dc 1)
                                (aref dc 1) (aref dc 0) (aref dc 0) dist)
                          (prepare-dc))
-                       (push-cmd insert (- pos insert) len dist)
+                       (push-cmd insert (- pos insert) len dist lcd)
                        (setf insert 0)
                        (let ((rs (+ pos 2)) (re (min (+ pos len) store-end)))
                          (declare (type fixnum rs re))
@@ -4037,17 +4350,17 @@ insert) is added here.  Same commands, same (values CMDS USED)."
                        (incf insert) (incf pos)
                        (when (> pos apply-rh)
                          (if (> pos (+ apply-rh (* 4 rh-window)))
-                             (let ((jump (min (+ pos 16) (- n 7))))
+                             (let ((jump (min (+ pos 16) (- n ,(max (1- htl) 4)))))
                                (declare (type fixnum jump))
                                (loop while (< pos jump) do
                                  (store pos) (incf insert 4) (incf pos 4)))
-                             (let ((jump (min (+ pos 8) (- n 7))))
+                             (let ((jump (min (+ pos 8) (- n ,(max (1- htl) 2)))))
                                (declare (type fixnum jump))
                                (loop while (< pos jump) do
                                  (store pos) (incf insert 2) (incf pos 2)))))))))
              (incf insert (- n pos))
              (when (plusp insert)
-               (push-cmd insert (- n insert) 0 0))
+               (push-cmd insert (- n insert) 0 0 0))
              (values cmds (* 5 ncmd))))))))
 
 (define-h6-matcher %lz77-h6-q5 4 4)
@@ -4055,17 +4368,28 @@ insert) is added here.  Same commands, same (values CMDS USED)."
 (define-h6-matcher %lz77-h6-q7 6 10)
 (define-h6-matcher %lz77-h6-q8 7 10)
 (define-h6-matcher %lz77-h6-q9 8 16)
+(define-h6-matcher %lz77-h6-q5-h5 4 4 :hash-bytes 4 :bucket-bits 14)
+(define-h6-matcher %lz77-h6-q6-h5 5 4 :hash-bytes 4 :bucket-bits 14)
+(define-h6-matcher %lz77-h6-q7-h5 6 10 :hash-bytes 4 :bucket-bits 15)
+(define-h6-matcher %lz77-h6-q8-h5 7 10 :hash-bytes 4 :bucket-bits 15)
+(define-h6-matcher %lz77-h6-q9-h5 8 16 :hash-bytes 4 :bucket-bits 15)
 
-(define-quick-matcher %lz77-quick-h2 16 1 5)
+(define-quick-matcher %lz77-quick-h2 16 1 5 t)
 (define-quick-matcher %lz77-quick-h3 16 2 5)
-(define-quick-matcher %lz77-quick-h4 17 4 5)
+(define-quick-matcher %lz77-quick-h4 17 4 5 t)
 (define-quick-matcher %lz77-quick-h54 20 4 7)
 
 (defun %lz77-h6 (data sap window quality)
-  (case quality
-    (5 (%lz77-h6-q5 data sap window)) (6 (%lz77-h6-q6 data sap window))
-    (7 (%lz77-h6-q7 data sap window)) (8 (%lz77-h6-q8 data sap window))
-    (t (%lz77-h6-q9 data sap window))))
+  "C's q5-q9 hasher: H6 from 1 MiB (ChooseHasher's size hint), H5 below."
+  (if (>= (length data) #.(ash 1 20))
+      (case quality
+        (5 (%lz77-h6-q5 data sap window)) (6 (%lz77-h6-q6 data sap window))
+        (7 (%lz77-h6-q7 data sap window)) (8 (%lz77-h6-q8 data sap window))
+        (t (%lz77-h6-q9 data sap window)))
+      (case quality
+        (5 (%lz77-h6-q5-h5 data sap window)) (6 (%lz77-h6-q6-h5 data sap window))
+        (7 (%lz77-h6-q7-h5 data sap window)) (8 (%lz77-h6-q8-h5 data sap window))
+        (t (%lz77-h6-q9-h5 data sap window)))))
 
 (defun %lz77-quick (data sap window bits sweep hash-len)
   "C BrotliCreateBackwardReferences with HashLongestMatchQuickly
@@ -4119,10 +4443,57 @@ use only CMDS[0..USED)."
     1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
     1 1 1 1 1 1 1 1 1 1 1 1 0 0 0 0))
 
+;; C's InitCommandPrefixCodes (encode.c): kDefaultCommandDepths, the code
+;; BrotliCompressFragmentFast uses for the first meta-block - 64 command
+;; symbols (the +Q0-CMD-MAP+ order) then 64 distance symbols.  Tuned on
+;; typical data: ~10% fewer command/distance bits than a code built from
+;; the flat seed histogram, for a 448-bit header.
+(deftable +q0-default-depths+
+  (make-array 128 :element-type 'fixnum
+                  :initial-contents
+                  '(0 4 4 5 6 6 7 7 7 7 7 8 8 8 8 8
+                    0 0 0 4 4 4 4 4 5 5 6 6 6 6 7 7
+                    7 7 10 10 10 10 10 10 0 4 4 5 5 5 6 6
+                    7 8 8 9 10 10 10 10 10 10 10 10 10 10 10 10
+                    5 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+                    6 6 6 6 6 6 5 5 5 5 5 5 4 4 4 4
+                    4 4 4 5 5 5 5 5 5 6 6 7 7 7 8 10
+                    12 12 12 12 12 12 12 12 12 12 12 12 0 0 0 0)))
+(declaim (type (simple-array fixnum (128)) +q0-default-depths+))
+
+(defvar *q0-default-etrees* nil)
+(defun q0-default-etrees ()
+  "C's default q0 command (704-symbol) and distance (64-symbol) codes, built
+once (constant, shared: never handed to the arena)."
+  (let ((c *q0-default-etrees*))
+    (if c
+        (values (car c) (cdr c))
+        (let ((full (make-array 704 :element-type 'fixnum :initial-element 0))
+              (dl (make-array 64 :element-type 'fixnum :initial-element 0)))
+          (dotimes (c 64)
+            (let ((d (aref +q0-default-depths+ c)))
+              (when (plusp d) (setf (aref full (aref +q0-cmd-map+ c)) d))))
+          (dotimes (c 64) (setf (aref dl c) (aref +q0-default-depths+ (+ 64 c))))
+          (let* ((*arena* nil)
+                 (cmd (make-fixed-etree full 704))
+                 (dist (make-fixed-etree dl 64)))
+            (setf *q0-default-etrees* (cons cmd dist))
+            (values cmd dist))))))
+
+;; C's kDefaultCommandCode: the two default codes above as stored by
+;; BrotliStoreHuffmanTree (448 bits), written verbatim
+(deftable +q0-default-code-bytes+
+  (make-array 56 :element-type '(unsigned-byte 8)
+                 :initial-contents
+                 '(#xff #x77 #xd5 #xbf #xe7 #xde #xea #x9e #x51 #x5d #xde #xc6
+                   #x70 #x57 #xbc #x58 #x58 #x58 #xd8 #xd8 #x58 #xd5 #xcb #x8c
+                   #xea #xe0 #xc3 #x87 #x1f #x83 #xc1 #x60 #x1c #x67 #xb2 #xaa
+                   #x06 #x83 #xc1 #x60 #x30 #x18 #xcc #xa1 #xce #x88 #x54 #x94
+                   #x46 #xe1 #xb0 #xd0 #x4e #xb2 #xf7 #x04)))
+(declaim (type (simple-array (unsigned-byte 8) (56)) +q0-default-code-bytes+))
+
 (defun make-fixed-etree (lengths n)
-  (let ((codes (canonical-codes lengths n)))
-    (make-etree :lengths lengths :codes codes
-                :rcodes (reversed-codes codes lengths n))))
+  (make-etree :lengths lengths :rcodes (canonical-rcodes lengths n)))
 
 (defun fast-cmd-etree (et)
   "Map a 64-symbol fast command etree onto the full 704-symbol alphabet."
@@ -4256,18 +4627,28 @@ samples, stride-29 sampling plus one-count smoothing above."
   (let ((f (arena-fixnums 256)))
     (declare (type (simple-array fixnum (256)) f))
     (if (< n #x8000)
-        (progn
-          (dotimes (i n)
-            (declare (type fixnum i))
-            (incf (aref f (aref data i))))
-          (dotimes (i 256)
-            (declare (type fixnum i))
-            (incf (aref f i) (* 2 (min (aref f i) 11)))))
-        (let ((lanes (make-array 1024 :element-type 'fixnum :initial-element 0))
+        (let ((lanes (make-array 1024 :element-type '(unsigned-byte 32) :initial-element 0))
+              (i 0))
+          ;; four interleaved counters (see below)
+          (declare (type (simple-array (unsigned-byte 32) (1024)) lanes) (type fixnum i)
+                   (dynamic-extent lanes))
+          (loop while (<= (+ i 4) n)
+                do (incf (aref lanes (aref data i)))
+                   (incf (aref lanes (+ 256 (aref data (+ i 1)))))
+                   (incf (aref lanes (+ 512 (aref data (+ i 2)))))
+                   (incf (aref lanes (+ 768 (aref data (+ i 3)))))
+                   (incf i 4))
+          (loop while (< i n) do (incf (aref lanes (aref data i))) (incf i))
+          (dotimes (b 256)
+            (let ((c (+ (aref lanes b) (aref lanes (+ 256 b))
+                        (aref lanes (+ 512 b)) (aref lanes (+ 768 b)))))
+              (declare (type fixnum c))
+              (setf (aref f b) (+ c (* 2 (min c 11)))))))
+        (let ((lanes (make-array 1024 :element-type '(unsigned-byte 32) :initial-element 0))
               (i 0))
           ;; four interleaved counters: in a run of one byte value every
           ;; increment of a single counter waited on the previous one
-          (declare (type (simple-array fixnum (1024)) lanes) (type fixnum i)
+          (declare (type (simple-array (unsigned-byte 32) (1024)) lanes) (type fixnum i)
                    (dynamic-extent lanes))
           (loop while (< (+ i (* 3 29)) n)
                 do (incf (aref lanes (aref data i)))
@@ -4355,8 +4736,9 @@ their extra bits, distance codes 0..63."
   (declare (type (simple-array fixnum (*)) cmd-rc cmd-ln dist-rc dist-ln))
   (let ((cached *q0-luts*))
     (when (and cached
-               (equalp (first (car cached)) cmd-ln)
-               (equalp (second (car cached)) dist-ln))
+               (or (eq (third (car cached)) cmd-ln)
+                   (and (equalp (first (car cached)) cmd-ln)
+                        (equalp (second (car cached)) dist-ln))))
       (return-from %q0-luts (cdr cached))))
   (flet ((u64s (n) (make-array n :element-type '(unsigned-byte 64) :initial-element 0)))
     (let ((cmd (u64s 64)) (ins (u64s 6210)) (copy (u64s 2118)) (clast (u64s 2120))
@@ -4377,7 +4759,11 @@ their extra bits, distance codes 0..63."
         (loop for i from 4 below 2120
               do (multiple-value-call #'(lambda (cc e nb) (setf (aref clast i) (combine cc e nb))) (q0-copy-last-len i))))
       (let ((luts (list cmd ins copy clast dist)))
-        (setf *q0-luts* (cons (list (copy-seq cmd-ln) (copy-seq dist-ln)) luts))
+        ;; the third key: the constant default code's own vector (EQ)
+        (setf *q0-luts* (cons (list (copy-seq cmd-ln) (copy-seq dist-ln)
+                                    (and (eq cmd-ln (etree-lengths (q0-default-etrees)))
+                                         cmd-ln))
+                              luts))
         luts))))
 
 (defun %bwr-settle (w)
@@ -4436,7 +4822,9 @@ chunks.  Returns the final LIT-START and LAST-DIST."
                 (aref st +q0-wacc+) (b::bwr-acc w)
                 (aref st +q0-wnbits+) (b::bwr-nbits w)
                 (svref ctx +q0c-out+) (b:bwr-out w))
-          (%asm-fragment-fast st ctx)
+          (if (= table-bits 15)
+              (%asm-fragment-fast st ctx)
+              (%asm-fragment-fast-v st ctx))
           ;; back to BWR's form: whole bytes out, NBITS < 8
           (let ((out (b:bwr-out w)) (pos (aref st +q0-wpos+))
                 (acc (aref st +q0-wacc+)) (nb (aref st +q0-wnbits+)))
@@ -4470,29 +4858,35 @@ chunks.  Returns the final LIT-START and LAST-DIST."
                      (logior cc (if (>= (aref +q0-cmd-map+ cc) 128) 128 0)))))
     (list ins copy clast)))
 
-(defun %asm-q1-scan (data table cv n limit window table-bits k back p next-hash
-                     litf cmdf distf)
-  "Run %LZ77-FRAGMENT-TWO-PASS's scan with %ASM-FRAGMENT-RECORD, growing CV
-between chunks.  Returns the final LIT-START, LAST-DIST, NC and CV."
+(defun %asm-q1-scan (data table cv start bend limit window table-bits k
+                     next-hash litf cmdf distf)
+  "C CreateCommands for the q1 block [START, BEND) through the assembly
+scan (%ASM-FRAGMENT-RECORD for K 6, -RECORD4 for K 4), growing CV between
+chunks.  Returns the final LIT-START and NC (the records) and CV."
   (declare (type (simple-array (unsigned-byte 8) (*)) data)
            (type (simple-array (unsigned-byte 32) (*)) table cv)
-           (type fixnum n limit window table-bits k back p next-hash)
+           (type fixnum start bend limit window table-bits k next-hash)
            (type (simple-array fixnum (*)) litf cmdf distf)
            (optimize (speed 3) (safety 0)))
   (destructuring-bind (inscc copycc clastcc) +q1-cc-luts+
     (let ((st (arena-u64s +q0-st-size+))
-          (ctx (arena-svec +q0-ctx-size+)))
-      (declare (type (simple-array (unsigned-byte 64) (*)) st) (type simple-vector ctx))
+          (ctx (arena-svec +q0-ctx-size+))
+          (n (length data)))
+      (declare (type (simple-array (unsigned-byte 64) (*)) st) (type simple-vector ctx)
+               (type fixnum n))
       (setf (svref ctx +q0c-data+) data (svref ctx +q0c-table+) table
             (svref ctx +q0c-litf+) litf (svref ctx +q0c-cmdf+) cmdf
             (svref ctx +q0c-distf+) distf (svref ctx +q0c-inscc+) inscc
             (svref ctx +q0c-copycc+) copycc (svref ctx +q0c-clastcc+) clastcc)
-      (setf (aref st +q0-p+) p (aref st +q0-lit-start+) 0
+      ;; N bounds the match length (C: ip_end, the block end); N8 the
+      ;; 8-byte loads (the whole input)
+      (setf (aref st +q0-p+) (1+ start) (aref st +q0-lit-start+) start
             (aref st +q0-last-dist+) (ldb (byte 64 0) -1)
             (aref st +q0-next-hash+) next-hash (aref st +q0-mode+) 0
-            (aref st +q0-n+) n (aref st +q0-limit+) limit (aref st +q0-window+) window
+            (aref st +q0-n+) bend (aref st +q0-limit+) limit (aref st +q0-window+) window
             (aref st +q0-shift+) (- 64 table-bits) (aref st +q0-k+) k
-            (aref st +q0-back+) back (aref st +q0-nc+) 0 (aref st +q0-n8+) (- n 8)
+            (aref st +q0-back+) (if (= k 4) 3 5) (aref st +q0-nc+) 0
+            (aref st +q0-n8+) (- n 8)
             (aref st +q0-c39flag+) (if (>= (aref +q0-cmd-map+ 39) 128) 128 0))
       (loop
         (let* ((at (if (= (aref st +q0-mode+) 1) (aref st +q0-next-ip+) (aref st +q0-p+)))
@@ -4508,11 +4902,11 @@ between chunks.  Returns the final LIT-START, LAST-DIST, NC and CV."
               (when *scratch-pool* (setf (gethash :frag2-cv *scratch-pool*) new))
               (setf cv new)))
           (setf (aref st +q0-chunk-end+) chunk-end (svref ctx +q0c-cv+) cv)
-          (%asm-fragment-record st ctx)
+          (if (= k 4)
+              (%asm-fragment-record4 st ctx)
+              (%asm-fragment-record st ctx))
           (when (zerop (aref st +q0-exit+))
             (return (values (the fixnum (aref st +q0-lit-start+))
-                            (let ((d (aref st +q0-last-dist+)))
-                              (if (logbitp 63 d) (- d (ash 1 64)) d))
                             (the fixnum (aref st +q0-nc+))
                             cv))))))))
 )
@@ -4526,7 +4920,10 @@ between chunks.  Returns the final LIT-START, LAST-DIST, NC and CV."
          (k (if (<= table-bits 16) 5 6))
          (min-match k)
          (hmask (1- (ash 1 table-bits)))
-         (table (pooled-u32 :frag1-table (ash 1 table-bits) #xFFFFFFFF))
+         ;; C GetHashTable: zeroed (a fresh entry is a candidate at 0)
+         (table (let ((v (pooled-u32 :frag1-table #.(ash 1 15) nil)))
+                  (fill v 0 :end (ash 1 table-bits))
+                  v))
          (litf (%sample-lit-histogram data n))
          (cmdf (make-array 64 :element-type 'fixnum :initial-element 0))
          (distf (make-array 64 :element-type 'fixnum :initial-element 0))
@@ -4566,9 +4963,8 @@ between chunks.  Returns the final LIT-START, LAST-DIST, NC and CV."
     ;; codes - and the header is written before the scan; the scan then emits
     ;; directly into W.
     (progn
-      (setf lit-1p (build-etree litf 256 15)
-            cmd-1p (fast-cmd-etree (build-etree cmdf 64 15))
-            dist-1p (build-etree distf 64 14))
+      (setf lit-1p (build-etree litf 256 15))
+      (multiple-value-setq (cmd-1p dist-1p) (q0-default-etrees))
       (setf lit-rc-1p (or (etree-rcodes lit-1p) +empty-fixnums+)
             lit-ln-1p (or (etree-lengths lit-1p) +empty-fixnums+)
             lit-1p-single (etree-single lit-1p)
@@ -4586,8 +4982,8 @@ between chunks.  Returns the final LIT-START, LAST-DIST, NC and CV."
       (b:wbits w 0 2)
       (b:wbits w 0 1) (b:wbits w 0 1)
       (write-etree w lit-1p 256)
-      (write-etree w cmd-1p 704)
-      (write-etree w dist-1p 64))
+      (let ((code +q0-default-code-bytes+))
+        (dotimes (i 56) (b:wbits w (aref code i) 8))))
     (labels ((hash (i)
                ;; The 8-byte load in %HASHF-SAP reads i..i+7; within 3 bytes
                ;; of the end that crosses the vector boundary (C's matcher
@@ -4713,7 +5109,7 @@ decisions; used only when W is non-nil."
       ;; x86-64 SBCL: the same scan in assembly (src/evops.lisp); it leaves
       ;; LIT-START / LAST-DIST for the remainder below, bit-identical
       #+cl-brotli-x86-64
-      (when (and (> n 8) (= k 5) (= table-bits 15) (not cmd-1p-single) (not dist-1p-single))
+      (when (and (> n 8) (= k 5) (not cmd-1p-single) (not dist-1p-single))
         (multiple-value-bind (ls ld)
             (%asm-q0-scan data table w n limit window table-bits k back p (hash p)
                           lit-rc-1p lit-ln-1p (and lit-1p-single t)
@@ -4805,175 +5201,238 @@ decisions; used only when W is non-nil."
           (setf last-dist (emit-one insert lit-start 0 0 last-dist))))
       nil)))
 
-(defun %lz77-fragment-two-pass (data sap window table-bits)
-  (declare (type (simple-array (unsigned-byte 8) (*)) data)
-           (type ptr sap)
-           (type fixnum window) (type (integer 10 24) table-bits)
+;;; q1: C's BrotliCompressFragmentTwoPass.  The input in 128 KiB blocks,
+;;; one meta-block each (or an uncompressed one when ShouldCompress says
+;;; so), a hash table of HashTableSize(2^17, n) zeroed entries shared by
+;;; the blocks, min_match 4 with a 4-byte hash up to 2^15 entries, else 6
+;;; and a 6-byte hash.  Per block (CreateCommands): last distance reset,
+;;; the scan starts at the block's second byte, copies end at the block
+;;; end, and the first byte past the last copy is skipped.  Distances
+;;; reach the whole window (C: 2^18 - 16): never larger than C's output.
+
+(declaim (inline q1-hash-4 q1-hash-6))
+(defun q1-hash-4 (sap i shift)
+  "C two-pass Hash(p, shift, 4): ((load64 << 32) * kHashMul32) >> shift."
+  (declare (type ptr sap) (type fixnum i) (type (integer -63 -1) shift)
            (optimize (speed 3) (safety 0)))
+  (let* ((w (ptr-u64 sap i))
+         (b (logand (ash w 32) #xFFFFFFFFFFFFFFFF))
+         (c (logand (* b #x1E35A7BD) #xFFFFFFFFFFFFFFFF)))
+    (declare (type (unsigned-byte 64) w b c))
+    (the fixnum (ash c shift))))
+(defun q1-hash-6 (sap i shift)
+  "C two-pass Hash(p, shift, 6): ((load64 << 16) * kHashMul32) >> shift."
+  (declare (type ptr sap) (type fixnum i) (type (integer -63 -1) shift)
+           (optimize (speed 3) (safety 0)))
+  (let* ((w (ptr-u64 sap i))
+         (b (logand (ash w 16) #xFFFFFFFFFFFFFFFF))
+         (c (logand (* b #x1E35A7BD) #xFFFFFFFFFFFFFFFF)))
+    (declare (type (unsigned-byte 64) w b c))
+    (the fixnum (ash c shift))))
+
+(defmacro define-q1-scan (name k)
+  "C CreateCommands with min_match K (4 or 6) over the block [START, BEND):
+records (ins lit-start cpy dist) into CV from NC, histograms via
+NOTE-FAST-COMMAND.  Returns (values CV NC)."
+  `(defun ,name (data sap window table shift cv nc start bend litf cmdf distf)
+     (declare (type (simple-array (unsigned-byte 8) (*)) data)
+              (type ptr sap)
+              (type fixnum window nc start bend)
+              (type (integer -63 -1) shift)
+              (type (simple-array (unsigned-byte 32) (*)) table cv)
+              (type (simple-array fixnum (256)) litf)
+              (type (simple-array fixnum (64)) cmdf distf)
+              (optimize (speed 3) (safety 0)))
+     (let* ((n (length data))
+            (bsize (- bend start))
+            (lit-start start) (last-dist -1))
+       (declare (type fixnum n bsize lit-start last-dist))
+       (labels ((hash (i)
+                  (declare (type fixnum i))
+                  (,(if (= k 4) 'q1-hash-4 'q1-hash-6) sap i shift))
+                (is-match (a b)
+                  (declare (type fixnum a b))
+                  (and (= (ptr-u32 sap a) (ptr-u32 sap b))
+                       ,@(when (= k 6) '((= (ptr-u16 sap (+ a 4)) (ptr-u16 sap (+ b 4)))))))
+                (push-cmd (ins ls cpy dist)
+                  (declare (type fixnum ins ls cpy dist))
+                  (when (>= (* 4 (1+ nc)) (length cv))
+                    (let ((new (make-array (* 2 (length cv))
+                                           :element-type '(unsigned-byte 32))))
+                      (replace new cv)
+                      (when *scratch-pool* (setf (gethash :frag2-cv *scratch-pool*) new))
+                      (setf cv new)))
+                  (let ((b (* 4 nc)))
+                    (declare (type fixnum b))
+                    (setf (aref cv b) ins (aref cv (+ b 1)) ls
+                          (aref cv (+ b 2)) cpy (aref cv (+ b 3)) dist))
+                  (incf nc)
+                  (setf last-dist (note-fast-command data litf cmdf distf last-dist
+                                                     ins ls cpy dist))))
+         (declare (inline hash is-match))
+         (when (>= bsize 16)                   ; kInputMarginBytes
+           (let* ((limit (+ start (min (- bsize ,k) (- n start 16))))
+                  (p (1+ start))
+                  (next-hash (hash p)))
+             (declare (type fixnum limit p next-hash))
+             (block scan
+               (loop
+                 (let ((skip 32) (next-ip p) (cand 0))
+                   (declare (type fixnum skip next-ip cand))
+                   ;; trawl: C's do-while, re-entered when the candidate is
+                   ;; too far (goto trawl keeps SKIP)
+                   (loop
+                     (let ((h next-hash) (found nil))
+                       (declare (type fixnum h))
+                       (setf p next-ip
+                             next-ip (+ p (ash skip -5)))
+                       (incf skip)
+                       (when (> next-ip limit) (return-from scan))
+                       (setf next-hash (hash next-ip))
+                       (let ((c (- p last-dist)))
+                         (declare (type fixnum c))
+                         (when (and (< c p) (is-match p c))
+                           (setf (aref table h) p cand c found t)))
+                       (unless found
+                         (setf cand (aref table h) (aref table h) p)
+                         (setf found (is-match p cand)))
+                       (when (and found (<= (- p cand) window))
+                         (return))))
+                   ;; emit the match with the literals before it
+                   (let* ((base p)
+                          (matched (+ ,k (%match-len-sap-frag sap (+ cand ,k) (+ p ,k) bend))))
+                     (declare (type fixnum base matched))
+                     (incf p matched)
+                     (push-cmd (- base lit-start) lit-start matched (- base cand))
+                     (setf lit-start p))
+                   (when (>= p limit) (return-from scan))
+                   (let ((cur 0))
+                     (declare (type fixnum cur))
+                     ,(if (= k 4)
+                          ;; C's first-emit update stores p-1 under hash(p-3)
+                          '(let ((h3 (hash (- p 3))))
+                             (setf (aref table h3) (- p 3)
+                                   (aref table (hash (- p 2))) (- p 2)
+                                   (aref table h3) (- p 1)))
+                          '(loop for q of-type fixnum from (- p 5) below p
+                                 do (setf (aref table (hash q)) q)))
+                     (setf cur (hash p) cand (aref table cur) (aref table cur) p)
+                     ;; back-to-back copies
+                     (loop while (and (<= (- p cand) window) (is-match p cand)) do
+                       (let* ((base p)
+                              (matched (+ ,k (%match-len-sap-frag sap (+ cand ,k) (+ p ,k) bend))))
+                         (declare (type fixnum base matched))
+                         (incf p matched)
+                         (push-cmd 0 base matched (- base cand))
+                         (setf lit-start p)
+                         (when (>= p limit) (return-from scan))
+                         (loop for q of-type fixnum from (- p ,(1- k)) below p
+                               do (setf (aref table (hash q)) q))
+                         (setf cur (hash p) cand (aref table cur) (aref table cur) p))))
+                   (incf p)
+                   (setf next-hash (hash p)))))))
+         ;; emit_remainder
+         (when (< lit-start bend)
+           (push-cmd (- bend lit-start) lit-start 0 0))
+         (values cv nc)))))
+
+(define-q1-scan %q1-scan-4 4)
+(define-q1-scan %q1-scan-6 6)
+
+(defun q1-should-compress (data start bsize num-literals)
+  "C ShouldCompress (compress_fragment_two_pass.c): MIN_RATIO 0.98,
+SAMPLE_RATE 43."
+  (declare (type (simple-array (unsigned-byte 8) (*)) data)
+           (type fixnum start bsize num-literals))
+  (or (< num-literals (* 0.98d0 bsize))
+      (let ((h (arena-fixnums 256)) (total 0))
+        (declare (type (simple-array fixnum (*)) h) (type fixnum total))
+        (loop for i of-type fixnum from 0 below bsize by 43
+              do (incf (aref h (aref data (+ start i)))) (incf total))
+        (< (max (estimate-entropy h 0 256) (float total 1.0d0))
+           (/ (* bsize 8 0.98d0) 43)))))
+
+(defun write-uncompressed-metablock (w data start len)
+  "A non-last uncompressed meta-block of DATA[START, START + LEN)."
+  (let* ((m1 (1- len)) (nib (cond ((<= m1 #xFFFF) 4) ((<= m1 #xFFFFF) 5) (t 6))))
+    (b:wbits w 0 1)
+    (b:wbits w (- nib 4) 2)
+    (b:wbits w m1 (* 4 nib))
+    (b:wbits w 1 1)
+    (b:w-align w)
+    (b:w-bytes-range w data start (+ start len))))
+
+(defun write-q1-stream (w data window)
+  "Every meta-block of a q1 stream (C BrotliCompressFragmentTwoPass), after
+the window bits."
+  (declare (type (simple-array (unsigned-byte 8) (*)) data) (type fixnum window))
   (let* ((n (length data))
-         (k (if (<= table-bits 16) 5 6))
-         (min-match k)
-         (hmask (1- (ash 1 table-bits)))
-         ;; pooled per compressor (C owns these in the encoder state):
-         ;; a fresh 512 KiB table + command vector per call was ~6% of q1
-         (table (pooled-u32 :frag2-table (ash 1 table-bits) #xFFFFFFFF))
-         (cv (pooled-u32 :frag2-cv (* 4 (max 4096 (ash n -5))) nil))
-         (nc 0)
-         (litf (make-array 256 :element-type 'fixnum
-                                     :initial-element 0))
-         (cmdf (make-array 64 :element-type 'fixnum :initial-element 0))
-         (distf (make-array 64 :element-type 'fixnum :initial-element 0))
-         (lit-start 0) (p 1) (limit (- n k))
-         (last-dist -1) (back (if (= k 5) 3 5))
-         (shift (the fixnum (- table-bits 64)))
-         )
-    (declare (type fixnum k min-match p lit-start limit last-dist back nc)
-             ;; SHIFT = table-bits - 64 is always in -63..-1 (table-bits
-             ;; 1..63), so ASH compiles to ONE sar/shr by CL instead of the
-             ;; generic sign-check + clamp + branch dance (~9 instructions
-             ;; and 3 branches PER HASH, and hashes run on every trawl
-             ;; iteration and every interior store)
-             (type (integer -63 -1) shift)
-             (type (simple-array (unsigned-byte 32) (*)) table cv)
-             (type (simple-array fixnum (256)) litf)
-             (type (simple-array fixnum (64)) cmdf distf)
-             )
-    (replace cmdf +q0-seed-cmd+)
-    (replace distf +q0-seed-dist+)
-    (labels ((hash (i)
-               ;; The 8-byte load in %HASHF-SAP reads i..i+7; within 3 bytes
-               ;; of the end that crosses the vector boundary (C's matcher
-               ;; keeps a 16-byte margin we do not have), so the tail
-               ;; positions compute the same hash from a 5-byte u40 build.
-               (if (<= (+ i 8) n)
-                   (%hashf-sap sap i shift hmask)
-                   (%hashf-tail data i shift hmask)))
-             (prefix-match (a b)
-               (and (= (ptr-u32 sap a)
-                       (ptr-u32 sap b))
-                    (if (= k 5)
-                        (= (ptr-u8 sap (+ a 4))
-                           (ptr-u8 sap (+ b 4)))
-                        (= (ptr-u16 sap (+ a 4))
-                           (ptr-u16 sap (+ b 4))))))
-             (mlen (a b) (%match-len-sap sap a b n))
-             (push-cmd (ins ls cpy dist)
-               (when (>= (* 4 nc) (length cv))
-                 (let ((new (make-array (* 2 (length cv))
-                                        :element-type '(unsigned-byte 32))))
-                   (replace new cv)
-                   (when *scratch-pool* (setf (gethash :frag2-cv *scratch-pool*) new))
-                   (setf cv new)))
-               (let ((b (* 4 nc)))
-                 (setf (aref cv b) ins
-                       (aref cv (+ b 1)) ls
-                       (aref cv (+ b 2)) cpy
-                       (aref cv (+ b 3)) dist))
-               (incf nc)))
-        (declare (inline hash prefix-match push-cmd))
-      ;; x86-64 SBCL: the same scan in assembly (src/evops.lisp)
-      #+cl-brotli-x86-64
-      (when (and (> n 8) (= k 6) (= table-bits 17))
-        (multiple-value-bind (ls ld c new-cv)
-            (%asm-q1-scan data table cv n limit window table-bits k back p (hash p)
-                          litf cmdf distf)
-          (setf lit-start ls last-dist ld nc c cv new-cv p n)))
-      (when (and (> n k) (< p n))
-        (let ((next-hash (hash p)))
-          (declare (type fixnum next-hash))
-          (block scan
-            (loop
-              ;; Step 1: trawl for a k-byte match, with C's skip heuristic.
-              (let ((skip 32) (cand #xFFFFFFFF) (next-ip p))
-                (declare (type fixnum skip next-ip)
-                         (type (unsigned-byte 32) cand))
-                (block trawl
-                  (loop
-                    (let* ((h next-hash)
-                           (step (ash skip -5)))
-                      (declare (type fixnum h step))
-                      (incf skip)
-                      (setf p next-ip)
-                      (setf next-ip (+ p step))
-                      (when (> next-ip limit) (return-from scan nil))
-                      (setf next-hash (hash next-ip))
-                      ;; C checks the previous distance before the table.
-                      (when (> last-dist 0)
-                        (let ((ld (- p last-dist)))
-                          (when (prefix-match p ld)
-                            (setf (aref table h) p
-                                  cand ld)
-                            (return-from trawl nil))))
-                      (let ((c2 (aref table h)))
-                        (setf (aref table h) p)
-                        ;; C checks the distance only once, after a
-                        ;; prefix-match succeeds; the two guards dropped
-                        ;; here are invariants of the table (see GAP 165).
-                        (when (and (/= c2 #xFFFFFFFF)
-                                   (prefix-match p c2)
-                                   (<= (- p c2) window))
-                          (setf cand c2)
-                          (return-from trawl nil))))))
-                ;; Step 2: emit the found match plus the pending literals.
-                (let* ((base p)
-                       (matched (+ min-match (%match-len-sap-frag sap (+ cand k) (+ p k) n)))
-                       (distance (- base cand))
-                       (insert (- base lit-start)))
-                  (declare (type fixnum matched distance insert))
-                  (progn
-                        (push-cmd insert lit-start matched distance)
-                        (setf last-dist
-                              (note-fast-command data litf cmdf distf last-dist
-                                                 insert lit-start matched
-                                                 distance)))
-                  (incf p matched)
-                  (setf lit-start p))
-                (when (>= p limit) (return-from scan nil))
-                ;; Insert hashes for positions inside the copy.
-                (loop for q from (max 0 (- p back)) below p
-                      do (setf (aref table (hash q)) q))
-                (let* ((cur-hash (hash p))
-                       (cand2 (aref table cur-hash)))
-                  (declare (type fixnum cur-hash)
-                           (type (unsigned-byte 32) cand2))
-                  (setf (aref table cur-hash) p)
-                  ;; Consecutive copies with no literal bytes in between.
-                  (loop while (and (/= cand2 #xFFFFFFFF)
-                                   (< cand2 p)
-                                   (<= (- p cand2) window)
-                                   (prefix-match p cand2))
-                        do
-                        (let* ((base p)
-                               (matched (+ min-match
-                                           (%match-len-sap-frag2
-                                            sap (+ cand2 k) (+ p k) n)))
-                               (distance (- base cand2)))
-                          (declare (type fixnum matched distance))
-                          (progn
-                                (push-cmd 0 p matched distance)
-                                (setf last-dist
-                                      (note-fast-command data litf cmdf distf
-                                         last-dist 0 p matched distance)))
-                          (incf p matched)
-                          (setf lit-start p))
-                        (when (>= p limit) (return-from scan nil))
-                        (loop for q from (max 0 (- p back)) below p
-                              do (setf (aref table (hash q)) q))
-                        (setf cur-hash (hash p)
-                              cand2 (aref table cur-hash))
-                        (setf (aref table cur-hash) p))))
-              ;; No match at P: advance one byte and continue trawling.
-              (incf p)
-              (when (> p limit) (return-from scan nil))
-              (setf next-hash (hash p))))))
-      (when (< lit-start n)
-        (let ((insert (- n lit-start)))
-          (progn
-                (push-cmd insert lit-start 0 0)
-                (setf last-dist
-                      (note-fast-command data litf cmdf distf last-dist
-                                         insert lit-start 0 0)))))
-      (values cv nc litf cmdf distf))))
+         ;; HashTableSize(2^17, n): 256 doubled while below 2^17 and n
+         (tbits (max 8 (min 17 (integer-length (max 1 (1- n))))))
+         (k (if (<= tbits 15) 4 6))
+         (table (pooled-u32 :frag2-table (ash 1 tbits) nil))
+         (cv (pooled-u32 :frag2-cv (* 4 (max 4096 (ash (min n 131072) -4))) nil)))
+    (declare (type fixnum n tbits k)
+             (type (simple-array (unsigned-byte 32) (*)) table cv))
+    (fill table 0 :end (ash 1 tbits))       ; C GetHashTable: memset 0
+    (with-ptrs ((sap data))
+      (loop for start of-type fixnum from 0 below n by 131072 do
+        (let* ((bend (min n (+ start 131072)))
+               (bsize (- bend start))
+               (lastp (= bend n))
+               (litf (arena-fixnums 256))
+               (cmdf (arena-fixnums 64))
+               (distf (arena-fixnums 64))
+               (nc 0))
+          (declare (type fixnum bend bsize nc)
+                   (type (simple-array fixnum (256)) litf)
+                   (type (simple-array fixnum (64)) cmdf distf))
+          (let ((asm-done nil))
+            #+cl-brotli-x86-64
+            (when (>= bsize 16)
+              (let ((limit (+ start (min (- bsize k) (- n start 16)))))
+                (multiple-value-bind (ls c new-cv)
+                    (%asm-q1-scan data table cv start bend limit window tbits k
+                                  (if (= k 4)
+                                      (q1-hash-4 sap (1+ start) (- tbits 64))
+                                      (q1-hash-6 sap (1+ start) (- tbits 64)))
+                                  litf cmdf distf)
+                  (declare (type fixnum ls c))
+                  (setf cv new-cv nc c)
+                  ;; emit_remainder
+                  (when (< ls bend)
+                    (let ((insert (- bend ls)))
+                      (when (>= (* 4 (1+ nc)) (length cv))
+                        (let ((new (make-array (* 2 (length cv)) :element-type '(unsigned-byte 32))))
+                          (replace new cv)
+                          (when *scratch-pool* (setf (gethash :frag2-cv *scratch-pool*) new))
+                          (setf cv new)))
+                      (let ((b (* 4 nc)))
+                        (setf (aref cv b) insert (aref cv (+ b 1)) ls
+                              (aref cv (+ b 2)) 0 (aref cv (+ b 3)) 0))
+                      (incf nc)
+                      (note-fast-command data litf cmdf distf -1 insert ls 0 0)))
+                  (setf asm-done t))))
+            (unless asm-done
+              (multiple-value-setq (cv nc)
+                (if (= k 4)
+                    (%q1-scan-4 data sap window table (- tbits 64) cv 0 start bend litf cmdf distf)
+                    (%q1-scan-6 data sap window table (- tbits 64) cv 0 start bend litf cmdf distf)))))
+          (let ((num-literals (loop for v across litf sum v of-type fixnum)))
+            (declare (type fixnum num-literals))
+            (cond
+              ((q1-should-compress data start bsize num-literals)
+               ;; C StoreCommands' seeds
+               (incf (aref cmdf 1)) (incf (aref cmdf 2))
+               (incf (aref distf 0)) (incf (aref distf 20))
+               (write-mlen-header w bsize lastp)
+               (write-fast-block-body w data cv nc litf cmdf distf))
+              (t
+               (write-uncompressed-metablock w data start bsize)
+               (when lastp
+                 (b:wbits w 1 1) (b:wbits w 1 1)))))))))
+  nil)
+
 (defun lz77 (data window &key (use-dict (text-like-data-p data)) dict-limit
                               (base-pos 0) (max-chain 128) (lazy t)
                               (skip-match nil) (insert-interior t)
@@ -5001,10 +5460,15 @@ compression ratio for encoder throughput."
           ;; C keeps BrotliCompressFragmentFast (q0, one-pass) and
           ;; BrotliCompressFragmentTwoPass (q1) in separate translation
           ;; units; so do we - the writer decides which variant runs.
-          (let ((tb (if (<= max-chain 1) 15 17)))
-            (if one-pass
-                (%lz77-fragment-fast data sap window tb one-pass)
-                (%lz77-fragment-two-pass data sap window tb))))
+          ;; (q1, the two-pass variant, writes its own meta-blocks:
+          ;; WRITE-Q1-STREAM)
+          (progn
+            (assert one-pass () "q1 streams are written by WRITE-Q1-STREAM")
+            ;; C HashTableSize(2^15, n), rounded up to odd bits (the only
+            ;; shifts C's one-pass compressor supports)
+            (let ((tb (max 8 (min 15 (integer-length (max 1 (1- (length data))))))))
+              (when (evenp tb) (incf tb))
+              (%lz77-fragment-fast data sap window tb one-pass))))
         (t
           (%lz77 data sap dictv dictsap window
                  use-dict dict-limit base-pos max-chain lazy skip-match
@@ -5105,6 +5569,33 @@ advanced as the second pass would advance it."
           (when (zerop (aref st +q0-exit+)) (return nil)))))))
 )
 
+;; C's q2 (BrotliStoreMetaBlockFast): a meta-block of at most 128 commands
+;; uses fixed command and distance codes (kStaticCommandCodeDepth: symbols
+;; 0..447 9 bits, 448..703 11 bits; kStaticDistanceCodeDepth: 6 bits),
+;; stored as C's constant bit strings - no command or distance tree is
+;; built.  Bound true by %COMPRESS-BYTES for q2.
+(defvar *q2-static-codes* nil)
+(defvar *q2-static-etrees* nil)
+(defun q2-static-etrees ()
+  (let ((c *q2-static-etrees*))
+    (if c
+        (values (car c) (cdr c))
+        (let ((cl (make-array 704 :element-type 'fixnum :initial-element 9))
+              (dl (make-array 64 :element-type 'fixnum :initial-element 6)))
+          (fill cl 11 :start 448)
+          (let* ((*arena* nil)
+                 (cmd (make-fixed-etree cl 704))
+                 (dist (make-fixed-etree dl 64)))
+            (setf *q2-static-etrees* (cons cmd dist))
+            (values cmd dist))))))
+(defun write-q2-static-trees (w)
+  "C StoreStaticCommandHuffmanTree + StoreStaticDistanceHuffmanTree."
+  ;; 56 bits 0x92624416307003, 3 zero bits, then 28 bits 0x0369DC03, in
+  ;; writes of at most 24 bits
+  (b:wbits w #x307003 24) (b:wbits w #x624416 24) (b:wbits w #x92 8)
+  (b:wbits w 0 3)
+  (b:wbits w #x69DC03 24) (b:wbits w #x3 4))
+
 (defun write-trivial-block-body (w data cmds rb
                                  &key (short-dist nil)
                                    (max-lit-bits 15)
@@ -5133,15 +5624,18 @@ advanced as the second pass would advance it."
     #+cl-brotli-x86-64
     (let ((nc (truncate n5 5)))
       (%asm-triv-plan-drive data cmds nc rb short-dist litf cmdf distf)
-      (let* ((lit (build-etree litf 256 max-lit-bits))
-             (cmd (build-etree cmdf 704 15))
-             (dist (build-etree distf 64 15)))
+      (let* ((static (and *q2-static-codes* (<= nc 128)))
+             (lit (build-etree litf 256 max-lit-bits))
+             (cmd (if static (q2-static-etrees) (build-etree cmdf 704 15)))
+             (dist (if static (nth-value 1 (q2-static-etrees)) (build-etree distf 64 15))))
         (b:wbits w 0 1) (b:wbits w 0 1) (b:wbits w 0 1)
         (b:wbits w 0 2) (b:wbits w 0 4) (b:wbits w 0 2)
         (b:wbits w 0 1) (b:wbits w 0 1)
         (write-etree w lit 256)
-        (write-etree w cmd 704)
-        (write-etree w dist 64)
+        (if static
+            (write-q2-static-trees w)
+            (progn (write-etree w cmd 704)
+                   (write-etree w dist 64)))
         (%asm-triv-emit-drive w data cmds nc
                               (or (etree-rcodes lit) +empty-fixnums+)
                               (or (etree-lengths lit) +empty-fixnums+)
@@ -5158,7 +5652,7 @@ advanced as the second pass would advance it."
              (cpy (aref cmds (+ vb 2)))
              (dist (aref cmds (+ vb 3))) (dictp (aref cmds (+ vb 4))))
         (declare (type (integer 0 #.(ash 1 40)) ins lit-start cpy dist)
-                 (type (integer 0 1) dictp))
+                 (type (integer 0 15) dictp))
         (loop for i from lit-start below (+ lit-start ins)
               do (incf (aref litf (aref data i))))
         (multiple-value-bind (icode ixv ixb)
@@ -5166,7 +5660,7 @@ advanced as the second pass would advance it."
           (declare (ignore ixv ixb))
           (multiple-value-bind (ccode cxv cxb)
               (if (plusp cpy)
-                  (length-code cpy cpy-c cpy-x cpy-xb cpy-b cpy-bt)
+                  (length-code (copy-code-len cpy dictp) cpy-c cpy-x cpy-xb cpy-b cpy-bt)
                   (values 0 0 0))
             (declare (ignore cxv cxb))
             (let* ((ring-pos (aref probe-rb 4))
@@ -5184,7 +5678,7 @@ advanced as the second pass would advance it."
                   (if repeat
                       (setf dcode 0)
                       (multiple-value-bind (scode sxv sxb)
-                          (if short-dist
+                          (if (and short-dist (zerop dictp))
                               (special-distance-code probe-rb dist)
                               (values nil 0 0))
                         (declare (ignore sxv sxb))
@@ -5198,9 +5692,10 @@ advanced as the second pass would advance it."
                   (unless (or (plusp dictp) (= dcode 0))
                     (setf (aref probe-rb (logand ring-pos 3)) dist)
                     (setf (aref probe-rb 4) (1+ ring-pos))))))))))
-    (let* ((lit (build-etree litf 256 max-lit-bits))
-           (cmd (build-etree cmdf 704 15))
-           (dist (build-etree distf 64 15))
+    (let* ((static (and *q2-static-codes* (<= (truncate n5 5) 128)))
+           (lit (build-etree litf 256 max-lit-bits))
+           (cmd (if static (q2-static-etrees) (build-etree cmdf 704 15)))
+           (dist (if static (nth-value 1 (q2-static-etrees)) (build-etree distf 64 15)))
            (lit-single (etree-single lit))
            (cmd-single (etree-single cmd))
            (dist-single (etree-single dist))
@@ -5218,8 +5713,10 @@ advanced as the second pass would advance it."
       (b:wbits w 0 2) (b:wbits w 0 4) (b:wbits w 0 2)
       (b:wbits w 0 1) (b:wbits w 0 1)
       (write-etree w lit 256)
-      (write-etree w cmd 704)
-      (write-etree w dist 64)
+      (if static
+          (write-q2-static-trees w)
+          (progn (write-etree w cmd 704)
+                 (write-etree w dist 64)))
       ;; Pass 2: recompute the compact codes and emit.  The writer's
       ;; ACC/NBITS/POS live in locals (WR-PM / WR-RAW) and are synced with
       ;; the BWR only around W-ENSURE and W-EMIT-RUN: through the struct,
@@ -5235,7 +5732,7 @@ advanced as the second pass would advance it."
                (cpy (aref cmds (+ vb 2)))
                (dist (aref cmds (+ vb 3))) (dictp (aref cmds (+ vb 4))))
           (declare (type (integer 0 #.(ash 1 40)) ins lit-start cpy dist)
-                   (type (integer 0 1) dictp))
+                   (type (integer 0 15) dictp))
           (let ((cost (+ 24 (* 2 ins))))
             (declare (type fixnum cost))
             ;; reserve 64 KiB beyond this command (an insert over 32 KiB
@@ -5250,7 +5747,7 @@ advanced as the second pass would advance it."
               (length-code ins ins-c ins-x ins-xb ins-b ins-bt)
             (multiple-value-bind (ccode cxv cxb)
                 (if (plusp cpy)
-                    (length-code cpy cpy-c cpy-x cpy-xb cpy-b cpy-bt)
+                    (length-code (copy-code-len cpy dictp) cpy-c cpy-x cpy-xb cpy-b cpy-bt)
                     (values 0 0 0))
               (let* ((ring-pos (aref rb 4))
                      (repeat (and (plusp cpy) (zerop dictp)
@@ -5265,7 +5762,7 @@ advanced as the second pass would advance it."
                   (if repeat
                       (setf dcode 0)
                       (multiple-value-bind (scode sxv sxb)
-                          (if short-dist
+                          (if (and short-dist (zerop dictp))
                               (special-distance-code rb dist)
                               (values nil 0 0))
                         (if scode
@@ -5371,6 +5868,81 @@ whenever it stops for room."
             (setf (b:bwr-pos w) pos (b::bwr-acc w) acc (b::bwr-nbits w) nb))
           (when (zerop (aref st +q0-exit+)) (return nil)))))))
 )
+
+(defun write-trivial-metablocks (w data cmds n5 rb &key short-dist (max-lit-bits 15))
+  "C's q2/q3 stream shape (EncodeData): the input in 16 KiB blocks, and a
+meta-block flushed at the end of the first block where literals + commands
+since the last flush reach MAX_NUM_DELAYED_SYMBOLS (0x2FFF), each written
+by WRITE-TRIVIAL-BLOCK-BODY with its own trees (the local statistics are
+worth 1-2% on binary input).  A copy running past the block end moves the
+boundary to its end (C truncates the copy there and finds the rest again
+at the same distance); an insert spanning the boundary is split, its first
+part the meta-block's final, insert-only command.  Writes every MLEN
+header itself; the last meta-block is the stream's last."
+  (declare (type b:bwr w)
+           (type (simple-array (unsigned-byte 8) (*)) data)
+           (type (simple-array fixnum (*)) cmds rb)
+           (type fixnum n5))
+  (let* ((n (length data))
+         (ncmd (truncate n5 5))
+         (ci 0) (lits 0) (cnt 0) (mb-start 0) (first-ci 0)
+         (head nil)                       ; (ins ls cpy dist dictp) for FIRST-CI
+         (b 16384))
+    (declare (type fixnum n ncmd ci lits cnt mb-start first-ci b))
+    (labels ((cmd (i k)
+               (declare (type fixnum i k))
+               (if (and head (= i first-ci))
+                   (the fixnum (nth k head))
+                   (aref cmds (+ (* 5 i) k))))
+             (emit (end last-ci tail lastp)
+               ;; commands FIRST-CI..LAST-CI-1 (+ an insert-only TAIL)
+               (let* ((k (+ (- last-ci first-ci) (if tail 1 0)))
+                      (sub (make-array (* 5 k) :element-type 'fixnum)))
+                 (loop for i from first-ci below last-ci for o from 0 by 5 do
+                   (dotimes (j 5) (setf (aref sub (+ o j)) (cmd i j))))
+                 (when tail
+                   (let ((o (* 5 (- last-ci first-ci))))
+                     (setf (aref sub o) tail (aref sub (+ o 1)) (- end tail)
+                           (aref sub (+ o 2)) 0 (aref sub (+ o 3)) 0
+                           (aref sub (+ o 4)) 0)))
+                 (write-mlen-header w (- end mb-start) lastp)
+                 (write-trivial-block-body w data sub rb :short-dist short-dist
+                                                         :max-lit-bits max-lit-bits
+                                                         :n5 (length sub)))))
+      (loop
+        (when (>= b n)
+          (if (zerop first-ci)
+              ;; one meta-block: the commands as they are, no copy
+              (progn
+                (write-mlen-header w n t)
+                (write-trivial-block-body w data cmds rb :short-dist short-dist
+                                                         :max-lit-bits max-lit-bits
+                                                         :n5 n5))
+              (emit n ncmd nil t))
+          (return))
+        ;; the commands C creates in this block: copy starting before B
+        (loop while (and (< ci ncmd) (plusp (cmd ci 2))
+                         (< (+ (cmd ci 1) (cmd ci 0)) b))
+              do (incf lits (cmd ci 0)) (incf cnt) (incf ci))
+        (if (< (+ lits cnt) #x2FFF)
+            (incf b 16384)
+            (let* ((last-end (if (> ci first-ci) (+ (cmd (1- ci) 1) (cmd (1- ci) 0) (cmd (1- ci) 2)) mb-start))
+                   (end (max b last-end))
+                   (tail nil) (next-head nil))
+              (declare (type fixnum last-end end))
+              (when (and (= end b) (< ci ncmd) (< (cmd ci 1) b))
+                ;; split the insert spanning B
+                (let ((ins (cmd ci 0)) (ls (cmd ci 1)))
+                  (setf tail (- b ls)
+                        next-head (list (- ins tail) b (cmd ci 2) (cmd ci 3) (cmd ci 4)))))
+              (when (>= end n)
+                ;; the boundary reached the end: one final meta-block
+                (emit n ncmd nil t)
+                (return))
+              (emit end ci tail nil)
+              (setf mb-start end first-ci ci head next-head lits 0 cnt 0)
+              (incf b 16384)
+              (loop while (<= b end) do (incf b 16384))))))))
 
 (defun write-fast-block-body (w data cv nc litf cmdf distf)
   "Emit a q0/q1 meta-block body from the flat fast-fragment command vector,
@@ -5520,8 +6092,11 @@ per command."
                        3 2))
          ;; Below q10 only non-UTF8 input clusters: there it is worth ~5% of
          ;; size; on UTF8 text ~0.5% for ~6% more time (C's q9 uses static
-         ;; maps for both).
-         (hq (and hq (or (>= quality 10) (= lit-mode 3))))
+         ;; maps for both).  And only from 256 KiB: below that the static
+         ;; map is as small or smaller (binary 64 KiB 1.004 vs 1.010 of C)
+         ;; and the clustering cost milliseconds per call.
+         (hq (and hq (or (>= quality 10)
+                         (and (= lit-mode 3) (>= (length data) 262144)))))
          (ctx (multiple-value-list
                (if hq
                    (hq-context-map data cmds lit-mode n5)
@@ -5567,7 +6142,7 @@ per command."
           (let ((copyp (plusp cpy)))
             (multiple-value-bind (ccode cxv cxb)
                 (if copyp
-                    (length-code cpy cpy-c cpy-x cpy-xb cpy-b cpy-bt)
+                    (length-code (copy-code-len cpy dictp) cpy-c cpy-x cpy-xb cpy-b cpy-bt)
                     (values 0 0 0))
               (declare (type fixnum ccode cxv cxb))
               (let* ((repeat (and copyp (zerop dictp)
@@ -5596,7 +6171,7 @@ per command."
                     (if repeat
                         (setf dcode 0)
                         (multiple-value-bind (scode sxv sxb)
-                            (if short-dist
+                            (if (and short-dist (zerop dictp))
                                 (special-distance-code rb dist)
                                 (values nil 0 0))
                           (if scode
@@ -6648,20 +7223,22 @@ split and the current meta-block must be closed first."
                          (list 0 0 rest-copy dist nil))))))))))))
 
 (defun cmds->list (v)
-  "Flat 5-fixnum command vector -> list of 5-element lists with boolean
-DICTP (NIL/T), the representation PARTITION-COMMANDS and SPLIT-COMMAND-AT
-expect.  Only the >16MiB multi-meta-block path pays this conversion."
+  "Flat 5-fixnum command vector -> list of 5-element lists with DICTP NIL
+or the dictionary code (1 + cut), the representation PARTITION-COMMANDS and
+SPLIT-COMMAND-AT expect.  Only the >16MiB multi-meta-block path pays this
+conversion."
   (declare (type (simple-array fixnum (*)) v) (optimize (speed 3) (safety 0)))
   (let ((out '()))
     (loop for i from (- (length v) 5) downto 0 by 5 do
       (push (list (aref v i) (aref v (+ i 1)) (aref v (+ i 2))
-                  (aref v (+ i 3)) (if (zerop (aref v (+ i 4))) nil t))
+                  (aref v (+ i 3)) (if (zerop (aref v (+ i 4))) nil (aref v (+ i 4))))
             out))
     out))
 
 (defun block->cmds (lst)
   "Inverse of CMDS->LIST: a partitioned command list back to an exact flat
-5-fixnum vector (DICTP 0/1) for the writers."
+5-fixnum vector (DICTP 0, or 1 + the bytes a dictionary word was cut) for
+the writers."
   (declare (type list lst) (optimize (speed 3) (safety 0)))
   (let* ((n (length lst))
          (v (make-array (* 5 n) :element-type 'fixnum)))
@@ -6671,7 +7248,10 @@ expect.  Only the >16MiB multi-meta-block path pays this conversion."
             (aref v (+ i 1)) (cadr c)
             (aref v (+ i 2)) (caddr c)
             (aref v (+ i 3)) (cadddr c)
-            (aref v (+ i 4)) (if (car (cddddr c)) 1 0)))
+            ;; DICTP: NIL -> 0, T (the zopfli path's flag) -> 1, or the
+            ;; matchers' 1 + cut
+            (aref v (+ i 4)) (let ((d (car (cddddr c))))
+                               (cond ((null d) 0) ((integerp d) d) (t 1)))))
     v))
 
 (defun partition-commands (cmds limit)
@@ -6715,7 +7295,8 @@ whole and moved to the next block when necessary."
                                     (quality 5)
                                     (one-pass nil)
                                     (bt nil)
-                                    (quick nil))
+                                    (quick nil)
+                                    (mb-flush nil))
   "Entropy-coded brotli stream for INPUT.  Inputs larger than one meta-block
 are split into <= 2^24-byte compressed meta-blocks followed by an empty last
 meta-block."
@@ -6730,15 +7311,18 @@ meta-block."
          (quick (case quick
                   (2 '(16 1 5)) (3 '(16 2 5))
                   (4 (if (>= n #.(ash 1 20)) '(20 4 7) '(17 4 5)))
-                  ;; H6's tables are 2-32 MiB: small inputs keep the chain
-                  ;; matcher (C also picks smaller hashers for them)
-                  ((5 6 7 8 9) (and (>= n 65536) (list :h6 quick))))))
+                  ;; C's H5 below 1 MiB, H6 from there (%LZ77-H6)
+                  ((5 6 7 8 9) (list :h6 quick)))))
     (write-wbits w wbits)
     (cond
       ((zerop n)
        (b:wbits w 1 1) (b:wbits w 1 1))                    ; ISLAST + ISLASTEMPTY
+      ((and fast-fragment (not one-pass))
+       ;; q1: C's two-pass compressor, 128 KiB meta-blocks
+       (write-q1-stream w data window))
       ((<= n #.(ash 1 24))
-       (write-mlen-header w n t)
+       (unless (and trivial mb-flush)
+         (write-mlen-header w n t))
        (cond
          (fast-fragment
           (if one-pass
@@ -6762,9 +7346,13 @@ meta-block."
                                 :skip-match skip-match
                                 :insert-interior insert-interior
                                 :quick quick)
-            (write-trivial-block-body w data cmds rb :short-dist short-dist
-                                                     :max-lit-bits max-lit-bits
-                                                     :n5 (or used (length cmds)))))
+            (if mb-flush
+                (write-trivial-metablocks w data cmds (or used (length cmds)) rb
+                                          :short-dist short-dist
+                                          :max-lit-bits max-lit-bits)
+                (write-trivial-block-body w data cmds rb :short-dist short-dist
+                                                         :max-lit-bits max-lit-bits
+                                                         :n5 (or used (length cmds))))))
          (t
           (write-compressed-block-body w data 0 window use-dict dict-limit rb
                                        :max-chain max-chain :lazy lazy
@@ -6915,12 +7503,18 @@ dictionary at q10/q11."
     ;; table as q0, producing byte-identical output and a 5-13% ratio loss.
     (1 '(:max-chain 2 :lazy nil :use-dict nil :short-dist nil :skip-match t
           :insert-interior nil :fast-fragment t))
+    ;; q2/q3: C's H2 / H3 with C's meta-block flushing (16 KiB input
+    ;; blocks, flush at 0x2FFF literals + commands: WRITE-TRIVIAL-METABLOCKS)
     (2 '(:quick 2 :max-chain 3 :lazy nil :use-dict nil :short-dist t :skip-match t
-          :insert-interior nil :trivial t :max-lit-bits 15))
+          :insert-interior nil :trivial t :max-lit-bits 15 :mb-flush t
+          :static-small t))
     (3 '(:quick 3 :max-chain 5 :lazy nil :use-dict nil :short-dist t :skip-match t
-          :insert-interior nil :trivial t :max-lit-bits 15))
+          :insert-interior nil :trivial t :max-lit-bits 15 :mb-flush t))
+    ;; q4: C's H4 / H54 with BrotliBuildMetaBlockGreedy (literal, command
+    ;; and distance block splitting, one literal context) and the full
+    ;; StoreMetaBlock - the q5+ writer at quality 4
     (4 '(:quick 4 :max-chain 10 :lazy nil :use-dict nil :short-dist t :skip-match t
-          :insert-interior nil :trivial t :max-lit-bits 15))
+          :insert-interior nil :quality 4))
     ;; (Chain matcher, i.e. inputs under 64 KiB at q5-q9:) Score machinery
     ;; is enabled where its measured trade fits: q5/q6
     ;; (-14% speed for -1.5% size at q5, and q5 is the 10%-cap violator)
@@ -6964,6 +7558,13 @@ returning fresh octets.  Shared by COMPRESS and COMPRESS-INTO."
   (declare (type (simple-array (unsigned-byte 8) (*)) data)
            (type fixnum n)
            (type list params))
+  (let ((*q2-static-codes* (getf params :static-small)))
+    (%compress-bytes-1 data n params)))
+
+(defun %compress-bytes-1 (data n params)
+  (declare (type (simple-array (unsigned-byte 8) (*)) data)
+           (type fixnum n)
+           (type list params))
   (if (or (eq (getf params :mode) :stored) (incompressible-p data))
         (compress-stored data)
         (let* ((max-chain (getf params :max-chain 128))
@@ -6980,6 +7581,7 @@ returning fresh octets.  Shared by COMPRESS and COMPRESS-INTO."
                (bt (getf params :bt nil))
                (one-pass (getf params :one-pass nil))
                (quick (getf params :quick nil))
+               (mb-flush (getf params :mb-flush nil))
                ;; C consults the static dictionary at q10/11 regardless of
                ;; content (its probe is an array lookup); the old text-like
                ;; gate here cost binary 20%+ vs C at small sizes.  q<=9
@@ -7005,7 +7607,8 @@ returning fresh octets.  Shared by COMPRESS and COMPRESS-INTO."
                                                 :quality quality
                                                 :bt bt
                                                 :one-pass one-pass
-                                                :quick quick)
+                                                :quick quick
+                                                :mb-flush mb-flush)
                          (compress-entropy data :use-dict nil
                                                 :max-chain max-chain
                                                 :lazy lazy
@@ -7020,7 +7623,8 @@ returning fresh octets.  Shared by COMPRESS and COMPRESS-INTO."
                                                 :quality quality
                                                 :bt bt
                                                 :one-pass one-pass
-                                                :quick quick))))
+                                                :quick quick
+                                                :mb-flush mb-flush))))
           ;; Gate on the INPUT size: gating on the output size re-ran the
           ;; whole q10/q11 pipeline for the most compressible inputs (1 MiB
           ;; of zeros -> 13 bytes paid for two zopfli runs, a 2x cliff).
@@ -7039,7 +7643,8 @@ returning fresh octets.  Shared by COMPRESS and COMPRESS-INTO."
                                                 :quality quality
                                                 :bt bt
                                                 :one-pass one-pass
-                                                :quick quick)))
+                                                :quick quick
+                                                :mb-flush mb-flush)))
               (when (< (length plain) (length best)) (setf best plain))))
           (when (>= (length best) (+ n 32))
             (let ((stored (compress-stored data)))

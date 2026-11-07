@@ -3721,3 +3721,80 @@ q5-q9 into a buffer (0.95-0.98: the context-literal dependency chain).
 Ratio still above C: binary q2-q4 1.01-1.04, q10/q11 html 1.02-1.03 and
 binary 1.04 (C's BrotliSplitBlock / histogram clustering at q10+),
 periodic q5-q7 1.10, small inputs at q4-q9 (static dictionary search).
+
+## Session 7 Nov 2026 (afternoon): ratio parity at every input size
+
+Reference: the brotli 1.2.0 sources (the installed library's version) were
+read for every change below; sizes are lisp/C on 4 KiB .. 1 MiB prefixes of
+the harness data (scratch qsz.lisp).
+
+- C's encoder dictionary hash (dictionary_hash.c: 2^15 entries, two slots
+  per Hash14 key, C's 1688-byte frozen bit set) and SearchInStaticDictionary
+  (cutoff "omit last 1..9" transforms, C's lookup/match gate) in C's H2 / H4
+  (one slot) and H5 / H6 (two slots) - assembly (Q-DICT-SEARCH) and Lisp
+  (C-DICT-SEARCH).  Commands carry DICTP = 1 + bytes cut; the length code is
+  the word's length (COPY-CODE-LEN), and a dictionary reference never takes
+  a distance short code (C's ComputeDistanceCode max_distance rule).
+- q5-q9 below 1 MiB: C's H5 (4-byte hash, 2^14 keys at q5/q6, 2^15 above)
+  as a variant of the H6 assembly matcher; the chain matcher is gone.
+- q4: C's BrotliBuildMetaBlockGreedy shape (the q5+ writer at quality 4:
+  literal / command / distance block splitting, one literal context).
+- q2/q3: C's meta-block flushing (16 KiB input blocks, flush at 0x2FFF
+  literals + commands, WRITE-TRIVIAL-METABLOCKS).
+- q0: C's default command / distance code (kDefaultCommandDepths, the
+  448-bit kDefaultCommandCode written verbatim) instead of a code built
+  from the flat seed histogram; C's HashTableSize (odd bits 9..15, zeroed).
+- q1: C's BrotliCompressFragmentTwoPass structure: 128 KiB meta-blocks with
+  ShouldCompress, HashTableSize(2^17, n), min_match 4 + 4-byte hash up to
+  2^15 entries else 6 + 6-byte hash, per-block last distance / start, C's
+  table updates (k = 4 first-emit quirk included), command seeds 1, 2, 64,
+  84.  Distances still reach the whole window (C: 2^18 - 16).
+- zopfli literal-cost prefix sums use C's compensated (carry) float sum.
+
+Sizes (lisp/C), every level q0-q9 at 4 KiB, 16 KiB, 64 KiB, 256 KiB,
+1 MiB on html / json / binary / periodic / zeros: 0.59-1.01, with
+binary q4 1.006-1.01 and binary q9 64 KiB 1.0095 the largest; most cells
+1.000.  q10/q11 still 1.01-1.17 (see below).
+
+q10 finding: a Python transcription of C 1.2.0's q10 parse (scratch
+zop.py: H10 + FindAllMatches + UpdateNodes/EvaluateNode/StartPosQueue with
+float32 arithmetic) reproduces OUR parse of binary 16 KiB exactly (same
+queue costdiffs, 129 commands), while the installed C library emits 480
+commands (zero runs as distance-1 copies after 6.2 KiB where both
+transcription and we keep one 12 K-literal insert).  So the q10/q11 gap is
+not in our port of the source as read; resolving it needs an instrumented
+C build (not done: building/running the downloaded C sources was not
+permitted in this session).
+
+Small-input speed (bench bsm2, make-compressor, lisp/C): 4 KiB compress
+q0 0.40-0.53, q1 0.41-0.46, q2-q3 0.30-0.48, q4-q8 0.32-0.64, q9 3-25x
+(C allocates its 32 MiB hasher), q10/q11 0.75-1.55; 64 KiB 0.48-1.0 at
+q0-q8.  Decode 4 KiB 0.5-0.6x (into a buffer 0.6-0.7x).  Fixed per-call
+costs dominate: tree construction (704-symbol command alphabet), table
+fills, decoder prefix-code reading/table allocation.
+
+Later the same evening (small-input fixed costs, C 1.2.0 details):
+- H3 / H4 / H54 bucket sweep slots now C 1.2.0's (key + (j << 3)) & mask
+  (we had brotli 1.0's adjacent slots): q3 sizes 0.998-1.000.
+- C's partial Prepare for the quick hashers: a pooled table is cleared
+  only where the input hashes when n <= 2^bits / 32 (same reads as a full
+  clear, so the same output): q2 1 KiB 0.28 -> 0.36x.
+- q2 meta-blocks of <= 128 commands use C's static command / distance
+  codes (BrotliStoreMetaBlockFast; constant bit strings, no tree built).
+- OPTIMIZE-COUNTS-FOR-RLE fully typed (it ran generic >=, FLOOR, +):
+  q5 4 KiB 117 -> 96 us/call (C 77).
+- q9 non-UTF8 context-map clustering only from 256 KiB (below it the
+  static map is as small or smaller, and clustering cost ~2 ms per call).
+- Decoder: the prefix-code reader collects the nonzero-length symbols
+  while reading (C's symbol lists), so table building no longer scans the
+  704-symbol command alphabet: 4 KiB decode 13.5 -> 12.7 us (C 8.1).
+
+Warm make-compressor lisp/C after these (html / binary): 4 KiB q0 0.53 /
+0.63, q1 0.54 / 0.52, q2 0.50 / 0.49, q3 0.59 / 0.62, q4 0.70 / 0.60,
+q5-q8 0.79-0.85 / 0.73-0.81; 64 KiB q0-q4 0.75-0.82 / 0.60-0.82, q5-q8
+0.84-0.97 / 0.84-0.99.  Remaining small-input costs: per-call tree work
+(literal tree + 704-symbol command tree + writing), table setup, the
+decoder's prefix-code tables (allocation, 10-bit roots for command /
+distance codes vs C's 8).  Plain COMPRESS (no make-compressor) at q5-q9
+allocates C's full H5/H6 table per call (1-32 MiB): needs a chain-form
+H5 for small inputs (identical output) to remove that cliff.

@@ -403,3 +403,30 @@ overlapping copies, the shapes that exercise the wide copy paths."
           (error (e) (incf other) (unless first-other (setf first-other e))))))
     (is (zerop other) "~D corrupt streams signalled a non-brotli error, e.g. ~A"
         other first-other)))
+
+(test huffman-long-code-at-end-of-input
+  ;; A valid stream may end right after a code longer than the 8-bit
+  ;; literal root table whose subtable is wider than the code itself (here
+  ;; a 10-bit code in a 4-bit subtable shared with 12-bit codes): the
+  ;; reader must decode it from the bits that remain (C's
+  ;; BrotliSafeReadSymbol).  It used to signal "end of input" - found on a
+  ;; C quality-3 stream whose last literal was such a code.
+  (let ((lengths (make-array 256 :element-type '(unsigned-byte 8)))
+        (fl (make-array 256 :element-type 'fixnum)))
+    ;; complete code: 6 x 7 bits, 243 x 8, 3 x 10, 4 x 12
+    (dotimes (s 256)
+      (setf (aref lengths s) (cond ((< s 6) 7) ((< s 249) 8) ((< s 252) 10) (t 12))
+            (aref fl s) (aref lengths s)))
+    (let* ((h (cl-brotli.lisp::build-huff lengths 256))
+           (et (cl-brotli.lisp::make-fixed-etree fl 256)))
+      (dolist (sym '(249 250 251))
+        (let ((w (cl-brotli.lisp.bitio:make-bwr 16)))
+          ;; 6 filler bits, then the 10-bit code: exactly 10 bits remain
+          (cl-brotli.lisp.bitio:wbits w 0 6)
+          (cl-brotli.lisp.bitio:wbits w (aref (cl-brotli.lisp::etree-rcodes et) sym) 10)
+          (cl-brotli.lisp.bitio:w-align w)
+          (let* ((bytes (cl-brotli.lisp.bitio:bwr-result w))
+                 (r (cl-brotli.lisp.bitio:make-brd bytes)))
+            (is (= 2 (length bytes)))
+            (cl-brotli.lisp.bitio:rbits r 6)
+            (is (= sym (cl-brotli.lisp::read-huff r h)))))))))

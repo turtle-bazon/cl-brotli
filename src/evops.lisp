@@ -31,9 +31,15 @@
       :ring0 :ring1 :ring2 :ring3 :ringidx :short-dist :icode :ccode :lstart
       ;; H6 (q5-q9): distance cache, ring walk state
       :dc0 :dc1 :dc2 :dc3 :dc4 :dc5 :dc6 :dc7 :dc8 :dc9 :dc10 :dc11 :dc12 :dc13 :dc14 :dc15
-      :hbase :hdown :hfirst4 :hnk :rhwin :hmaxb))
+      :hbase :hdown :hfirst4 :hnk :rhwin :hmaxb
+      ;; H5/H6 static dictionary: candidate / chosen cut code, C's
+      ;; dict_num_lookups / dict_num_matches, H5's second kMargin limit
+      :olcd :lcd :dlookups :dmatches :n7b))
   (defparameter *q0-ctx-slots*
     '(:data :table :out :litlut :cmdlut :inslut :copylut :clastlut :distlut
+      ;; static dictionary: bytes, C hash (u16 len | word << 5), per length
+      ;; u32 offset | ndbits << 24
+      :dict :dhash :dlen
       ;; q1 (record mode): command vector, histograms, code-number LUTs
       :cv :litf :cmdf :distf :inscc :copycc :clastcc
       ;; q1 second pass: per-length (extra << 16 | bits << 8 | code) words
@@ -58,14 +64,19 @@
 #+cl-brotli-x86-64
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (sb-c::defknown (cl-brotli.lisp::%asm-fragment-fast
+                   cl-brotli.lisp::%asm-fragment-fast-v
                    cl-brotli.lisp::%asm-fragment-record
+                   cl-brotli.lisp::%asm-fragment-record4
                    cl-brotli.lisp::%asm-fast-emit
                    cl-brotli.lisp::%asm-quick-h2 cl-brotli.lisp::%asm-quick-h3
                    cl-brotli.lisp::%asm-quick-h4 cl-brotli.lisp::%asm-quick-h54
                    cl-brotli.lisp::%asm-triv-plan cl-brotli.lisp::%asm-triv-emit
                    cl-brotli.lisp::%asm-h6-q5 cl-brotli.lisp::%asm-h6-q6
                    cl-brotli.lisp::%asm-h6-q7 cl-brotli.lisp::%asm-h6-q8
-                   cl-brotli.lisp::%asm-h6-q9)
+                   cl-brotli.lisp::%asm-h6-q9
+                   cl-brotli.lisp::%asm-h5-q5 cl-brotli.lisp::%asm-h5-q6
+                   cl-brotli.lisp::%asm-h5-q7 cl-brotli.lisp::%asm-h5-q8
+                   cl-brotli.lisp::%asm-h5-q9)
       ((simple-array (unsigned-byte 64) (*)) simple-vector)
       (values) ()
       :overwrite-fndb-silently t)
@@ -80,11 +91,13 @@
         *q-ctx*))
 
   (defvar *q-shift* nil)
+  (defvar *q-hlen* 5)
   (defun q-hash (dst i data tmp)
-    ;; DST = the fast-fragment hash of the 5 bytes at I (I <= n - 5),
-    ;; %HASHF-SAP: ((load64 << 24) * 0x1E35A7BD) >> shift.  Near the end
-    ;; the 5 bytes come from a 4-byte and a 1-byte load.  With *Q-SHIFT*
-    ;; the shift is an immediate, else ST[SHIFT] (clobbering RCX).
+    ;; DST = the fast-fragment hash of the *Q-HLEN* (4, 5 or 6) bytes at I
+    ;; (I <= n - HLEN): ((load64 << 8 (8 - HLEN)) * 0x1E35A7BD) >> shift,
+    ;; C's Hash() / %HASHF-SAP.  Near the end the bytes come from 4-byte
+    ;; and 1- / 2-byte loads.  With *Q-SHIFT* the shift is an immediate,
+    ;; else ST[SHIFT] (clobbering RCX).
     (let ((tail (gen-label)) (have (gen-label)))
       (inst cmp i (q-sv :n8))
       (inst jmp :a tail)
@@ -92,11 +105,15 @@
       (inst jmp have)
       (emit-label tail)
       (inst mov :dword dst (ea +q-d+ data i))
-      (inst movzx '(:byte :dword) tmp (ea (+ 4 +q-d+) data i))
-      (inst shl tmp 32)
-      (inst or dst tmp)
+      (case *q-hlen*
+        (5 (inst movzx '(:byte :dword) tmp (ea (+ 4 +q-d+) data i))
+           (inst shl tmp 32)
+           (inst or dst tmp))
+        (6 (inst movzx '(:word :dword) tmp (ea (+ 4 +q-d+) data i))
+           (inst shl tmp 32)
+           (inst or dst tmp)))
       (emit-label have)
-      (inst shl dst 24)
+      (inst shl dst (* 8 (- 8 *q-hlen*)))
       (inst imul dst dst #x1E35A7BD)
       (if *q-shift*
           (inst shr dst *q-shift*)
@@ -120,13 +137,14 @@
       (inst mov :dword tmp (ea +q-d+ data a))
       (inst cmp :dword tmp (ea +q-d+ data b))
       (inst jmp :ne fail)
-      (if (= *q-k* 5)
-          (progn (inst movzx '(:byte :dword) tmp (ea (+ 4 +q-d+) data a))
-                 (inst movzx '(:byte :dword) tmp2 (ea (+ 4 +q-d+) data b)))
-          (progn (inst movzx '(:word :dword) tmp (ea (+ 4 +q-d+) data a))
-                 (inst movzx '(:word :dword) tmp2 (ea (+ 4 +q-d+) data b))))
-      (inst cmp tmp tmp2)
-      (inst jmp :ne fail)
+      (unless (= *q-k* 4)
+        (if (= *q-k* 5)
+            (progn (inst movzx '(:byte :dword) tmp (ea (+ 4 +q-d+) data a))
+                   (inst movzx '(:byte :dword) tmp2 (ea (+ 4 +q-d+) data b)))
+            (progn (inst movzx '(:word :dword) tmp (ea (+ 4 +q-d+) data a))
+                   (inst movzx '(:word :dword) tmp2 (ea (+ 4 +q-d+) data b))))
+        (inst cmp tmp tmp2)
+        (inst jmp :ne fail))
       (emit-label ok)))
 
   (defvar *q-x0* nil) (defvar *q-x1* nil)
@@ -228,6 +246,119 @@
       (inst sub nb 32)
       (emit-label ok)))
 
+  (defun q-dict-search (data cur score maxb word wl ml off tmp dptr shallow)
+    ;; C SearchInStaticDictionary at DATA[CUR]: when SCORE (a register or
+    ;; ST slot holding the best score) is still the minimum 2020 and C's
+    ;; gate (dict_num_matches >= dict_num_lookups >> 7) is open, probe
+    ;; one (SHALLOW: H2/H4) or two (H5/H6) slots of C's dictionary hash.
+    ;; A word matching at least len - 9 bytes of DATA[CUR..] (an omit-last
+    ;; transform when shorter) whose score is >= SCORE wins: SCORE, ST[OLEN
+    ;; ODIST OLCD] (OLCD = 1 + cut) are set and dict_num_matches counts it.
+    ;; MAXB (ST slot) = min(cur, window).  WORD WL ML OFF TMP DPTR are
+    ;; scratch registers, as is *Q-RCX*; the hash key lives in ST[TMP2].
+    (let ((rcx *q-rcx*) (no-dict (gen-label)))
+      (inst cmp :qword score 2020)
+      (inst jmp :ne no-dict)
+      (inst mov tmp (q-sv :dlookups))
+      (inst shr tmp 7)
+      (inst cmp (q-sv :dmatches) tmp)
+      (inst jmp :b no-dict)
+      (inst mov :dword tmp (ea +q-d+ data cur))
+      (inst imul tmp tmp #x1E35A7BD)
+      (inst shl tmp 32)
+      (inst shr tmp 50)                                ; Hash14
+      (inst shl tmp 1)
+      (inst mov (q-sv :tmp2) tmp)
+      (dotimes (slot (if shallow 1 2))
+        (let ((next (gen-label)) (lp8 (gen-label)) (tail (gen-label))
+              (diff (gen-label)) (have-ml (gen-label)))
+          (inst add :qword (q-sv :dlookups) 1)
+          (inst mov tmp (q-sv :tmp2))
+          (inst mov word (q-cx :dhash))
+          (inst movzx '(:word :dword) word (ea (+ +q-d+ (* 2 slot)) word tmp 2))
+          (inst test word word)
+          (inst jmp :z next)
+          (inst mov wl word)
+          (inst and wl 31)                             ; word length
+          (inst shr word 5)                            ; word index
+          (inst mov ml (q-sv :n))
+          (inst sub ml cur)
+          (inst cmp wl ml)
+          (inst jmp :a next)                           ; past max_length
+          (inst mov off (q-cx :dlen))
+          (inst mov :dword off (ea +q-d+ off wl 4))
+          (inst and off #xFFFFFF)
+          (inst mov tmp wl)
+          (inst imul tmp word)
+          (inst add off tmp)                           ; the word's offset
+          (inst xor ml ml)                             ; matched bytes
+          (emit-label lp8)
+          (inst lea rcx (ea 8 ml))
+          (inst cmp rcx wl)
+          (inst jmp :a tail)
+          (inst lea rcx (ea 0 cur ml))
+          (inst mov rcx (ea +q-d+ data rcx))
+          (inst lea tmp (ea 0 off ml))
+          (inst mov dptr (q-cx :dict))
+          (inst xor rcx (ea +q-d+ dptr tmp))
+          (inst jmp :nz diff)
+          (inst add ml 8)
+          (inst jmp lp8)
+          (emit-label diff)
+          (inst bsf rcx rcx)
+          (inst shr rcx 3)
+          (inst add ml rcx)
+          (inst jmp have-ml)
+          (emit-label tail)
+          (inst cmp ml wl)
+          (inst jmp :ae have-ml)
+          (inst lea rcx (ea 0 cur ml))
+          (inst movzx '(:byte :dword) rcx (ea +q-d+ data rcx))
+          (inst lea tmp (ea 0 off ml))
+          (inst mov dptr (q-cx :dict))
+          (inst movzx '(:byte :dword) dptr (ea +q-d+ dptr tmp))
+          (inst cmp rcx dptr)
+          (inst jmp :ne have-ml)
+          (inst inc ml)
+          (inst jmp tail)
+          (emit-label have-ml)
+          (inst test ml ml)
+          (inst jmp :z next)
+          (inst lea rcx (ea 10 ml))
+          (inst cmp rcx wl)
+          (inst jmp :be next)                          ; cut > 9
+          (inst mov off wl)                            ; word length
+          (inst sub wl ml)                             ; cut
+          ;; transform id: (cut << 2) + kCutoffTransforms[cut]
+          (inst lea rcx (ea 0 wl wl 2))
+          (inst add rcx rcx)
+          (inst mov dptr #x071B520ADA2D3200)
+          (inst shr dptr :cl)
+          (inst and dptr 63)
+          (inst lea dptr (ea 0 dptr wl 4))
+          (inst mov rcx (q-cx :dlen))
+          (inst mov :dword rcx (ea +q-d+ rcx off 4))
+          (inst shr rcx 24)                            ; size_bits_by_length
+          (inst shl dptr :cl)
+          (inst add dptr word)
+          (inst add dptr maxb)
+          (inst inc dptr)                              ; distance
+          (inst imul word ml 135)                      ; BackwardReferenceScore
+          (inst add word 1920)
+          (inst bsr rcx dptr)
+          (inst imul rcx rcx 30)
+          (inst sub word rcx)
+          (inst cmp word score)
+          (inst jmp :l next)
+          (inst mov score word)
+          (inst add :qword (q-sv :dmatches) 1)
+          (inst mov (q-sv :olen) ml)
+          (inst mov (q-sv :odist) dptr)
+          (inst inc wl)
+          (inst mov (q-sv :olcd) wl)
+          (emit-label next)))
+      (emit-label no-dict)))
+
   (defun q-put (bits len acc nb)
     ;; ACC |= BITS << NB; NB += LEN, no flush (the caller bounds the
     ;; pending total below 64).  Clobbers BITS RCX.
@@ -263,7 +394,7 @@
     (q-write entry tmp acc nb wpos out)))
 
 #+cl-brotli-x86-64
-(defmacro define-fragment-scan-vop (name translate record k shift)
+(defmacro define-fragment-scan-vop (name translate record k shift &optional (hlen 5))
   `(define-vop (,name)
     ;; %LZ77-FRAGMENT-FAST's scan - trawl with C's skip heuristic, match,
     ;; emit, hash the copied positions, back-to-back copies - entered at
@@ -289,7 +420,8 @@
     (:temporary (:sc int-sse-reg) x0)
     (:temporary (:sc int-sse-reg) x1)
     (:generator 1000
-      (let ((record ,record) (*q-k* ,k) (*q-shift* ,shift) (*q-x0* x0) (*q-x1* x1) (*q-st* st) (*q-ctx* ctx) (*q-rcx* rcx)
+      (let ((record ,record) (*q-k* ,k) (*q-shift* ,shift) (*q-hlen* ,hlen)
+            (*q-x0* x0) (*q-x1* x1) (*q-st* st) (*q-ctx* ctx) (*q-rcx* rcx)
             (outer (gen-label)) (trawl (gen-label)) (found (gen-label))
             (try-table (gen-label)) (repeat (gen-label)) (no-repeat (gen-label))
             (scan-done (gen-label)) (chunk-exit (gen-label)) (finish (gen-label))
@@ -312,9 +444,24 @@
                      (inst mov :dword t2 (ea +q-d+ tab t2 4))
                      (inst prefetch :t0 (ea +q-d+ data t2))
                      (emit-label no)))
-                 (hash-copied ()
+                 (hash-copied (&optional first)
                    ;; table[hash(q)] = q for q in max(0, p - back) .. p-1,
-                   ;; then T2 = table[hash(p)] (cand2), table[hash(p)] = p
+                   ;; then T2 = table[hash(p)] (cand2), table[hash(p)] = p.
+                   ;; FIRST with K 4 (C two-pass, after a match with
+                   ;; literals): C's sequence stores p-1 under hash(p-3).
+                   (if (and first (= *q-k* 4))
+                       (progn
+                         (inst mov t2 p)
+                         (inst sub t2 3)
+                         (q-hash h t2 data t1)
+                         (inst mov :dword (ea +q-d+ tab h 4) t2)
+                         (inst inc t2)
+                         (q-hash h t2 data t1)
+                         (inst mov :dword (ea +q-d+ tab h 4) t2)
+                         (inst dec t2)
+                         (q-hash h t2 data t1)
+                         (inst add t2 2)
+                         (inst mov :dword (ea +q-d+ tab h 4) t2))
                    (let ((hl (gen-label)) (hd (gen-label)) (z (gen-label)))
                      (inst mov t2 p)
                      (inst sub t2 (q-sv :back))
@@ -328,7 +475,7 @@
                      (inst mov :dword (ea +q-d+ tab h 4) t2)
                      (inst inc t2)
                      (inst jmp hl)
-                     (emit-label hd))
+                     (emit-label hd)))
                    (q-hash h p data t1)
                    (inst mov :dword t2 (ea +q-d+ tab h 4))
                    (inst mov :dword (ea +q-d+ tab h 4) p)))
@@ -420,7 +567,7 @@
           (inst mov (q-sv :lit-start) p)
           (inst cmp p (q-sv :limit))
           (inst jmp :ge scan-done)
-          (hash-copied)
+          (hash-copied t)
           (inst jmp repeat)
           (emit-label m2)
           (inst mov t2 (q-sv :cand2))
@@ -788,8 +935,15 @@
   ;; q0: 15-bit table, 5-byte matches; q1: 17-bit table, 6-byte matches
   (define-fragment-scan-vop cl-brotli-asm-fragment-fast
       cl-brotli.lisp::%asm-fragment-fast nil 5 49)
+  ;; q0 below 16 KiB: C's smaller tables (9 / 11 / 13 bits), shift in ST
+  (define-fragment-scan-vop cl-brotli-asm-fragment-fast-v
+      cl-brotli.lisp::%asm-fragment-fast-v nil 5 nil)
+  ;; q1 (C BrotliCompressFragmentTwoPass): min_match 6 with a 6-byte hash
+  ;; (16-17 bit tables), min_match 4 with a 4-byte hash (8-15 bits)
   (define-fragment-scan-vop cl-brotli-asm-fragment-record
-      cl-brotli.lisp::%asm-fragment-record t 6 47))
+      cl-brotli.lisp::%asm-fragment-record t 6 nil 6)
+  (define-fragment-scan-vop cl-brotli-asm-fragment-record4
+      cl-brotli.lisp::%asm-fragment-record4 t 4 nil 4))
 
 
 #+cl-brotli-x86-64
@@ -998,14 +1152,15 @@
 
 
 #+cl-brotli-x86-64
-(defmacro define-quick-vop (name translate bits sweep hash-len)
+(defmacro define-quick-vop (name translate bits sweep hash-len &optional dict)
   ;; %LZ77-QUICK-BODY (C's CreateBackwardReferences + HashLongestMatchQuickly
   ;; with BUCKET_BITS / BUCKET_SWEEP / HASH_LEN) from ST[POS], ST[LIT-START]
   ;; (the pending insert is POS - LIT-START) and the distance cache.  The
   ;; position lives in CUR for the whole loop; FindLongestMatch returns its
   ;; score in T3 and writes OLEN / ODIST only when a candidate wins.
   ;; Exit 0: POS + 8 >= n (the remainder is Lisp's); exit 1: the command
-  ;; vector is (nearly) full, resume at ST[POS].
+  ;; vector is (nearly) full, resume at ST[POS].  DICT (C's USE_DICTIONARY,
+  ;; H2 / H4): a shallow static-dictionary probe when nothing scored.
   `(define-vop (,name)
     (:policy :fast-safe)
     (:translate ,translate)
@@ -1035,11 +1190,13 @@
                    (inst shr dst ,(- 64 bits)))
                  (store (i tmp)
                    (key-of tmp i)
+                   ;; C 1.2.0 BUCKET_SWEEP: slot (key + (j << 3)) & mask,
+                   ;; j = (i >> 3) & (sweep - 1)
                    ,@(when (> sweep 1)
                        `((inst mov rcx i)
-                         (inst shr rcx 3)
-                         (inst and rcx ,(1- sweep))
-                         (inst add tmp rcx)))
+                         (inst and rcx ,(ash (1- sweep) 3))
+                         (inst add tmp rcx)
+                         (inst and tmp ,(1- (ash 1 bits)))))
                    (inst mov :dword (ea +q-d+ bk tmp 4) i))
                  (char-at (dst i)
                    (let ((past (gen-label)) (ok (gen-label)))
@@ -1071,6 +1228,9 @@
           (inst mov (q-sv :len) t1)
           (inst mov t1 (q-sv :odist))
           (inst mov (q-sv :dist) t1)
+          ,@(when dict
+              '((inst mov t1 (q-sv :olcd))
+                (inst mov (q-sv :lcd) t1)))
           (inst mov (q-sv :score) t3)
           (inst mov :qword (q-sv :delayed) 0)
           ;; C: look for a better match one byte ahead (at most 4 times)
@@ -1095,6 +1255,9 @@
             (inst mov (q-sv :len) t1)
             (inst mov t1 (q-sv :odist))
             (inst mov (q-sv :dist) t1)
+            ,@(when dict
+                '((inst mov t1 (q-sv :olcd))
+                  (inst mov (q-sv :lcd) t1)))
             (inst mov (q-sv :score) t3)
             (inst mov t1 (q-sv :delayed))
             (inst inc t1)
@@ -1110,6 +1273,10 @@
           (inst mov (q-sv :apply-rh) t3)
           (let ((same (gen-label)))
             (inst mov t3 (q-sv :dist))
+            ,@(when dict
+                ;; a dictionary word's distance is not pushed
+                '((inst cmp :qword (q-sv :lcd) 0)
+                  (inst jmp :ne same)))
             (inst cmp t3 (q-sv :c0))
             (inst jmp :e same)
             (inst mov t1 (q-sv :c2))
@@ -1135,7 +1302,11 @@
           (inst mov (ea (+ 16 +q-d+) cmpv t1 8) bl)
           (inst lea bl (ea 0 t3 t3))
           (inst mov (ea (+ 24 +q-d+) cmpv t1 8) bl)
-          (inst mov :qword (ea (+ 32 +q-d+) cmpv t1 8) 0)
+          ,@(if dict
+                '((inst mov bl (q-sv :lcd))
+                  (inst shl bl 1)
+                  (inst mov (ea (+ 32 +q-d+) cmpv t1 8) bl))
+                '((inst mov :qword (ea (+ 32 +q-d+) cmpv t1 8) 0)))
           (inst add :qword (q-sv :ncmd) 1)
           ;; the next probe is at CUR + LEN: prefetch its bucket and the
           ;; data at the bucket's (first) candidate while StoreRange runs
@@ -1185,16 +1356,16 @@
               (inst shr t1 ,(- 64 bits))
               ,@(when (> sweep 1)
                   `((inst mov rcx prev)
-                    (inst shr rcx 3)
-                    (inst and rcx ,(1- sweep))
-                    (inst add cmpv rcx)))
+                    (inst and rcx ,(ash (1- sweep) 3))
+                    (inst add cmpv rcx)
+                    (inst and cmpv ,(1- (ash 1 bits)))))
               (inst mov :dword (ea +q-d+ bk cmpv 4) prev)
               (inst inc prev)
               ,@(when (> sweep 1)
                   `((inst mov rcx prev)
-                    (inst shr rcx 3)
-                    (inst and rcx ,(1- sweep))
-                    (inst add t1 rcx)))
+                    (inst and rcx ,(ash (1- sweep) 3))
+                    (inst add t1 rcx)
+                    (inst and t1 ,(1- (ash 1 bits)))))
               (inst mov :dword (ea +q-d+ bk t1 4) prev)
               (inst inc prev)
               (inst cmp prev bl)
@@ -1270,6 +1441,7 @@
               (inst prefetch :t0 (ea +q-d+ bk t2 4))
               (emit-label no-pf))
             (inst mov t3 2020)
+            ,@(when dict '((inst mov :qword (q-sv :olcd) 0)))
             ,@(when (= sweep 1) '((inst mov (q-sv :bestin) bl)))
             (inst lea t1 (ea 0 cur bl))
             (char-at cmpv t1)
@@ -1302,7 +1474,7 @@
                     (char-at cmpv t1)))
             (emit-label no-last)
             ,@(if (= sweep 1)
-                  '((let ((done (gen-label)))
+                  `((let ((done (gen-label)) (to-dict (gen-label)))
                       (inst mov t1 (q-sv :key))
                       (inst mov :dword prev (ea +q-d+ bk t1 4))
                       (inst mov :dword (ea +q-d+ bk t1 4) cur)
@@ -1320,14 +1492,26 @@
                       (inst mov bl cur)
                       (q-match-len t1 prev bl data rcx)
                       (inst cmp t1 4)
-                      (inst jmp :b done)
+                      (inst jmp :b to-dict)
                       (inst mov prev (q-sv :fback))
                       (score-of t2 t1 prev)
                       (inst cmp t2 t3)
-                      (inst jmp :le done)
+                      (inst jmp :le to-dict)
                       (inst mov t3 t2)
                       (inst mov (q-sv :olen) t1)
                       (inst mov (q-sv :odist) prev)
+                      (inst jmp done)
+                      ;; C H2 reaches its dictionary probe only here: every
+                      ;; other path returned early
+                      (emit-label to-dict)
+                      ,@(when dict
+                          '((inst mov t1 cur)
+                            (inst cmp t1 (q-sv :window))
+                            (inst cmov :a t1 (q-sv :window))
+                            (inst mov (q-sv :hmaxb) t1)
+                            (q-dict-search data cur t3 (q-sv :hmaxb)
+                                           t1 t2 prev bl cmpv bk t)
+                            (inst mov bk (q-cx :buckets))))
                       (emit-label done)
                       (inst ret)))
                   `((let ((next (gen-label)) (lp (gen-label)) (done (gen-label)))
@@ -1336,7 +1520,9 @@
                       (inst mov t1 (q-sv :fli))
                       (inst cmp t1 ,sweep)
                       (inst jmp :ge done)
+                      (inst shl t1 3)
                       (inst add t1 (q-sv :key))
+                      (inst and t1 ,(1- (ash 1 bits)))
                       (inst mov :dword prev (ea +q-d+ bk t1 4))
                       (inst lea t1 (ea 0 prev bl))
                       (inst movzx '(:byte :dword) t1 (ea +q-d+ data t1))
@@ -1366,19 +1552,27 @@
                       (inst add :qword (q-sv :fli) 1)
                       (inst jmp lp)
                       (emit-label done)
+                      ,@(when dict
+                          '((inst mov t1 cur)
+                            (inst cmp t1 (q-sv :window))
+                            (inst cmov :a t1 (q-sv :window))
+                            (inst mov (q-sv :hmaxb) t1)
+                            (q-dict-search data cur t3 (q-sv :hmaxb)
+                                           t1 t2 prev bl cmpv bk t)
+                            (inst mov bk (q-cx :buckets))))
                       (inst mov t1 cur)
-                      (inst shr t1 3)
-                      (inst and t1 ,(1- sweep))
+                      (inst and t1 ,(ash (1- sweep) 3))
                       (inst add t1 (q-sv :key))
+                      (inst and t1 ,(1- (ash 1 bits)))
                       (inst mov :dword (ea +q-d+ bk t1 4) cur)
                       (inst ret)))))
           (emit-label end))))))
 
 #+cl-brotli-x86-64
 (sb-ext:without-package-locks
-  (define-quick-vop cl-brotli-asm-quick-h2 cl-brotli.lisp::%asm-quick-h2 16 1 5)
+  (define-quick-vop cl-brotli-asm-quick-h2 cl-brotli.lisp::%asm-quick-h2 16 1 5 t)
   (define-quick-vop cl-brotli-asm-quick-h3 cl-brotli.lisp::%asm-quick-h3 16 2 5)
-  (define-quick-vop cl-brotli-asm-quick-h4 cl-brotli.lisp::%asm-quick-h4 17 4 5)
+  (define-quick-vop cl-brotli-asm-quick-h4 cl-brotli.lisp::%asm-quick-h4 17 4 5 t)
   (define-quick-vop cl-brotli-asm-quick-h54 cl-brotli.lisp::%asm-quick-h54 20 4 7))
 
 
@@ -1509,6 +1703,15 @@
               (inst xor rcx rcx)
               (inst jmp sym-done)
               (emit-label have-copy)
+              ;; a dictionary word cut by C's omit-last transform codes the
+              ;; word's length: CPY + DICTP - 1 (DICTP = 1 + cut)
+              (let ((no-cut (gen-label)))
+                (inst mov t2 (q-sv :tmp))
+                (inst shr t2 1)
+                (inst sub t2 1)
+                (inst jmp :le no-cut)
+                (inst add cpy t2)
+                (emit-label no-cut))
               (lc cpy :cpylc :cpybase :cpybits)
               ;; repeat = not a dictionary word and dist = last
               (inst xor t3 t3)
@@ -1554,9 +1757,12 @@
               (inst xor rcx rcx)
               (inst jmp dcode-done)
               (emit-label no-rep2)
-              ;; C ComputeDistanceCode (short-dist): six tests
+              ;; C ComputeDistanceCode (short-dist): six tests, none for a
+              ;; dictionary word (its distance is past the window)
               (inst cmp :qword (q-sv :short-dist) 0)
               (inst jmp :e enc)
+              (inst cmp :qword (q-sv :tmp) 0)
+              (inst jmp :ne enc)
               (ring b 2)                                 ; d1
               (inst cmp dist b)
               (inst jmp :ne t-o1)
@@ -1819,11 +2025,13 @@
 
 
 #+cl-brotli-x86-64
-(defmacro define-h6-vop (name translate block-bits ndist)
-  ;; DEFINE-H6-MATCHER's matcher (C's H6 with CreateBackwardReferences):
-  ;; same driver and exits as DEFINE-QUICK-VOP; FindLongestMatch checks the
-  ;; NDIST distance-cache candidates (with C's penalties) and then the
-  ;; key's ring of 2^BLOCK-BITS positions, newest first.
+(defmacro define-h6-vop (name translate block-bits ndist
+                         &key (hash-bytes 5) (bucket-bits 15))
+  ;; DEFINE-H6-MATCHER's matcher (C's H6, or H5 with HASH-BYTES 4, with
+  ;; CreateBackwardReferences): same driver and exits as DEFINE-QUICK-VOP;
+  ;; FindLongestMatch checks the NDIST distance-cache candidates (with C's
+  ;; penalties), then the key's ring of 2^BLOCK-BITS positions, newest
+  ;; first, then (nothing found) C's two static-dictionary slots.
   (let ((bmask (1- (ash 1 block-bits))) (bsize (ash 1 block-bits)))
     `(define-vop (,name)
       (:policy :fast-safe)
@@ -1848,13 +2056,21 @@
               (main (gen-label)) (fl (gen-label)) (no-match (gen-label))
               (finish (gen-label)) (end (gen-label)) (all-done (gen-label)) (full (gen-label)))
           (labels ((dc (k) (q-sv (intern (format nil "DC~D" k) :keyword)))
-                   (key-of (dst i)
-                     ;; ((load64 & 2^40-1) * 0x1FE35A7BD3579BD3) >> 49
-                     (inst mov dst (ea +q-d+ data i))
-                     (inst shl dst 24)
-                     (inst shr dst 24)
-                     (inst imul dst (q-sv :mulc))
-                     (inst shr dst 49))
+                   (key-of (dst i &optional (disp 0))
+                     ,(if (= hash-bytes 5)
+                          ;; H6: ((load64 & 2^40-1) * 0x1FE35A7BD3579BD3) >> 49
+                          `(progn
+                             (inst mov dst (ea (+ disp +q-d+) data i))
+                             (inst shl dst 24)
+                             (inst shr dst 24)
+                             (inst imul dst (q-sv :mulc))
+                             (inst shr dst ,(- 64 bucket-bits)))
+                          ;; H5: (load32 * 0x1E35A7BD mod 2^32) >> (32 - bits)
+                          `(progn
+                             (inst mov :dword dst (ea (+ disp +q-d+) data i))
+                             (inst imul dst dst #x1E35A7BD)
+                             (inst shl dst 32)
+                             (inst shr dst ,(- 64 bucket-bits)))))
                    (store (i tmp tmp2)
                      ;; ring insert: buckets[key << BB + (num[key] & BMASK)] = i
                      (key-of tmp i)
@@ -1887,7 +2103,11 @@
                      (inst add dst 1920)
                      (inst bsr rcx backward)
                      (inst imul rcx rcx 30)
-                     (inst sub dst rcx)))
+                     (inst sub dst rcx))
+                   (h5-dict-search ()
+                     ;; C SearchInStaticDictionary, two slots (shallow = false)
+                     (q-dict-search data cur (q-sv :bscore) (q-sv :hmaxb)
+                                    t2 t3 prev bl t1 iv nil)))
             (inst mov data (q-cx :data))
             (inst mov bk (q-cx :buckets))
             (inst mov cur (q-sv :pos))
@@ -1902,6 +2122,8 @@
             (inst mov (q-sv :len) t1)
             (inst mov t1 (q-sv :odist))
             (inst mov (q-sv :dist) t1)
+            (inst mov t1 (q-sv :olcd))
+            (inst mov (q-sv :lcd) t1)
             (inst mov (q-sv :score) t3)
             (inst mov :qword (q-sv :delayed) 0)
             (let ((lazy (gen-label)) (lazy-done (gen-label)))
@@ -1918,6 +2140,8 @@
               (inst mov (q-sv :len) t1)
               (inst mov t1 (q-sv :odist))
               (inst mov (q-sv :dist) t1)
+              (inst mov t1 (q-sv :olcd))
+              (inst mov (q-sv :lcd) t1)
               (inst mov (q-sv :score) t3)
               (inst mov t1 (q-sv :delayed))
               (inst inc t1)
@@ -1934,6 +2158,10 @@
             (inst mov (q-sv :apply-rh) t3)
             (let ((same (gen-label)))
               (inst mov t3 (q-sv :dist))
+              ;; a dictionary word's distance is not pushed (C: distance
+              ;; > dictionary_start)
+              (inst cmp :qword (q-sv :lcd) 0)
+              (inst jmp :ne same)
               (inst cmp t3 (q-sv :dc0))
               (inst jmp :e same)
               (inst mov t1 (q-sv :dc2))
@@ -1961,7 +2189,9 @@
             (inst mov (ea (+ 16 +q-d+) iv t1 8) bl)
             (inst lea bl (ea 0 t3 t3))
             (inst mov (ea (+ 24 +q-d+) iv t1 8) bl)
-            (inst mov :qword (ea (+ 32 +q-d+) iv t1 8) 0)
+            (inst mov bl (q-sv :lcd))
+            (inst shl bl 1)
+            (inst mov (ea (+ 32 +q-d+) iv t1 8) bl)
             (inst add :qword (q-sv :ncmd) 1)
             ;; prefetch the ring entry of the next search position
             ;; (CUR + LEN) while StoreRange runs
@@ -1969,11 +2199,7 @@
               (inst lea t1 (ea 0 cur t2))
               (inst cmp t1 (q-sv :n9))
               (inst jmp :ge no-pf)
-              (inst mov prev (ea +q-d+ data t1))
-              (inst shl prev 24)
-              (inst shr prev 24)
-              (inst imul prev (q-sv :mulc))
-              (inst shr prev 49)
+              (key-of prev t1)
               (inst mov iv (q-cx :num))
               (inst movzx '(:word :dword) bl (ea +q-d+ iv prev 2))
               (inst dec bl)
@@ -2053,8 +2279,8 @@
               (inst jmp lp)
               (emit-label two)
               (inst lea iv (ea 8 cur))
-              (inst cmp iv (q-sv :n7))
-              (inst cmov :g iv (q-sv :n7))
+              (inst cmp iv (q-sv :n7b))
+              (inst cmov :g iv (q-sv :n7b))
               (emit-label lp2)
               (inst cmp cur iv)
               (inst jmp :ge lp-done)
@@ -2078,6 +2304,7 @@
             (emit-label fl)
             (inst xor bl bl)                           ; best-len
             (inst mov :qword (q-sv :bscore) 2020)
+            (inst mov :qword (q-sv :olcd) 0)
             ;; maxb = min(cur, window) -> HNK slot
             (inst mov t1 cur)
             (inst cmp t1 (q-sv :window))
@@ -2163,21 +2390,13 @@
                   (inst lea t2 (ea 1 cur))
                   (inst cmp t2 (q-sv :n9))
                   (inst jmp :ge no-pf2)
-                  (inst mov t2 (ea (+ 2 +q-d+) data cur))
-                  (inst shl t2 24)
-                  (inst shr t2 24)
-                  (inst imul t2 (q-sv :mulc))
-                  (inst shr t2 49)
+                  (key-of t2 cur 2)
                   (inst mov t3 (q-cx :num))
                   (inst prefetch :t0 (ea +q-d+ t3 t2 2))
                   (emit-label no-pf2)
                   (inst cmp cur (q-sv :n9))
                   (inst jmp :ge no-pf)
-                  (inst mov t2 (ea (1+ +q-d+) data cur))
-                  (inst shl t2 24)
-                  (inst shr t2 24)
-                  (inst imul t2 (q-sv :mulc))
-                  (inst shr t2 49)
+                  (key-of t2 cur 1)
                   (inst mov t3 (q-cx :num))
                   (inst movzx '(:word :dword) prev (ea +q-d+ t3 t2 2))
                   (inst dec prev)
@@ -2235,6 +2454,7 @@
                 (key-of t1 cur)
                 (inst mov t2 (q-cx :num))
                 (inst mov :word (ea +q-d+ t2 t1 2) iv)
+                (h5-dict-search)
                 (inst mov bk (q-cx :buckets))
                 (inst mov t3 (q-sv :bscore))
                 (inst ret)
@@ -2247,4 +2467,15 @@
   (define-h6-vop cl-brotli-asm-h6-q6 cl-brotli.lisp::%asm-h6-q6 5 4)
   (define-h6-vop cl-brotli-asm-h6-q7 cl-brotli.lisp::%asm-h6-q7 6 10)
   (define-h6-vop cl-brotli-asm-h6-q8 cl-brotli.lisp::%asm-h6-q8 7 10)
-  (define-h6-vop cl-brotli-asm-h6-q9 cl-brotli.lisp::%asm-h6-q9 8 16))
+  (define-h6-vop cl-brotli-asm-h6-q9 cl-brotli.lisp::%asm-h6-q9 8 16)
+  ;; C's H5 (inputs under 1 MiB): 4-byte hash, 2^14 keys at q5/q6
+  (define-h6-vop cl-brotli-asm-h5-q5 cl-brotli.lisp::%asm-h5-q5 4 4
+    :hash-bytes 4 :bucket-bits 14)
+  (define-h6-vop cl-brotli-asm-h5-q6 cl-brotli.lisp::%asm-h5-q6 5 4
+    :hash-bytes 4 :bucket-bits 14)
+  (define-h6-vop cl-brotli-asm-h5-q7 cl-brotli.lisp::%asm-h5-q7 6 10
+    :hash-bytes 4 :bucket-bits 15)
+  (define-h6-vop cl-brotli-asm-h5-q8 cl-brotli.lisp::%asm-h5-q8 7 10
+    :hash-bytes 4 :bucket-bits 15)
+  (define-h6-vop cl-brotli-asm-h5-q9 cl-brotli.lisp::%asm-h5-q9 8 16
+    :hash-bytes 4 :bucket-bits 15))
