@@ -522,7 +522,11 @@ included; this is mostly useful for the lisp Lisp side and the CFFI wrapper."
   lisp-comp-consed
   c-comp-consed
   lisp-decomp-consed
-  c-decomp-consed)
+  c-decomp-consed
+  ;; DECOMPRESS-INTO a preallocated buffer: the like-for-like counterpart
+  ;; of C-DECOMP-CORE (which also decodes into a buffer it already has);
+  ;; LISP-DECOMP includes allocating the fresh result vector
+  lisp-decomp-into)
 
 (defun print-table-row (fmt &rest args)
   (apply #'format t fmt args)
@@ -777,7 +781,14 @@ included; this is mostly useful for the lisp Lisp side and the CFFI wrapper."
                                                   (lambda () (cl-brotli.reference:decompress c-compressed))
                                                   :target target :samples samples)
                                   (declare (ignore c-dec-core-2))
-                                  (let ((row (make-bench-row
+                                  (let* ((into-buffer (make-array n :element-type '(unsigned-byte 8)))
+                                         (lisp-dec-into
+                                           (nth-value 1
+                                             (measure-pair (lambda () (c-decompress-core cd))
+                                                           (lambda () (cl-brotli:decompress-into
+                                                                       c-compressed into-buffer))
+                                                           :target target :samples samples)))
+                                         (row (make-bench-row
                                               :dataset dataset-name
                                               :description (getf spec :description)
                                               :data-hash (getf spec :hash)
@@ -790,6 +801,7 @@ included; this is mostly useful for the lisp Lisp side and the CFFI wrapper."
                                               :c-decomp-core c-dec-core
                                               :c-decomp-one-shot c-dec-one
                                               :lisp-decomp lisp-dec
+                                              :lisp-decomp-into lisp-dec-into
                                               :lisp-stream-c-decomp lisp-stream-c-time
                                               :lisp-stream-lisp-decomp lisp-stream-lisp-time
                                               :lisp-comp-consed lisp-comp-consed
@@ -862,7 +874,8 @@ included; this is mostly useful for the lisp Lisp side and the CFFI wrapper."
                       c-decomp-core c-decomp-one-shot lisp-decomp
                       lisp-stream-c-decomp lisp-stream-lisp-decomp
                       lisp-comp-consed c-comp-consed
-                      lisp-decomp-consed c-decomp-consed)))
+                      lisp-decomp-consed c-decomp-consed
+                      lisp-decomp-into)))
       (format stream "~{~A~^,~}~%" (mapcar #'string-downcase
                                            (mapcar #'symbol-name columns)))
       (dolist (row rows)

@@ -24,6 +24,11 @@
   ;; widest second-level table: longest code - TABLE-BITS (0 = none)
   (sub-bits 0 :type (integer 0 15)))
 
+;; COUNT of every multi-symbol tree: only its non-NILness is read (NIL
+;; marks a single-symbol tree); the real histogram is scratch of the reader.
+(deftable +huff-multi+ (make-array 16 :element-type 'fixnum :initial-element 0))
+(declaim (type (simple-array fixnum (16)) +huff-multi+))
+
 (deftable +reverse-byte+
   (let ((v (make-array 256 :element-type '(unsigned-byte 8) :initial-element 0)))
     (dotimes (i 256 v)
@@ -161,8 +166,10 @@ written."
            (type (integer 0 1024) n)
            (type (or null (simple-array fixnum (16))) count)
            (optimize (speed 3) (safety 0)))
+  (let ((own (make-array (1+ +max-bits+) :element-type 'fixnum :initial-element 0)))
+    (declare (dynamic-extent own))
   (unless count
-    (setf count (make-array (1+ +max-bits+) :element-type 'fixnum :initial-element 0))
+    (setf count own)
     (dotimes (s n)
       (let ((l (aref lengths s)))
         (declare (type (integer 0 15) l))
@@ -216,28 +223,12 @@ written."
                (k (%huff-root table sorted next count table-bits maxlen)))
           (when (> maxlen table-bits)
             (%huff-long table sorted next count table-bits maxlen k))
-          (make-huff :count count :lengths lengths :table table
+          ;; LENGTHS / COUNT are the caller's scratch: the table alone
+          ;; decodes (READ-HUFF-SLOW included)
+          (make-huff :count +huff-multi+ :table table
                      :table-bits table-bits
                      :mask (1- (ash 1 table-bits))
-                     :sub-bits (max 0 (- maxlen table-bits))))))))
-
-(defun huff-ensure-symbols (h)
-  "Build H's length-sorted symbol permutation on demand (slow path only)."
-  (declare (type huff h))
-  (or (huff-symbol h)
-      (let* ((lengths (huff-lengths h))
-             (n (length lengths))
-             (count (huff-count h))
-             (offs (make-array (+ 2 +max-bits+) :initial-element 0))
-             (symbol (make-array n :initial-element 0)))
-        (loop for l from 1 to +max-bits+ do
-          (setf (aref offs (1+ l)) (+ (aref offs l) (aref count l))))
-        (dotimes (s n)
-          (let ((l (aref lengths s)))
-            (when (plusp l)
-              (setf (aref symbol (aref offs l)) s)
-              (incf (aref offs l)))))
-        (setf (huff-symbol h) symbol))))
+                     :sub-bits (max 0 (- maxlen table-bits)))))))))
 
 (declaim (inline consume-bits))
 (defun consume-bits (r n)
@@ -255,18 +246,25 @@ written."
                 read-huff read-huff-slow))
 
 (defun read-huff-slow (r h)
-  (declare (type huff h))
-  (let ((code 0) (first 0) (index 0)
-        (count (huff-count h)) (sym (huff-ensure-symbols h)))
-    (declare (type (simple-array fixnum (16)) count) (type simple-vector sym)
-             (type fixnum code first index))
-    (loop for len from 1 to +max-bits+ do
-      (setf code (logior code (b:rbit r)))
-      (let ((c (aref count len)))
-        (when (< (- code first) c)
-          (return-from read-huff-slow (svref sym (+ index (- code first)))))
-        (incf index c) (incf first c) (setf first (ash first 1) code (ash code 1))))
-    (berr "invalid prefix code")))
+  "Fewer bits remain than READ-HUFF's lookup needs.  A code of length L <=
+K (the K < TABLE-BITS remaining bits) is replicated over every root index
+whose low L bits are its bits, so the zero-padded index of the remaining
+bits finds it; anything longer means the stream ends inside a code."
+  (declare (type huff h) (optimize (speed 1) (safety 1)))
+  (let* ((table (huff-table h))
+         (tb (huff-table-bits h))
+         (k (min (b:bits-available r) tb)))
+    (declare (type (simple-array (unsigned-byte 16) (*)) table)
+             (type (integer 0 10) tb k))
+    (let* ((entry (aref table (b:peek-bits r k)))
+           (len (logand entry 15)))
+      (declare (type (unsigned-byte 16) entry) (type (integer 0 15) len))
+      (when (and (plusp len) (<= len k))
+        (consume-bits r len)
+        (return-from read-huff-slow (ash entry -4)))
+      ;; truncated: let the reader report the end of its input
+      (b:rbits r (min 24 (1+ (b:bits-available r))))
+      (berr "invalid prefix code"))))
 
 (defun read-huff (r h)
   "Decode one symbol from R using canonical code H.  Short codes use the
@@ -503,7 +501,7 @@ refill loop and a +WIDE-MASKS+ symbol-value fetch to every call site)."
   (let ((cl-lengths (make-array 18 :element-type '(unsigned-byte 8)
                                      :initial-element 0))
           (space2 0) (ncodes 0))
-    (declare (type fixnum space2 ncodes))
+    (declare (type fixnum space2 ncodes) (dynamic-extent cl-lengths))
     (loop for i of-type fixnum from hskip below 18 do
       (let ((len (read-clcl r)))
         (declare (type (integer 0 5) len))
@@ -525,7 +523,9 @@ refill loop and a +WIDE-MASKS+ symbol-value fetch to every call site)."
           (count (make-array (1+ +max-bits+) :element-type 'fixnum :initial-element 0)))
       (declare (type fixnum symbol repeat space)
                (type (integer 0 15) prev-code-len repeat-code-len)
-               (type (simple-array fixnum (16)) count))
+               (type (simple-array fixnum (16)) count)
+               ;; BUILD-HUFF keeps neither
+               (dynamic-extent lengths count))
       (with-local-bits (r)
       (loop while (and (< symbol alphabet-size) (> space 0)) do
         (let ((c (lsym clh)))

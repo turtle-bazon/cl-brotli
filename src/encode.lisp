@@ -21,6 +21,90 @@
 (defvar *hq-tree-bits-base* 30.0d0)
 
 
+;;; ---- per-call array arena ---------------------------------------------
+;;; The writers build dozens of small code tables per call (code lengths,
+;;; canonical and reversed codes: 64-704 fixnums each).  For a fast call
+;;; (1 MiB of repetitive input in ~100 us) their ~40 KiB of fresh pages are
+;;; a measurable share, and garbage either way.  A MAKE-COMPRESSOR closure
+;;; binds *ARENA* for each call: vectors come from its free lists (zeroed
+;;; on reuse) and all return there when the call ends, so nothing handed
+;;; out may outlive the call.  Without an arena (plain COMPRESS) these are
+;;; ordinary fresh vectors.
+
+(defstruct (arena (:constructor make-arena ()))
+  (free (make-hash-table :test 'eql) :type hash-table)
+  (used nil :type list)
+  (free-u64 (make-hash-table :test 'eql) :type hash-table)
+  (used-u64 nil :type list)
+  (free-sv (make-hash-table :test 'eql) :type hash-table)
+  (used-sv nil :type list))
+
+(defvar *arena* nil
+  "The running MAKE-COMPRESSOR call's ARENA, or NIL (thread-local binding).")
+
+(defun arena-fixnums (n)
+  "A zero-filled (SIMPLE-ARRAY FIXNUM (N)), from *ARENA* when one is bound."
+  (declare (type fixnum n) (optimize (speed 3) (safety 0)))
+  (let ((a *arena*))
+    (if (null a)
+        (make-array n :element-type 'fixnum :initial-element 0)
+        (let* ((free (arena-free a))
+               (lst (gethash n free))
+               (v (if lst
+                      (progn (setf (gethash n free) (cdr lst))
+                             (fill (the (simple-array fixnum (*)) (car lst)) 0))
+                      (make-array n :element-type 'fixnum :initial-element 0))))
+          (push v (arena-used a))
+          v))))
+
+(defun arena-u64s (n)
+  "A zero-filled (SIMPLE-ARRAY (UNSIGNED-BYTE 64) (N)), from *ARENA* when one
+is bound."
+  (declare (type fixnum n) (optimize (speed 3) (safety 0)))
+  (let ((a *arena*))
+    (if (null a)
+        (make-array n :element-type '(unsigned-byte 64) :initial-element 0)
+        (let* ((free (arena-free-u64 a))
+               (lst (gethash n free))
+               (v (if lst
+                      (progn (setf (gethash n free) (cdr lst))
+                             (fill (the (simple-array (unsigned-byte 64) (*)) (car lst)) 0))
+                      (make-array n :element-type '(unsigned-byte 64) :initial-element 0))))
+          (push v (arena-used-u64 a))
+          v))))
+
+(defun arena-svec (n)
+  "A SIMPLE-VECTOR of N zeros, from *ARENA* when one is bound (cleared again
+on release, so it never keeps the caller's arrays alive)."
+  (declare (type fixnum n) (optimize (speed 3) (safety 0)))
+  (let ((a *arena*))
+    (if (null a)
+        (make-array n :initial-element 0)
+        (let* ((free (arena-free-sv a))
+               (lst (gethash n free))
+               (v (if lst
+                      (progn (setf (gethash n free) (cdr lst)) (car lst))
+                      (make-array n :initial-element 0))))
+          (push v (arena-used-sv a))
+          v))))
+
+(defun arena-release (a)
+  "Return every vector handed out during the call to A's free lists."
+  (declare (type arena a))
+  (let ((free (arena-free a)))
+    (dolist (v (arena-used a))
+      (push v (gethash (length (the (simple-array fixnum (*)) v)) free)))
+    (setf (arena-used a) nil))
+  (let ((free (arena-free-u64 a)))
+    (dolist (v (arena-used-u64 a))
+      (push v (gethash (length (the (simple-array (unsigned-byte 64) (*)) v)) free)))
+    (setf (arena-used-u64 a) nil))
+  (let ((free (arena-free-sv a)))
+    (dolist (v (arena-used-sv a))
+      (fill (the simple-vector v) 0)
+      (push v (gethash (length (the simple-vector v)) free)))
+    (setf (arena-used-sv a) nil)))
+
 ;;; ---- canonical code construction --------------------------------------
 
 (defun canonical-codes (lengths n)
@@ -32,9 +116,10 @@ emitted MSB-first; DEFLATE canonical assignment)."
                            :initial-element 0))
         (next (make-array (1+ +max-bits+) :element-type 'fixnum
                           :initial-element 0))
-        (codes (make-array n :element-type 'fixnum :initial-element 0)))
+        (codes (arena-fixnums n)))
     (declare (type (simple-array fixnum (16)) count next)
-             (type (simple-array fixnum (*)) codes))
+             (type (simple-array fixnum (*)) codes)
+             (dynamic-extent count next))
     (dotimes (s n) (let ((l (aref lengths s))) (declare (type (integer 0 15) l)) (when (plusp l) (incf (aref count l)))))
     (let ((code 0))
       (declare (type fixnum code))
@@ -183,10 +268,9 @@ Port of C BrotliCreateHuffmanTree; >= 2 nonzero frequencies assumed."
         (cond
           ((zerop nnz)
            (return-from build-code-lengths-a
-             (make-array n :element-type 'fixnum :initial-element 0)))
+             (arena-fixnums n)))
           ((= 1 nnz)
-           (let ((r (make-array n :element-type 'fixnum
-                                  :initial-element 0)))
+           (let ((r (arena-fixnums n)))
              (declare (type (simple-array fixnum (*)) r))
              (setf (aref r (aref rv 0)) 1)
              (return-from build-code-lengths-a r)))
@@ -228,8 +312,7 @@ Port of C BrotliCreateHuffmanTree; >= 2 nonzero frequencies assumed."
                                 (aref rv (+ jend 1)) -1)))))))
         ;; depth walk; on failure the DO retries with the doubled clamp
         (when (%huf-set-depth (- (* 2 nnz) 1) tc il rv depth maxbits)
-          (let ((r (make-array n :element-type 'fixnum
-                                  :initial-element 0)))
+          (let ((r (arena-fixnums n)))
             (declare (type (simple-array fixnum (*)) r))
             (dotimes (s (the fixnum n))
               (setf (aref r s)
@@ -291,7 +374,7 @@ the decoder's two-byte table reversal.)"
 (defun reversed-codes (codes lengths size)
   (declare (type (simple-array fixnum (*)) codes lengths) (type fixnum size)
            (optimize (speed 3) (safety 0)))
-  (let ((r (make-array size :element-type 'fixnum :initial-element 0)))
+  (let ((r (arena-fixnums size)))
     (dotimes (s size r)
       (let ((len (aref lengths s)))
         (declare (type (integer 0 15) len))
@@ -304,7 +387,7 @@ Histograms): smooth COUNTS[0..LENGTH) in place so the code lengths form
 runs the tree header's repeat codes compress; small or sparse histograms
 are left alone."
   (declare (type (simple-array fixnum (*)) counts) (type fixnum length)
-           (optimize (speed 1) (safety 1)))
+           (optimize (speed 3) (safety 0)))
   (let ((nonzero-count (loop for i below length count (plusp (aref counts i))))
         (streak-limit 1240))
     (when (< nonzero-count 16)
@@ -382,11 +465,14 @@ are left alone."
 one symbol -> single, 2-4 -> simple code (C's depths, symbols ordered by
 depth), else complex.  RLE-OPTIMIZE (q4+ literal / command / distance
 histograms) first applies C's BrotliOptimizeHuffmanCountsForRle to a copy."
-  (let ((nz (loop for s below size when (plusp (aref freqs s)) collect s)))
+  (let* ((nnz (loop for s below size count (plusp (aref freqs s))))
+         ;; the symbol list only where it is used (single / simple codes)
+         (nz (when (<= nnz 4)
+               (loop for s below size when (plusp (aref freqs s)) collect s))))
     (cond
-      ((<= (length nz) 1)
+      ((<= nnz 1)
        (make-etree :single (if nz (first nz) 0)))
-      ((<= (length nz) 4)
+      ((<= nnz 4)
        ;; C builds the depths with BrotliCreateHuffmanTree (2 -> 1 1,
        ;; 3 -> 1 2 2, 4 -> 2 2 2 2 or 1 2 3 3) and writes the symbols
        ;; sorted by depth (StoreSimpleHuffmanTree)
@@ -399,7 +485,8 @@ histograms) first applies C's BrotliOptimizeHuffmanCountsForRle to a copy."
       (t
        (let* ((lengths (build-code-lengths-a
                         (if rle-optimize
-                            (optimize-counts-for-rle (copy-seq freqs) size)
+                            (optimize-counts-for-rle
+                             (replace (arena-fixnums (length freqs)) freqs) size)
                             freqs)
                         size maxbits))
               (codes (canonical-codes lengths size)))
@@ -429,44 +516,57 @@ READ-CLCL): bits written in read order."
     (1 (b:wbits w 1 1) (b:wbits w 1 1) (b:wbits w 1 1) (b:wbits w 0 1))
     (5 (b:wbits w 1 1) (b:wbits w 1 1) (b:wbits w 1 1) (b:wbits w 1 1))))
 
-(defun huffman-tree-rle (lengths length)
+(defun huffman-tree-rle (lengths length syms extras)
   "C BrotliWriteHuffmanTree: LENGTHS[0..LENGTH) as code-length symbols
-\(0-15 literal, 16 repeat previous, 17 repeat zero) and their extra-bit
-values.  Repeat codes chain (the decoder multiplies consecutive repeats),
-the previous length starts at 8, and runs are coded only where C's
-DecideOverRleUse finds them worthwhile (alphabets over 50).  Returns
-\(values SYMBOLS EXTRAS) as lists."
-  (let ((syms nil) (extras nil) (prev 8) (n length))
+\(0-15 literal, 16 repeat previous, 17 repeat zero) into SYMS with their
+extra-bit values in EXTRAS (both >= LENGTH entries); returns the count.
+Repeat codes chain (the decoder multiplies consecutive repeats), the
+previous length starts at 8, and runs are coded only where C's
+DecideOverRleUse finds them worthwhile (alphabets over 50)."
+  (declare (type (simple-array fixnum (*)) lengths syms extras)
+           (type fixnum length)
+           (optimize (speed 3) (safety 0)))
+  (let ((count 0) (prev 8) (n length) (rle-nonzero nil) (rle-zero nil))
+    (declare (type fixnum count prev n) (type boolean rle-nonzero rle-zero))
     (loop while (and (> n 0) (zerop (aref lengths (1- n)))) do (decf n))
-    (multiple-value-bind (rle-nonzero rle-zero)
-        (if (> length 50)
-            ;; C DecideOverRleUse
-            (let ((tz 0) (tnz 0) (cz 1) (cnz 1) (i 0))
-              (loop while (< i n) do
-                (let ((v (aref lengths i)) (reps 1))
-                  (loop for k from (1+ i) below n
-                        while (= (aref lengths k) v) do (incf reps))
-                  (when (and (>= reps 3) (zerop v)) (incf tz reps) (incf cz))
-                  (when (and (>= reps 4) (/= v 0)) (incf tnz reps) (incf cnz))
-                  (incf i reps)))
-              (values (> tnz (* 2 cnz)) (> tz (* 2 cz))))
-            (values nil nil))
-      (flet ((put (sym x) (push sym syms) (push x extras))
-             (repeat-codes (code r bits)
-               ;; R (>= 3) repetitions as a chain of CODE, most
-               ;; significant digit first
-               (let ((chunk nil))
+    (when (> length 50)
+      ;; C DecideOverRleUse
+      (let ((tz 0) (tnz 0) (cz 1) (cnz 1) (i 0))
+        (declare (type fixnum tz tnz cz cnz i))
+        (loop while (< i n) do
+          (let ((v (aref lengths i)) (reps 1))
+            (declare (type fixnum v reps))
+            (loop for k of-type fixnum from (1+ i) below n
+                  while (= (aref lengths k) v) do (incf reps))
+            (when (and (>= reps 3) (zerop v)) (incf tz reps) (incf cz))
+            (when (and (>= reps 4) (/= v 0)) (incf tnz reps) (incf cnz))
+            (incf i reps)))
+        (setf rle-nonzero (> tnz (* 2 cnz)) rle-zero (> tz (* 2 cz)))))
+    (macrolet ((put (sym x)
+                 `(progn (setf (aref syms count) ,sym (aref extras count) ,x)
+                         (incf count))))
+      (flet ((repeat-codes (code r bits)
+               ;; R (>= 3) repetitions as a chain of CODE, most significant
+               ;; digit first: C appends the digits then reverses them
+               (declare (type fixnum code r bits))
+               (let ((start count) (mask (1- (ash 1 bits))))
+                 (declare (type fixnum start mask))
                  (decf r 3)
-                 (loop (push (cons code (logand r (1- (ash 1 bits)))) chunk)
+                 (loop (put code (logand r mask))
                        (setf r (ash r (- bits)))
                        (when (zerop r) (return))
                        (decf r))
-                 chunk)))
+                 (loop for i of-type fixnum from start
+                       for j of-type fixnum downfrom (1- count)
+                       while (< i j)
+                       do (rotatef (aref extras i) (aref extras j))))))
         (let ((i 0))
+          (declare (type fixnum i))
           (loop while (< i n) do
             (let ((v (aref lengths i)) (reps 1))
+              (declare (type fixnum v reps))
               (when (if (zerop v) rle-zero rle-nonzero)
-                (loop for k from (1+ i) below n
+                (loop for k of-type fixnum from (1+ i) below n
                       while (= (aref lengths k) v) do (incf reps)))
               (incf i reps)
               (if (zerop v)
@@ -474,15 +574,15 @@ DecideOverRleUse finds them worthwhile (alphabets over 50).  Returns
                     (when (= reps 11) (put 0 0) (decf reps))
                     (if (< reps 3)
                         (loop repeat reps do (put 0 0))
-                        (loop for (c . x) in (repeat-codes 17 reps 3) do (put c x))))
+                        (repeat-codes 17 reps 3)))
                   (progn
                     (when (/= prev v) (put v 0) (decf reps))
                     (when (= reps 7) (put v 0) (decf reps))
                     (if (< reps 3)
                         (loop repeat reps do (put v 0))
-                        (loop for (c . x) in (repeat-codes 16 reps 2) do (put c x)))
+                        (repeat-codes 16 reps 2))
                     (setf prev v))))))))
-    (values (nreverse syms) (nreverse extras))))
+    count))
 
 (defun write-complex-code (w lengths size)
   "C BrotliStoreHuffmanTree: the code lengths LENGTHS (>= 2 used symbols)
@@ -490,11 +590,18 @@ as code-length symbols under a code-length code built for them.  When
 only one code-length symbol occurs (e.g. 256 literals all of length 8)
 that code has a single 0-bit symbol: all 18 code-length-code lengths are
 stored and the symbols themselves cost only their extra bits."
-  (multiple-value-bind (syms extras) (huffman-tree-rle lengths size)
-    (let ((hist (make-array 18 :element-type 'fixnum :initial-element 0))
-          (num-codes 0) (code 0))
-      (dolist (sym syms) (incf (aref hist sym)))
-      (loop for i below 18
+  (declare (type (simple-array fixnum (*)) lengths) (type fixnum size)
+           (optimize (speed 3) (safety 0)))
+  (let ((syms (make-array (max size 18) :element-type 'fixnum))
+        (extras (make-array (max size 18) :element-type 'fixnum))
+        (hist (make-array 18 :element-type 'fixnum :initial-element 0))
+        (num-codes 0) (code 0))
+    (declare (dynamic-extent syms extras hist)
+             (type fixnum num-codes code))
+    (let ((count (huffman-tree-rle lengths size syms extras)))
+      (declare (type fixnum count))
+      (dotimes (i count) (incf (aref hist (aref syms i))))
+      (loop for i of-type fixnum below 18
             when (plusp (aref hist i))
               do (if (zerop num-codes)
                      (setf code i num-codes 1)
@@ -506,22 +613,27 @@ stored and the symbols themselves cost only their extra bits."
                        (if (zerop (aref cll (aref +clcl-order+ 2))) 3 2)
                        0))
              (to-store (if (> num-codes 1)
-                           (loop for k from 18 downto 1
+                           (loop for k of-type fixnum from 18 downto 1
                                  when (plusp (aref cll (aref +clcl-order+ (1- k))))
                                    return k
                                  finally (return 0))
                            18)))
+        (declare (type (simple-array fixnum (*)) cll clcodes)
+                 (type fixnum skip to-store))
         (b:wbits w skip 2)
-        (loop for i from skip below to-store
+        (loop for i of-type fixnum from skip below to-store
               do (write-clcl-len w (aref cll (aref +clcl-order+ i))))
         (when (= num-codes 1) (setf (aref cll code) 0))
-        (loop for sym in syms for x in extras do
-          (let ((len (aref cll sym)))
+        ;; codes are canonical MSB-first: reverse once for the LSB-first
+        ;; writer
+        (dotimes (i count)
+          (let* ((sym (aref syms i)) (len (aref cll sym)))
+            (declare (type fixnum sym len))
             (when (plusp len)
-              (emit-bits-msb w (aref clcodes sym) len)))
-          (case sym
-            (16 (b:wbits w x 2))
-            (17 (b:wbits w x 3))))))))
+              (b:wbits w (%reverse-bits (aref clcodes sym) len) len))
+            (case sym
+              (16 (b:wbits w (aref extras i) 2))
+              (17 (b:wbits w (aref extras i) 3)))))))))
 
 (defun write-simple-code (w symbols size &optional lengths)
   "Write a simple prefix code for 2-4 SYMBOLS (ordered by code length).
@@ -1131,10 +1243,13 @@ costdiff order."
             (aref dc (+ base 1)) dc1
             (aref dc (+ base 2)) dc2
             (aref dc (+ base 3)) dc3))
+    ;; The other entries are already sorted, so the first comparison that
+    ;; does not swap ends C's fixed LEN - 1 passes early (same result).
     (loop for i of-type fixnum from 1 below len do
       (let ((a offset) (b (logand (1+ offset) 7)))
         (declare (type fixnum a b))
-        (when (> (aref cd-a a) (aref cd-a b))
+        (unless (> (aref cd-a a) (aref cd-a b)) (return))
+        (progn
           (rotatef (aref pos-a a) (aref pos-a b))
           (rotatef (aref cost-a a) (aref cost-a b))
           (rotatef (aref cd-a a) (aref cd-a b))
@@ -1213,10 +1328,12 @@ costdiff order."
             ;; restore the sorted order (C StartPosQueuePush)
             (let ((len (min qidx 8)))
               (declare (type fixnum len))
+              ;; sorted remainder: stop at the first non-swap
               (loop for j of-type fixnum from 1 below len do
                 (let ((a offset) (b (logand (1+ offset) 7)))
                   (declare (type fixnum a b))
-                  (when (> (aref cd-a a) (aref cd-a b))
+                  (unless (> (aref cd-a a) (aref cd-a b)) (return))
+                  (progn
                     (rotatef (aref pos-a a) (aref pos-a b))
                     (rotatef (aref cost-a a) (aref cost-a b))
                     (rotatef (aref cd-a a) (aref cd-a b))
@@ -3322,6 +3439,19 @@ before it reads and never uses the vector's length."
           (when pool (setf (gethash key pool) new))
           new))))
 
+(defun pooled-u16 (key size)
+  "A zeroed (unsigned-byte 16) vector of SIZE from the compressor's pool
+under KEY (fresh when there is no pool)."
+  (declare (type fixnum size) (optimize (speed 3) (safety 0)))
+  (let* ((pool *scratch-pool*)
+         (v (and pool (gethash key pool))))
+    (if (and v (= (length (the (simple-array (unsigned-byte 16) (*)) v)) size))
+        (fill (the (simple-array (unsigned-byte 16) (*)) v) 0)
+        (let ((new (make-array size :element-type '(unsigned-byte 16)
+                                    :initial-element 0)))
+          (when pool (setf (gethash key pool) new))
+          new))))
+
 (defun pooled-u32 (key size fill)
   "A u32 vector of at least SIZE from the compressor's pool under KEY
 \(fresh when there is no pool).  When FILL is a number the first SIZE
@@ -3418,7 +3548,9 @@ like %ASM-QUICK-DRIVE."
            (type fixnum window block-bits) (type function run)
            (optimize (speed 3) (safety 0)))
   (let* ((n (length data))
-         (num (pooled-u32 :h6-num 32768 0))
+         ;; u16 like C's num_ (the counters wrap at 2^16): half the cache
+         ;; footprint of the u32 array the Lisp matcher uses
+         (num (pooled-u16 :h6-num16 32768))
          (cmds (let ((pool *scratch-pool*) (want (* 5 (max 4096 (ash n -5)))))
                  (or (and pool
                           (let ((v (gethash :quick-cmds pool)))
@@ -3427,8 +3559,8 @@ like %ASM-QUICK-DRIVE."
                        (when pool (setf (gethash :quick-cmds pool) v))
                        v))))
          (rh-window (if (< block-bits 8) 64 512))
-         (st (make-array +q0-st-size+ :element-type '(unsigned-byte 64) :initial-element 0))
-         (ctx (make-array +q0-ctx-size+ :initial-element 0)))
+         (st (arena-u64s +q0-st-size+))
+         (ctx (arena-svec +q0-ctx-size+)))
     (declare (type (simple-array fixnum (*)) cmds)
              (type (simple-array (unsigned-byte 64) (*)) st) (type simple-vector ctx))
     (setf (svref ctx +q0c-data+) data (svref ctx +q0c-buckets+) buckets
@@ -3489,8 +3621,8 @@ insert) is added here.  Same commands, same (values CMDS USED)."
                      (let ((v (make-array want :element-type 'fixnum)))
                        (when pool (setf (gethash :quick-cmds pool) v))
                        v))))
-         (st (make-array +q0-st-size+ :element-type '(unsigned-byte 64) :initial-element 0))
-         (ctx (make-array +q0-ctx-size+ :initial-element 0)))
+         (st (arena-u64s +q0-st-size+))
+         (ctx (arena-svec +q0-ctx-size+)))
     (declare (type (simple-array fixnum (*)) cmds)
              (type (simple-array (unsigned-byte 64) (*)) st) (type simple-vector ctx))
     (setf (svref ctx +q0c-data+) data (svref ctx +q0c-buckets+) buckets)
@@ -3996,7 +4128,7 @@ use only CMDS[0..USED)."
   "Map a 64-symbol fast command etree onto the full 704-symbol alphabet."
   (if (etree-single et)
       (make-etree :single (aref +q0-cmd-map+ (etree-single et)))
-      (let ((full (make-array 704 :element-type 'fixnum :initial-element 0))
+      (let ((full (arena-fixnums 704))
             (fl (etree-lengths et)))
         (dotimes (c 64)
           (let ((d (aref fl c)))
@@ -4121,7 +4253,7 @@ samples, stride-29 sampling plus one-count smoothing above."
   (declare (type (simple-array (unsigned-byte 8) (*)) data)
            (type fixnum n)
            (optimize (speed 3) (safety 0)))
-  (let ((f (make-array 256 :element-type 'fixnum :initial-element 0)))
+  (let ((f (arena-fixnums 256)))
     (declare (type (simple-array fixnum (256)) f))
     (if (< n #x8000)
         (progn
@@ -4222,7 +4354,9 @@ lengths < 6210 and copy lengths < 2118 / last-distance copies < 2120 with
 their extra bits, distance codes 0..63."
   (declare (type (simple-array fixnum (*)) cmd-rc cmd-ln dist-rc dist-ln))
   (let ((cached *q0-luts*))
-    (when (and cached (equalp (car cached) (list cmd-ln dist-ln)))
+    (when (and cached
+               (equalp (first (car cached)) cmd-ln)
+               (equalp (second (car cached)) dist-ln))
       (return-from %q0-luts (cdr cached))))
   (flet ((u64s (n) (make-array n :element-type '(unsigned-byte 64) :initial-element 0)))
     (let ((cmd (u64s 64)) (ins (u64s 6210)) (copy (u64s 2118)) (clast (u64s 2120))
@@ -4246,6 +4380,21 @@ their extra bits, distance codes 0..63."
         (setf *q0-luts* (cons (list (copy-seq cmd-ln) (copy-seq dist-ln)) luts))
         luts))))
 
+(defun %bwr-settle (w)
+  "Write W's whole pending bytes so fewer than 8 bits remain: the
+assembly writers' entry invariant (they flush without a branch)."
+  (declare (type b:bwr w) (optimize (speed 3) (safety 0)))
+  (let ((out (b:bwr-out w)) (pos (b:bwr-pos w))
+        (acc (b::bwr-acc w)) (nb (b::bwr-nbits w)))
+    (declare (type (simple-array (unsigned-byte 8) (*)) out)
+             (type fixnum pos nb) (type (unsigned-byte 64) acc))
+    (loop while (>= nb 8)
+          do (setf (aref out pos) (logand acc 255)
+                   acc (ash acc -8) nb (- nb 8))
+             (incf pos))
+    (setf (b:bwr-pos w) pos (b::bwr-acc w) acc (b::bwr-nbits w) nb)
+    w))
+
 (defun %asm-q0-scan (data table w n limit window table-bits k back p next-hash
                      lit-rc lit-ln lit-single cmd-rc cmd-ln dist-rc dist-ln)
   "Run %LZ77-FRAGMENT-FAST's scan with %ASM-FRAGMENT-FAST, growing W between
@@ -4257,8 +4406,8 @@ chunks.  Returns the final LIT-START and LAST-DIST."
            (optimize (speed 3) (safety 0)))
   (destructuring-bind (cmd ins copy clast dist) (%q0-luts cmd-rc cmd-ln dist-rc dist-ln)
     (let ((lit (make-array 256 :element-type '(unsigned-byte 64) :initial-element 0))
-          (st (make-array +q0-st-size+ :element-type '(unsigned-byte 64) :initial-element 0))
-          (ctx (make-array +q0-ctx-size+)))
+          (st (arena-u64s +q0-st-size+))
+          (ctx (arena-svec +q0-ctx-size+)))
       (declare (type (simple-array (unsigned-byte 64) (*)) lit st) (type simple-vector ctx))
       (unless lit-single
         (dotimes (c 256)
@@ -4281,6 +4430,7 @@ chunks.  Returns the final LIT-START and LAST-DIST."
           ;; at most 2 bytes per literal and 13 per command (>= k input
           ;; bytes each), 8 bytes past the last store
           (b:w-ensure w (+ 1024 (* 5 (- chunk-end lit-start))))
+          (%bwr-settle w)
           (setf (aref st +q0-chunk-end+) chunk-end
                 (aref st +q0-wpos+) (b:bwr-pos w)
                 (aref st +q0-wacc+) (b::bwr-acc w)
@@ -4330,8 +4480,8 @@ between chunks.  Returns the final LIT-START, LAST-DIST, NC and CV."
            (type (simple-array fixnum (*)) litf cmdf distf)
            (optimize (speed 3) (safety 0)))
   (destructuring-bind (inscc copycc clastcc) +q1-cc-luts+
-    (let ((st (make-array +q0-st-size+ :element-type '(unsigned-byte 64) :initial-element 0))
-          (ctx (make-array +q0-ctx-size+ :initial-element 0)))
+    (let ((st (arena-u64s +q0-st-size+))
+          (ctx (arena-svec +q0-ctx-size+)))
       (declare (type (simple-array (unsigned-byte 64) (*)) st) (type simple-vector ctx))
       (setf (svref ctx +q0c-data+) data (svref ctx +q0c-table+) table
             (svref ctx +q0c-litf+) litf (svref ctx +q0c-cmdf+) cmdf
@@ -4465,8 +4615,8 @@ decisions; used only when W is non-nil."
                (let ((cost (+ 32 (* 2 insert))))
                  (declare (type fixnum cost))
                  (when (> cost slack)
-                   (setf slack 65536)
-                   (b:w-ensure w (+ slack cost)))
+                   (setf slack (+ 65536 cost))
+                   (b:w-ensure w slack))
                  (decf slack cost))
                ;; Thread the writer state as LEXICALS: while W escapes to
                ;; the non-inline W-EMIT-RUN, every bit write reloaded the
@@ -4887,8 +5037,8 @@ advanced as the second pass would advance it."
   (declare (type (simple-array fixnum (*)) cmds rb litf cmdf distf)
            (type fixnum nc) (optimize (speed 3) (safety 0)))
   (destructuring-bind (inslc cpylc insbase insbits cpybase cpybits cmdsym) +triv-tables+
-    (let ((st (make-array +q0-st-size+ :element-type '(unsigned-byte 64) :initial-element 0))
-          (ctx (make-array +q0-ctx-size+ :initial-element 0))
+    (let ((st (arena-u64s +q0-st-size+))
+          (ctx (arena-svec +q0-ctx-size+))
           (lit4 (make-array 1024 :element-type '(unsigned-byte 64) :initial-element 0)))
       (declare (type (simple-array (unsigned-byte 64) (*)) st lit4) (type simple-vector ctx))
       (setf (svref ctx +q0c-lit4+) lit4)
@@ -4918,12 +5068,12 @@ advanced as the second pass would advance it."
            (type fixnum nc) (optimize (speed 3) (safety 0)))
   (flet ((words (rc ln n)
            (declare (type (simple-array fixnum (*)) rc ln) (type fixnum n))
-           (let ((v (make-array n :element-type '(unsigned-byte 64) :initial-element 0)))
+           (let ((v (arena-u64s n)))
              (when (plusp (length ln))
                (dotimes (i n) (setf (aref v i) (logior (ash (aref rc i) 8) (aref ln i)))))
              v)))
-    (let ((st (make-array +q0-st-size+ :element-type '(unsigned-byte 64) :initial-element 0))
-          (ctx (make-array +q0-ctx-size+ :initial-element 0)))
+    (let ((st (arena-u64s +q0-st-size+))
+          (ctx (arena-svec +q0-ctx-size+)))
       (declare (type (simple-array (unsigned-byte 64) (*)) st) (type simple-vector ctx))
       (setf (svref ctx +q0c-data+) data (svref ctx +q0c-cmds+) cmds
             (svref ctx +q0c-litlut+) (if lit-single
@@ -5088,10 +5238,12 @@ advanced as the second pass would advance it."
                    (type (integer 0 1) dictp))
           (let ((cost (+ 24 (* 2 ins))))
             (declare (type fixnum cost))
+            ;; reserve 64 KiB beyond this command (an insert over 32 KiB
+            ;; costs more than 64 KiB itself; SLACK must not go negative)
             (when (> cost slack)
-              (setf slack 65536)
+              (setf slack (+ 65536 cost))
               (sync-out)
-              (b:w-ensure w (+ slack cost))
+              (b:w-ensure w slack)
               (sync-in))
             (decf slack cost))
           (multiple-value-bind (icode ixv ixb)
@@ -5178,8 +5330,8 @@ whenever it stops for room."
     (let ((lit (make-array 256 :element-type '(unsigned-byte 64) :initial-element 0))
           (cmd (make-array 64 :element-type '(unsigned-byte 64) :initial-element 0))
           (dist (make-array 64 :element-type '(unsigned-byte 64) :initial-element 0))
-          (st (make-array +q0-st-size+ :element-type '(unsigned-byte 64) :initial-element 0))
-          (ctx (make-array +q0-ctx-size+ :initial-element 0)))
+          (st (arena-u64s +q0-st-size+))
+          (ctx (arena-svec +q0-ctx-size+)))
       (declare (type (simple-array (unsigned-byte 64) (*)) lit cmd dist st)
                (type simple-vector ctx))
       (unless lit-single
@@ -5201,6 +5353,7 @@ whenever it stops for room."
           (declare (type fixnum ci))
           ;; room for the next command at least, and 64 KiB more
           (b:w-ensure w (+ 65536 (if (< ci nc) (* 2 (aref cv (* 4 ci))) 0)))
+          (%bwr-settle w)
           (setf (aref st +q0-wpos+) (b:bwr-pos w)
                 (aref st +q0-wacc+) (b::bwr-acc w)
                 (aref st +q0-wnbits+) (b::bwr-nbits w)
@@ -5299,8 +5452,8 @@ histograms.  The MLEN header must already have been written."
             (let ((cost (+ 32 (* 2 ins))))
               (declare (type fixnum cost))
               (when (> cost slack)
-                (setf slack 65536)
-                (b:w-ensure w (+ slack cost)))
+                (setf slack (+ 65536 cost))
+                (b:w-ensure w slack))
               (decf slack cost))
             (cond
               ((and (plusp ins) (plusp cpy))
@@ -5502,6 +5655,7 @@ per command."
 (declaim (type simple-vector +ctx-simple-utf8+ +ctx-continuation+
                          +ctx-complex-utf8+))
 
+(declaim (inline estimate-entropy))
 (defun estimate-entropy (histo off size)
   "C EstimateEntropy (encode.c): total*log2(total) - sum p*log2(p)."
   (declare (type (simple-array fixnum (*)) histo)
@@ -5513,11 +5667,13 @@ per command."
       (let ((p (aref histo (+ off i))))
         (declare (type fixnum p))
         (incf total p)
+        ;; FAST-LOG2: the same libm values, tabled below 2048 (the
+        ;; splitters call this ~3x256 bins per block decision)
         (when (plusp p)
-          (incf result (* (float p 1.0d0) (log (float p 1.0d0) 2.0d0))))))
+          (incf result (* (float p 1.0d0) (fast-log2 p))))))
     (if (zerop total)
         0.0d0
-        (- (* (float total 1.0d0) (log (float total 1.0d0) 2.0d0)) result))))
+        (- (* (float total 1.0d0) (fast-log2 total)) result))))
 
 (defun complex-context-map (data n)
   "C ShouldUseComplexStaticContextMap: entropy gate over5-bit literal
@@ -5810,17 +5966,15 @@ contiguous, so the largest base <= LEN is the correct symbol."
       (declare (type fixnum j))
       (setf (aref f j) (aref flat (+ (* k size) j))))))
 
-(defun split-block (syms n alphabet min-block threshold)
-  "C's greedy BlockSplitter (v1.0.9 metablock_inc.h) for one category.
-SYMS is the symbol stream - for distances, only distance-bearing entries.
-Collects MIN-BLOCK symbols per decision and merges/emits by the
-entropy-difference thresholds.  Returns (values TYPES LENGTHS NBLOCKS
-NTYPES); LENGTHS are in symbol units and may overshoot N at the tail
-(harmless: the decoder only reads a switch when a count reaches zero)."
-  (declare (type (simple-array (unsigned-byte 16) (*)) syms)
-           (type fixnum n alphabet min-block)
-           (type double-float threshold)
-           (optimize (speed 3) (safety 0)))
+(defmacro %greedy-splitter-body (n alphabet min-block threshold feed)
+  "The body of C's greedy BlockSplitter (v1.0.9 metablock_inc.h): N, ALPHABET,
+MIN-BLOCK, THRESHOLD are variables of the caller; FEED is a form that calls
+\(ADD SYM) for every symbol of the stream in order.  Returns (values TYPES
+LENGTHS NBLOCKS NTYPES HISTOS), HISTOS[t] being type t's histogram."
+  `(let ((n ,n) (alphabet ,alphabet) (min-block ,min-block) (threshold ,threshold))
+     (declare (type fixnum n alphabet min-block)
+              (type double-float threshold))
+
   (let* ((max-blocks (max 1 (1+ (floor n min-block))))
          (max-types (min max-blocks 257))
          (types (make-array max-blocks :element-type '(unsigned-byte 8)
@@ -5943,11 +6097,63 @@ NTYPES); LENGTHS are in symbol units and may overshoot N at the tail
                (when (= bsize target)
                  (finish nil))))
       (declare (inline clear-histo entropy))
-      (dotimes (i n)
-        (declare (type fixnum i))
-        (add (aref syms i)))
+,feed
       (finish t))
-    (values types lengths nblocks ntypes)))
+    (values types lengths nblocks ntypes histos))))
+
+(defun split-block (syms n alphabet min-block threshold)
+  "C's greedy BlockSplitter (v1.0.9 metablock_inc.h) for one category.
+SYMS is the symbol stream - for distances, only distance-bearing entries.
+Collects MIN-BLOCK symbols per decision and merges/emits by the
+entropy-difference thresholds.  Returns (values TYPES LENGTHS NBLOCKS
+NTYPES); LENGTHS are in symbol units and may overshoot N at the tail
+(harmless: the decoder only reads a switch when a count reaches zero)."
+  (declare (type (simple-array (unsigned-byte 16) (*)) syms)
+           (type fixnum n alphabet min-block)
+           (type double-float threshold)
+           (optimize (speed 3) (safety 0)))
+  (%greedy-splitter-body n alphabet min-block threshold
+    (dotimes (i n)
+      (declare (type fixnum i))
+      (add (aref syms i)))))
+
+(defun split-literals (recs ncmd data n)
+  "SPLIT-BLOCK over the literal stream of the plan RECS (N literals), read
+in place: C's literal splitter (256, 512, 400.0)."
+  (declare (type (simple-array fixnum (*)) recs)
+           (type (simple-array (unsigned-byte 8) (*)) data)
+           (type fixnum ncmd n)
+           (optimize (speed 3) (safety 0)))
+  (let ((alphabet 256) (min-block 512) (threshold 400.0d0))
+    (%greedy-splitter-body n alphabet min-block threshold
+      (dotimes (k ncmd)
+        (declare (type fixnum k))
+        (let* ((b (* k +cmd-stride+))
+               (ins (aref recs b)) (ls (aref recs (+ b 1))))
+          (declare (type fixnum b ins ls))
+          (loop for i of-type fixnum from ls below (+ ls ins)
+                do (add (aref data i))))))))
+
+(defun block-type-codes (types nblocks)
+  "C BlockTypeCodeCalculator: the switch code of every block (index 0, the
+implicit first block, unused): 1 = previous type + 1, 0 = the type before
+the previous one, else type + 2.  The greedy splitter mostly alternates
+between its last two types, so the cheap codes dominate."
+  (declare (type (simple-array (unsigned-byte 8) (*)) types)
+           (type fixnum nblocks)
+           (optimize (speed 3) (safety 0)))
+  (let ((codes (make-array (max 1 nblocks) :element-type 'fixnum :initial-element 0))
+        (last 1) (second-last 0))
+    (declare (type fixnum last second-last))
+    (dotimes (i nblocks codes)
+      (let* ((tp (aref types i))
+             (code (cond ((= tp (1+ last)) 1)
+                         ((= tp second-last) 0)
+                         (t (+ tp 2)))))
+        (declare (type fixnum tp code))
+        (setf (aref codes i) code
+              second-last last
+              last tp)))))
 
 (defun write-blk-header (w first-len type-tree tsize len-tree)
   "The optional block-type/length prefix codes + first count - the inverse
@@ -5956,6 +6162,33 @@ of the decoder's READ-BLK-HEADER - for a category with >= 2 block types."
   (write-etree w type-tree tsize)
   (write-etree w len-tree 26)
   (write-blen w len-tree first-len))
+
+(defun literal-split (recs ncmd data)
+  "C's greedy literal BlockSplitter (InitBlockSplitter(256, 512, 400.0)) over
+the literal stream of the plan RECS - the single-context case of
+BrotliBuildMetaBlockGreedy.  Returns (values TYPES LENGTHS NBLOCKS NTYPES
+HISTOS); one block when there are too few literals to split."
+  (declare (type (simple-array fixnum (*)) recs)
+           (type (simple-array (unsigned-byte 8) (*)) data)
+           (type fixnum ncmd)
+           (optimize (speed 3) (safety 0)))
+  (let ((nlits 0))
+    (declare (type fixnum nlits))
+    (dotimes (k ncmd)
+      (incf nlits (the fixnum (aref recs (* k +cmd-stride+)))))
+    (if (< nlits 1024)
+        (values (make-array 1 :element-type '(unsigned-byte 8) :initial-element 0)
+                (make-array 1 :element-type 'fixnum :initial-element (max 1 nlits))
+                1 1 nil)
+        (split-literals recs ncmd data nlits))))
+
+(defun literal-type-trees (histos nltypes rle)
+  "One literal tree per literal block type, from the splitter's per-type
+histograms."
+  (declare (type simple-vector histos) (type fixnum nltypes))
+  (let ((v (make-array nltypes)))
+    (dotimes (t0 nltypes v)
+      (setf (aref v t0) (build-etree (aref histos t0) 256 15 rle)))))
 
 (defun write-compressed-block-body (w data base-pos window use-dict dict-limit rb
                                     &key (max-chain 128) (lazy t) (short-dist t)
@@ -6015,61 +6248,51 @@ finds no split the header degrades to the single-type form byte-for-byte."
             (when (>= d 0)
               (setf (aref dist-syms j) d)
               (incf j)))))
-      (multiple-value-bind (itypes ilens niblocks nitypes)
+      (multiple-value-bind (itypes ilens niblocks nitypes ihistos)
           (split-block cmd-syms ncmd 704 1024 500.0d0)
         (declare (type fixnum niblocks nitypes)
                  ;; SPLIT-BLOCK returns (values ub8-types fixnum-lengths ...)
                  (type (simple-array (unsigned-byte 8) (*)) itypes)
                  (type (simple-array fixnum (*)) ilens))
-        (multiple-value-bind (dtypes dlens ndblocks ndtypes)
+        (multiple-value-bind (dtypes dlens ndblocks ndtypes dhistos)
             (split-block dist-syms nd 64 512 100.0d0)
           (declare (type fixnum ndblocks ndtypes)
                    (type (simple-array (unsigned-byte 8) (*)) dtypes)
                    (type (simple-array fixnum (*)) dlens))
           ;; ---- per-type histograms, trees, switch trees ----------------
-          (let* ((cmd-histo (make-array (* nitypes 704)
-                                        :element-type 'fixnum
-                                        :initial-element 0))
-                 (dist-histo (make-array (* ndtypes 64)
-                                         :element-type 'fixnum
-                                         :initial-element 0)))
-            (declare (type (simple-array fixnum (*)) cmd-histo dist-histo))
-            ;; tally per block type
-            (let ((k0 0))
-              (declare (type fixnum k0))
-              (dotimes (bi niblocks)
-                (declare (type fixnum bi))
-                (let ((tt (aref itypes bi)) (ln (aref ilens bi)))
-                  (declare (type fixnum tt ln))
-                  (loop for k of-type fixnum from k0 below (min ncmd (+ k0 ln))
-                        do (incf (aref cmd-histo
-                                       (+ (* tt 704)
-                                          (aref recs (+ (* k +cmd-stride+) 2))))))
-                  (incf k0 ln))))
-            (let ((j0 0))
-              (declare (type fixnum j0))
-              (dotimes (bi ndblocks)
-                (declare (type fixnum bi))
-                (let ((tt (aref dtypes bi)) (ln (aref dlens bi)))
-                  (declare (type fixnum tt ln))
-                  (loop for j of-type fixnum from j0 below (min nd (+ j0 ln))
-                        do (incf (aref dist-histo (+ (* tt 64) (aref dist-syms j)))))
-                  (incf j0 ln))))
+          (let* ((lsplit (if (= lit-k 1)
+                             (multiple-value-list (literal-split recs ncmd data))
+                             (list (make-array 1 :element-type '(unsigned-byte 8)
+                                                 :initial-element 0)
+                                   (make-array 1 :element-type 'fixnum
+                                                 :initial-element 1)
+                                   1 1)))
+                 (ltypes (first lsplit))
+                 (llens (second lsplit))
+                 (nlblocks (third lsplit))
+                 (nltypes (fourth lsplit))
+                 )
+            (declare (type simple-vector ihistos dhistos))
             (let* ((cmd-ets (let ((v (make-array nitypes)))
                             (dotimes (t0 nitypes v)
                               (declare (type fixnum t0))
                               (setf (aref v t0)
-                                    (build-etree (histo-slice cmd-histo t0 704)
+                                    ;; the splitter's per-type histograms
+                                    (build-etree (aref ihistos t0)
                                                  704 15 (>= quality 4))))))
                  (dist-ets (let ((v (make-array ndtypes)))
                              (dotimes (t0 ndtypes v)
                                (declare (type fixnum t0))
                                (setf (aref v t0)
-                                     (build-etree (histo-slice dist-histo t0 64)
+                                     (build-etree (aref dhistos t0)
                                                   64 15 (>= quality 4))))))
                  ;; C BrotliOptimizeHistograms (q4+): RLE-friendly counts
                  ;; for the literal, command and distance trees only
                  (lit (when (= lit-k 1) (build-etree litf 256 15 (>= quality 4))))
+                 ;; C's greedy literal blocks (single-context case)
+                 (lit-ets (when (> nltypes 1)
+                            (literal-type-trees (fifth lsplit) nltypes
+                                                (>= quality 4))))
                  (lits (when (>= lit-k 2)
                          (let ((v (make-array lit-k)))
                            (dotimes (k lit-k v)
@@ -6077,14 +6300,33 @@ finds no split the header degrades to the single-type form byte-for-byte."
                                    (build-etree (histo-slice litf k 256)
                                                 256 15 (>= quality 4))))))))
             ;; ---- block-type / block-length switch codes ----------------
-            (let* ((i-type-tree
+            (let* ((icodes (block-type-codes itypes niblocks))
+                   (dcodes (block-type-codes dtypes ndblocks))
+                   (lcodes (block-type-codes ltypes nlblocks))
+                   (l-type-tree
+                    (when (> nltypes 1)
+                      (let ((tf (make-array (+ nltypes 2) :element-type 'fixnum
+                                                          :initial-element 0)))
+                        (declare (type (simple-array fixnum (*)) tf))
+                        (loop for b of-type fixnum from 1 below nlblocks
+                              do (incf (aref tf (aref lcodes b))))
+                        (build-etree tf (+ nltypes 2) 15))))
+                   (l-len-tree
+                    (when (> nltypes 1)
+                      (let ((lf (make-array 26 :element-type 'fixnum :initial-element 0)))
+                        (declare (type (simple-array fixnum (*)) lf))
+                        (dotimes (b nlblocks)
+                          (declare (type fixnum b))
+                          (incf (aref lf (blen-sym (aref llens b)))))
+                        (build-etree lf 26 15))))
+                   (i-type-tree
                     (when (> nitypes 1)
                       (let ((tf (make-array (+ nitypes 2)
                                             :element-type 'fixnum
                                             :initial-element 0)))
                         (declare (type (simple-array fixnum (*)) tf))
                         (loop for b of-type fixnum from 1 below niblocks
-                              do (incf (aref tf (+ (aref itypes b) 2))))
+                              do (incf (aref tf (aref icodes b))))
                         (build-etree tf (+ nitypes 2) 15))))
                    (i-len-tree
                     (when (> nitypes 1)
@@ -6102,7 +6344,7 @@ finds no split the header degrades to the single-type form byte-for-byte."
                                             :initial-element 0)))
                         (declare (type (simple-array fixnum (*)) tf))
                         (loop for b of-type fixnum from 1 below ndblocks
-                              do (incf (aref tf (+ (aref dtypes b) 2))))
+                              do (incf (aref tf (aref dcodes b))))
                         (build-etree tf (+ ndtypes 2) 15))))
                    (d-len-tree
                     (when (> ndtypes 1)
@@ -6114,8 +6356,12 @@ finds no split the header degrades to the single-type form byte-for-byte."
                           (incf (aref lf (blen-sym (aref dlens b)))))
                         (build-etree lf 26 15)))))
               ;; ---- header --------------------------------------------
-              (b:wbits w 0 1)                ; NBLTYPES L = 1 (contexts carry
-                                             ; the literals, as in C's q5+)
+              ;; NBLTYPES L: 1 when contexts carry the literals (as in C's
+              ;; q5+ context modeling), else C's greedy literal blocks
+              (write-nbltypes w nltypes)
+              (when (> nltypes 1)
+                (write-blk-header w (aref llens 0) l-type-tree (+ nltypes 2)
+                                  l-len-tree))
               (write-nbltypes w nitypes)
               (when (> nitypes 1)
                 (write-blk-header w (aref ilens 0) i-type-tree (+ nitypes 2)
@@ -6127,13 +6373,21 @@ finds no split the header degrades to the single-type form byte-for-byte."
               (b:wbits w 0 2)                ; NPOSTFIX=0
               (b:wbits w 0 4)                ; NDIRECT=0
               (if (= lit-k 1)
-                  (b:wbits w 0 2)            ; context mode (unused)
+                  (dotimes (t0 nltypes)      ; context mode per type (unused)
+                    (b:wbits w 0 2))
                   (b:wbits w lit-mode 2))    ; context mode: 2 UTF8, 3 signed
-              (if (= lit-k 1)
-                  (b:wbits w 0 1)            ; NTREESL=1
-                  (write-nbltypes w lit-k))
-              (when (>= lit-k 2)
-                (write-context-map w lit-cmap 64 lit-k))
+              (cond ((>= lit-k 2)
+                     (write-nbltypes w lit-k)
+                     (write-context-map w lit-cmap 64 lit-k))
+                    ((> nltypes 1)
+                     ;; tree t for all 64 contexts of literal type t
+                     (write-nbltypes w nltypes)
+                     (let ((lm (make-array (* 64 nltypes) :element-type 'fixnum)))
+                       (declare (type (simple-array fixnum (*)) lm))
+                       (dotimes (i (* 64 nltypes))
+                         (setf (aref lm i) (ash i -6)))
+                       (write-context-map w lm (* 64 nltypes) nltypes)))
+                    (t (b:wbits w 0 1)))     ; NTREESL=1
               (if (= ndtypes 1)
                   (b:wbits w 0 1)            ; NTREESD=1
                   (progn
@@ -6150,11 +6404,14 @@ finds no split the header degrades to the single-type form byte-for-byte."
                           (declare (type fixnum c))
                           (setf (aref dm (+ (* 4 t0) c)) t0)))
                       (write-context-map w dm (* 4 ndtypes) ndtypes))))
-              (if (= lit-k 1)
-                  (write-etree w lit 256)
-                  (dotimes (k lit-k)
-                    (declare (type fixnum k))
-                    (write-etree w (aref lits k) 256)))
+              (cond ((>= lit-k 2)
+                     (dotimes (k lit-k)
+                       (declare (type fixnum k))
+                       (write-etree w (aref lits k) 256)))
+                    ((> nltypes 1)
+                     (dotimes (t0 nltypes)
+                       (write-etree w (aref lit-ets t0) 256)))
+                    (t (write-etree w lit 256)))
               (dotimes (t0 nitypes)
                 (declare (type fixnum t0))
                 (write-etree w (aref cmd-ets t0) 704))
@@ -6215,12 +6472,19 @@ finds no split the header degrades to the single-type form byte-for-byte."
                                          (etree-single (aref dist-ets t0))))))
                     (itype 0) (iblk 0) (ileft (aref ilens 0))
                     (dtype 0) (dblk 0) (dleft (aref dlens 0))
+                    (lblk 0) (lleft (aref llens 0))
                     (slack 0))
                 (declare (type simple-vector lit-rcl lit-lnl lit-sng
                                        cmd-rcs cmd-lns cmd-sngs
                                        dist-rcs dist-lns dist-sngs)
                          (type (simple-array fixnum (*)) lit-rc lit-ln)
-                         (type fixnum itype iblk ileft dtype dblk dleft slack))
+                         (type fixnum itype iblk ileft dtype dblk dleft slack
+                               lblk lleft))
+                (when (> nltypes 1)
+                  (let ((et (aref lit-ets 0)))
+                    (setf lit-single (etree-single et)
+                          lit-rc (or (etree-rcodes et) +empty-fixnums+)
+                          lit-ln (or (etree-lengths et) +empty-fixnums+))))
                 (dotimes (k ncmd)
                   (declare (type fixnum k))
                   (let ((b (* k +cmd-stride+)))
@@ -6232,7 +6496,7 @@ finds no split the header degrades to the single-type form byte-for-byte."
                         (incf iblk)
                         (let ((nt (aref itypes iblk)) (nl (aref ilens iblk)))
                           (declare (type fixnum nt nl))
-                          (etree-emit w i-type-tree (+ nt 2))
+                          (etree-emit w i-type-tree (aref icodes iblk))
                           (write-blen w i-len-tree nl)
                           (setf itype nt ileft nl)))
                       (decf ileft))
@@ -6248,8 +6512,8 @@ finds no split the header degrades to the single-type form byte-for-byte."
                       (let ((cost (+ 24 (* 2 ins))))
                         (declare (type fixnum cost))
                         (when (> cost slack)
-                          (setf slack 65536)
-                          (b:w-ensure w (+ slack cost)))
+                          (setf slack (+ 65536 cost))
+                          (b:w-ensure w slack))
                         (decf slack cost))
                       (let ((crc (the (simple-array fixnum (*)) (aref cmd-rcs itype)))
                             (cln (the (simple-array fixnum (*)) (aref cmd-lns itype)))
@@ -6276,16 +6540,39 @@ finds no split the header degrades to the single-type form byte-for-byte."
                                        (b:%wbits-raw
                                         w (aref (the (simple-array fixnum (*)) (aref lit-rcl cid)) sym)
                                         (aref (the (simple-array fixnum (*)) (aref lit-lnl cid)) sym)))))
-                          (unless lit-single
-                            ;; Long runs amortize the pin/state setup of the
-                            ;; run writer; short runs are cheaper inline.
-                            (if (>= ins 16)
-                                (b:w-emit-run w data ls (+ ls ins)
-                                              lit-rc lit-ln)
-                                (loop for i from ls below (+ ls ins)
-                                      do (let ((sym (aref data i)))
-                                           (b:%wbits-raw w (aref lit-rc sym)
-                                                         (aref lit-ln sym)))))))
+                          (flet ((run (from to)
+                                   (declare (type fixnum from to))
+                                   (unless lit-single
+                                     ;; Long runs amortize the pin/state setup
+                                     ;; of the run writer; short runs are
+                                     ;; cheaper inline.
+                                     (if (>= (- to from) 16)
+                                         (b:w-emit-run w data from to lit-rc lit-ln)
+                                         (loop for i of-type fixnum from from below to
+                                               do (let ((sym (aref data i)))
+                                                    (b:%wbits-raw w (aref lit-rc sym)
+                                                                  (aref lit-ln sym))))))))
+                            (if (= nltypes 1)
+                                (run ls (+ ls ins))
+                                ;; literal block switches: read by the decoder
+                                ;; before a literal once the count is spent
+                                (let ((i ls) (end (+ ls ins)))
+                                  (declare (type fixnum i end))
+                                  (loop while (< i end) do
+                                    (when (zerop lleft)
+                                      (incf lblk)
+                                      (let ((et (aref lit-ets (aref ltypes lblk))))
+                                        (etree-emit w l-type-tree (aref lcodes lblk))
+                                        (write-blen w l-len-tree (aref llens lblk))
+                                        (setf lleft (aref llens lblk)
+                                              lit-single (etree-single et)
+                                              lit-rc (or (etree-rcodes et) +empty-fixnums+)
+                                              lit-ln (or (etree-lengths et) +empty-fixnums+))))
+                                    (let ((m (min lleft (- end i))))
+                                      (declare (type fixnum m))
+                                      (run i (+ i m))
+                                      (incf i m)
+                                      (decf lleft m)))))))
                       (let ((dcode (aref recs (+ b 7))))
                         (declare (type fixnum dcode))
                         (when (>= dcode 0)
@@ -6297,7 +6584,7 @@ finds no split the header degrades to the single-type form byte-for-byte."
                               (let ((nt (aref dtypes dblk))
                                     (nl (aref dlens dblk)))
                                 (declare (type fixnum nt nl))
-                                (etree-emit w d-type-tree (+ nt 2))
+                                (etree-emit w d-type-tree (aref dcodes dblk))
                                 (write-blen w d-len-tree nl)
                                 (setf dtype nt dleft nl)))
                             (decf dleft))
@@ -6545,6 +6832,27 @@ compresses extremely well."
          (unique 0) (maxfreq 0))
     (declare (type (simple-array fixnum (256)) seen))
     (when (< sample 4) (return-from incompressible-p nil))
+    ;; Fast exit for the common case: 16+ repeated 4-byte groups among the
+    ;; first KiB's 256 already mean compressible (a 2^15-bit set holds 256
+    ;; random keys with ~1 false repeat).  Only a NIL can come early, and
+    ;; a wrong NIL costs time, not size (the stored fallback still compares
+    ;; lengths); the full test below is unchanged.
+    (when (>= sample 1024)
+      (let ((bits (make-array 4096 :element-type '(unsigned-byte 8)
+                                   :initial-element 0))
+            (dups 0))
+        (declare (type (simple-array (unsigned-byte 8) (4096)) bits)
+                 (type fixnum dups) (dynamic-extent bits))
+        (loop for i of-type fixnum from 0 below 1024 by 4 do
+          (let* ((key (dict-key4 data i))
+                 (h (logand (* key #x9E3779B1) #x7FFF))
+                 (byte (ash h -3))
+                 (mask (ash 1 (logand h 7))))
+            (declare (type fixnum key h byte mask))
+            (if (logtest (aref bits byte) mask)
+                (when (>= (incf dups) 16)
+                  (return-from incompressible-p nil))
+                (setf (aref bits byte) (logior (aref bits byte) mask)))))))
     ;; counts in four interleaved lanes (a run of one byte value made each
     ;; increment wait on the last), then UNIQUE and MAXFREQ from the sums
     (let ((lanes (make-array 1024 :element-type 'fixnum :initial-element 0))
@@ -6766,10 +7074,12 @@ or BrotliEncoderState, a single compressor must not be driven by two
 threads simultaneously: use one per thread (or per connection).
 Separate compressors - and plain COMPRESS - are fully concurrent and
 produce byte-identical output."
-  (let ((pool (make-hash-table :test 'eql)))
+  (let ((pool (make-hash-table :test 'eql))
+        (arena (make-arena)))
     (lambda (input &rest args)
-      (let ((*scratch-pool* pool))
-        (apply #'compress input args)))))
+      (let ((*scratch-pool* pool) (*arena* arena))
+        (unwind-protect (apply #'compress input args)
+          (arena-release arena))))))
 
 (defun compress-into (input output &key (start 0) (end (length output))
                                      (quality 11))

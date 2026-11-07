@@ -3654,3 +3654,70 @@ RLE/MTF.
 Open (speed): q0 json (scan/emit VOP is latency-bound), q2/q3 json,
 q10/q11 zeros (EvaluateNode per position), decode via DECOMPRESS
 (allocation; decode into a buffer is 1.0-1.16x warm).
+
+#### Session 7 Nov 2026, part 3
+
+- Branchless bit writer in every assembly emitter (q0 scan/emit, q1 and
+  q2-q4 emit): writes grouped below 64 bits, then an unconditional 8-byte
+  store advancing by whole bytes (< 8 bits pending), as the Lisp BWR
+  already did.  The old per-write "nb >= 32" flush branch mispredicted on
+  variable-length codes: q0 html 1.23 -> 1.40x, json 0.73 -> 0.84x, q1
+  json 0.87 -> 0.97x, q2/q3 html/binary to ~1.05x (warm).
+- q2-q4 plan/emit VOPs keep each command's values in registers instead of
+  round-tripping 13 values through the state vector.
+- Prefetch: q0 scan (the next trawl candidate's data; the post-copy
+  position's candidate while the command is emitted), quick matchers (the
+  post-match position).  An in-loop prefetch in the H6 ring walk was a loss
+  (reverted).
+- Match length: 32 bytes per bounds check (two SSE2 compares).
+- INCOMPRESSIBLE-P fast exit (16+ repeated 4-byte groups in the first KiB
+  mean compressible); the full check is unchanged.  This exposed a latent
+  safety-3 bug in the portable trivial writer (output slack counter going
+  negative for inserts > 32 KiB) - fixed at all four sites.
+- Per-call arena (MAKE-COMPRESSOR): code tables, VOP state vectors and
+  code-word tables come from free lists and return at the end of the call;
+  zeros/periodic q0/q1 per-call allocation 32-49 KB -> 6-9 KB.  These
+  cells take ~100 us, so fresh-page faults after the harness's FULL-GC were
+  ~20% of them: periodic q0 0.81 -> 1.03x, q1 0.84 -> 1.11x, zeros q1 0.91
+  -> 1.16x (harness conditions).
+- q10/q11: StartPosQueuePush stops at the first non-swap (the rest of the
+  queue is sorted - output-identical); zeros q10 0.56 -> 0.71x.
+- Decoder: Huffman trees keep only their table (the end-of-input slow path
+  decodes from the zero-padded table entry), the reader's code-length
+  scratch is on the stack: 212 -> 142 KB per html q5 decode.
+- Ratio: C's block-type switch codes (0 = second-last, 1 = last + 1) and
+  C's greedy literal block splitting for single-context streams (binary,
+  libc at q5-q9): binary 1 MiB q5-q8 1.019 -> 1.004 of C's size (64 KiB
+  1.06 -> 1.02).  Costs ~6% at binary q5 (splitter pass + per-type trees);
+  the splitter's own per-type histograms now feed the trees (no re-tally).
+- Measuring C: scratch scripts must pin glibc's malloc thresholds
+  (mallopt M_MMAP_THRESHOLD / M_TRIM_THRESHOLD) or C's per-call 2-32 MB
+  hasher tables fault in afresh (C q7 24 ms in the bench, 31 ms in a fresh
+  script) - several "q7/q8 above 1.2x" readings were that artifact.
+- bench: new LISP-DECOMP-INTO column (decode into a preallocated buffer,
+  like C-DECOMP-CORE); LISP-DECOMP keeps the allocating DECOMPRESS.
+
+Harness (bench20, 1 MiB, lisp/C core; taken before the literal splitting,
+16-bit H6 counters and the last prefetch, which moved binary q5 0.85 ->
+~0.79 and q7 0.97 -> ~0.95 in exchange for C's size, json/binary q7 to
+~0.96 warm):
+
+    compress  q0    q1    q2    q3    q4    q5    q6    q7    q9    q10   q11
+    html      1.47  1.16  1.04  1.03  1.21  1.07  1.22  1.02  2.08  1.16  1.71
+    json      0.84  1.00  0.94  0.93  1.19  1.07  1.16  0.92  1.48  1.00  1.54
+    binary    1.88  1.96  1.00  1.05  1.37  0.77  1.00  0.89  1.46  2.10  3.44
+    zeros     2.49  1.16  9.75  9.94  2.56  3.23  3.16  3.21  3.11  0.54  0.47
+    periodic  1.01  1.10  8.63  8.82  1.71  2.24  2.28  2.26  4.29  0.74  0.70
+
+    decode into a buffer (LISP-DECOMP-INTO) / DECOMPRESS
+    html      1.14/0.89  q1 1.12/0.86  q2-q4 1.14-1.29/0.85-0.94  q5-q9 0.95/0.75  q10-11 1.17/0.88
+    json      1.21/0.92  q1 1.23/0.92  q2-q4 1.00-1.17/0.76-0.84  q5-q9 0.98-1.00/0.75  q10-11 1.08-1.14/0.85-0.88
+    binary    1.12-1.32 into at every level / 0.92-1.01
+
+Remaining below 1: json q0 (scan/emit), json q2/q3 (~0.94), binary q5
+(H6 at 16 entries + literal splitting), json/binary q7-q8 (~0.95),
+zeros/periodic q10/q11 (EvaluateNode per position), html/json decode at
+q5-q9 into a buffer (0.95-0.98: the context-literal dependency chain).
+Ratio still above C: binary q2-q4 1.01-1.04, q10/q11 html 1.02-1.03 and
+binary 1.04 (C's BrotliSplitBlock / histogram clustering at q10+),
+periodic q5-q7 1.10, small inputs at q4-q9 (static dictionary search).
