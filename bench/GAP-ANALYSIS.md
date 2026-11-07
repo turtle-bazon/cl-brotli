@@ -3557,3 +3557,100 @@ Encoder:
 Measured A/B, html/sbcl/libc compress lisp/C: q5 0.77/0.63/0.56,
 q6 1.24/1.09/0.66, q7 1.47/1.51/0.85, q9 2.11/1.87/0.91.  The shared host
 (load ~2) makes single harness cells +-20%: prefer interleaved A/B.
+
+### Session 7 Nov 2026: VOP kernels (x86-64 SBCL)
+
+All assembly is in src/dvops.lisp (decoder) and src/evops.lisp (encoder);
+the Lisp code it replaces stays the code for CCL / ECL / other SBCL
+platforms and for every case the assembly hands back.  Protocol: a u64
+state vector (scalars, read on entry, written on exit) + a simple-vector
+of the arrays (tagged pointers in registers: conservatively scanned, no
+pinning needed); raw interior pointers only into explicitly pinned
+vectors.  Every encoder routine is bit-identical to its Lisp loop
+(66 corpus inputs x q0..q6, scratch cmpq0.lisp against a tree with the
+assembly disabled).
+
+Decoder
+- Simple (q0-q3 shape) and general (block switches, context literals,
+  distance contexts, dictionary words incl. transforms) meta-block loops.
+  Bail-out protocol: exit 1 = re-decode the next command in Lisp (input
+  near its end, invalid data), exit 2 = dictionary word (only the 64-byte-
+  room fallback).  Copies: 16-byte chunks, 32-byte disjoint, period-grown
+  overlap, distance < 16 as pattern stores, exact finish at meta-block
+  ends (100 KB copies there had run bytewise).
+- Huffman tables in C's layout (one array: root + per-prefix second-level
+  tables sized by NextTableBitSize) - 2.5x smaller literal tables.
+- Distance context from the command LUT (known before the extra bits),
+  per-context table pointers, p1/p2 in registers.
+- Fixed: DECOMPRESS-INTO took p1/p2 from the caller's bytes before START
+  (wrong output for context-modelled streams) - regression test added.
+- Output growth: extrapolate from output-per-input (overall or last
+  block, +1/4, <= 8x), never below doubling.
+Decode into a reused buffer (warm): html/libc 0.97-1.05x C, json q1 1.2x,
+zeros/periodic 3-55x.  Through DECOMPRESS under the harness 0.73-1.05x:
+it runs FULL-GC before every sample and SBCL then returns free pages to
+the OS, so every allocated byte costs ~0.6 ns of page faults (a 1 MB
+result ~600 us) while C decodes into a preallocated buffer.
+
+Encoder
+- q0: whole scan + emission (trawl, match, codes, hash re-insertion).
+- q1: recording scan (histograms in place) + fast emitter.
+- q2-q4: quick matchers H2/H3/H4/H54 (position in a register, insert =
+  pos - lit-start, FindLongestMatch score in a register), trivial writer
+  in two passes (codes computed once, packed into the command records).
+- q5/q6: C's H6 (ring walk through a pinned raw pointer); q6 switched
+  from the chain matcher to H6 (libc 0.51 -> 0.83x, ratio = C).
+- Fixed per-call costs: interleaved histogram lanes (a run of one byte
+  serialised every increment), stack bitset + early exit in
+  INCOMPRESSIBLE-P, typed canonical/reversed code builders, SSE2 match
+  length in all matchers.
+Lessons: a driver DEFUN named like its VOP's function compiles its own
+call as a self-call (heap corruption); x86 SIB scale <= 8; imm32
+sign-extends (compare u32 slots with :dword -1).
+
+#### Later the same day: allocation, prefetch, H6 at q7-q9, C's tree writer
+
+Harness (bench17, 1 MiB, lisp/C core; before the tree-writer port, which
+changes sizes only):
+
+    compress  q0    q1    q2    q3    q4    q5    q6    q7    q9    q10   q11
+    html      1.16  0.98  0.89  0.93  1.16  1.07  1.22  1.03  2.05  1.14  1.73
+    json      0.69  0.88  0.82  0.84  1.18  1.02  1.15  0.93  1.47  0.99  1.47
+    binary    1.61  1.69  0.89  0.91  1.39  0.84  1.09  0.98  1.39  2.08  3.14
+    zeros     1.38  0.67  6.85  6.92  2.21  2.68  2.69  2.76  2.61  0.45  0.38
+    periodic  0.58  0.63  5.92  5.88  1.58  1.98  2.00  1.99  3.82  0.81  0.72
+
+- Per-call allocation is a first-order cost in SBCL: a fresh 1 MB vector
+  costs ~200 us even warm (zeroing + GC), ~600 us after the harness's
+  FULL-GC once touched.  Pooled now (MAKE-COMPRESSOR scratch): the
+  PLAN-COMMANDS record array (4 MB/MiB of text at q5-q9), %LZ77's command
+  vector (3 allocations, 6 MB at q7), SPLIT-BLOCK's 258 eager histograms
+  (lazy now), BUILD-CODE-LENGTHS-A temporaries (stack).  json q5 5.5 MB ->
+  0.74 MB per call: q5 0.91 -> 1.02-1.09x, q7 json 0.74 -> 0.93-1.2x.
+- DECOMPRESS's first growth no longer jumps to 8x the input (4.8 MB for
+  1 MB of binary q0): exact first block, then extrapolation.
+- Prefetch in the H6 and quick VOPs: the next probe's ring/bucket line
+  (CUR+1 while this position walks; CUR+LEN while StoreRange runs).  The
+  H6 bucket table is 2-16 MB, so its first line per position was a DRAM
+  miss in both C and here; q8 binary 0.77 -> 1.00x, q7 +22%.
+- q7-q9 run C's H6 (bit-identical asm/Lisp): sizes now = C (were 1-6%
+  over with the chain matcher) and speed 0.93-2.05x.
+- Z-SKIP-RUN: the q10/q11 long-copy EvaluateNode loop out of the big
+  closure: zeros q10 0.41 -> 0.56, periodic q10 0.70 -> 1.03 (cq).
+- Tree headers: C's BrotliWriteHuffmanTree/StoreHuffmanTree (chained
+  repeat codes, initial previous length 8, DecideOverRleUse, a single
+  code-length symbol coded with 0 bits), C's simple-code depths (most
+  frequent first, tree-select for 4), and BrotliOptimizeHuffmanCountsFor-
+  Rle on q4+ literal/command/distance histograms.  periodic 1 MiB: q5
+  1.33 -> 1.10, q9 1.22 -> 0.95, q11 1.34 -> 1.06.
+
+Open (ratio): small inputs at q4-q9 (html 4 KiB q5 1.21, 16 KiB 1.13):
+C's H5/H6 and H2/H4 consult the static dictionary when no match is found
+(we only do at q10/q11) and use H5 below 1 MiB; q2/q3 binary 1.4-1.7%
+(C writes one meta-block per 16 KiB at q<4); q4 binary 4% (matcher
+difference, not the writer: through the full writer html/json reach
+1.003/1.000, binary stays 1.04); context maps are written without
+RLE/MTF.
+Open (speed): q0 json (scan/emit VOP is latency-bound), q2/q3 json,
+q10/q11 zeros (EvaluateNode per position), decode via DECOMPRESS
+(allocation; decode into a buffer is 1.0-1.16x warm).

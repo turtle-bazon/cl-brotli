@@ -21,10 +21,8 @@
   (table nil :type (or null (simple-array (unsigned-byte 16) (*))))
   (table-bits 0 :type fixnum)
   (mask 0 :type fixnum)
-  ;; second-level width: longest code - TABLE-BITS (0 = no subtables)
-  (sub-bits 0 :type (integer 0 15))
-  (sub-mask 0 :type fixnum)
-  (subtables nil :type (or null simple-vector)))
+  ;; widest second-level table: longest code - TABLE-BITS (0 = none)
+  (sub-bits 0 :type (integer 0 15)))
 
 (deftable +reverse-byte+
   (let ((v (make-array 256 :element-type '(unsigned-byte 8) :initial-element 0)))
@@ -50,120 +48,178 @@ zero-length entries (8-bit root for literal-sized alphabets, like every
 literal tree), so the readers need no single-tree branch.  COUNT stays NIL,
 which READ-HUFF uses to tell this case apart near the end of the input."
   (declare (type fixnum sym n))
-  (let ((tb (if (<= n 256) +lit-root-bits+ 1)))
+  (let ((tb (if (= n 256) +lit-root-bits+ 1)))
     (make-huff :single sym
                :table (make-array (ash 1 tb) :element-type '(unsigned-byte 16)
                                              :initial-element (ash sym 4))
-               :table-bits tb :mask (1- (ash 1 tb))
-               :subtables #())))
+               :table-bits tb :mask (1- (ash 1 tb)))))
 
-(defun build-huff (lengths n)
-  "Canonical Huffman from code LENGTHS[0:n-1] (0 = absent), Mark-Adler style.
-Builds a 10-bit primary table plus one 32-entry secondary table per long
-prefix, so codes up to 15 bits decode in two lookups.  The sorted symbol
-permutation used by the slow path is built lazily, because it is only needed
-for the last few bits of a stream.  The code must be complete (the readers
-reject anything else), so every table entry is written."
+;;; Table building in small functions: as one function the loops ran on
+;;; stack slots (SBCL has no callee-saved registers and too many values
+;;; were live), and the length histogram is now passed in by the reader
+;;; that already knows it.
+
+(defun %huff-sort (lengths n offs sorted)
+  "SORTED <- the symbols with nonzero length, by (length, symbol); OFFS
+holds each length's first index (and is advanced)."
   (declare (type (simple-array (unsigned-byte 8) (*)) lengths)
            (type (integer 0 1024) n)
+           (type (simple-array fixnum (16)) offs)
+           (type (simple-array (unsigned-byte 16) (*)) sorted)
            (optimize (speed 3) (safety 0)))
-  (let ((count (make-array (1+ +max-bits+) :element-type 'fixnum
-                                           :initial-element 0))
-        (nonzero 0) (last 0) (maxlen 0))
-    (declare (type (simple-array fixnum (16)) count)
-             (type fixnum nonzero last) (type (integer 0 15) maxlen))
+  (dotimes (s n)
+    (let ((l (aref lengths s)))
+      (declare (type (integer 0 15) l))
+      (when (plusp l)
+        (let ((o (aref offs l)))
+          (declare (type (integer 0 1023) o))
+          (setf (aref sorted o) s
+                (aref offs l) (1+ o)))))))
+
+(defun %huff-root (table sorted next count tbits maxlen)
+  "Root entries of the codes of up to TBITS bits, replicated.  Returns the
+number of symbols placed."
+  (declare (type (simple-array (unsigned-byte 16) (*)) table sorted)
+           (type (simple-array fixnum (16)) next count)
+           (type (integer 1 10) tbits) (type (integer 1 15) maxlen)
+           (optimize (speed 3) (safety 0)))
+  (let ((k 0) (tsize (ash 1 tbits)))
+    (declare (type (integer 0 1024) k) (type (integer 2 1024) tsize))
+    (loop for len of-type (integer 1 16) from 1 to (min maxlen tbits) do
+      (let ((code (aref next len)) (stride (ash 1 len)))
+        (declare (type (unsigned-byte 16) code) (type (integer 2 1024) stride))
+        (loop repeat (the (integer 0 1024) (aref count len)) do
+          (let ((entry (logior (ash (aref sorted k) 4) len)))
+            (declare (type (unsigned-byte 16) entry))
+            (loop for base of-type (integer 0 2048)
+                    from (%reverse-bits code len) below tsize by stride
+                  do (setf (aref table base) entry)))
+          (incf k)
+          (incf code))))
+    k))
+
+(defun %huff-long (table sorted next count tbits maxlen k)
+  "The codes longer than TBITS, in canonical order: each root prefix gets
+a second-level table as wide as C's NextTableBitSize says.  TABLE NIL: just
+return the total table size; else fill it (symbols from SORTED[K])."
+  (declare (type (or null (simple-array (unsigned-byte 16) (*))) table)
+           (type (simple-array (unsigned-byte 16) (*)) sorted)
+           (type (simple-array fixnum (16)) next count)
+           (type (integer 1 10) tbits) (type (integer 1 15) maxlen)
+           (type (integer 0 1024) k)
+           (optimize (speed 3) (safety 0)))
+  (let ((left (make-array (1+ +max-bits+) :element-type 'fixnum))
+        (prefix -1) (end (ash 1 tbits)) (sub-off 0) (sub-size 0))
+    (declare (type (simple-array fixnum (16)) left) (dynamic-extent left)
+             (type fixnum prefix end sub-off sub-size))
+    (replace left count)
+    (loop for len of-type (integer 1 16) from (1+ tbits) to maxlen do
+      (let ((code (aref next len)) (rem (- len tbits)))
+        (declare (type (unsigned-byte 16) code) (type (integer 1 14) rem))
+        (loop repeat (the (integer 0 1024) (aref count len)) do
+          (let ((p (ash code (- rem))))
+            (declare (type (unsigned-byte 16) p))
+            (when (/= p prefix)
+              (setf prefix p)
+              (let ((sb (let ((l len) (room (ash 1 rem)))
+                          (declare (type (integer 1 15) l) (type fixnum room))
+                          (loop
+                            (decf room (aref left l))
+                            (when (or (<= room 0) (>= l +max-bits+))
+                              (return (- l tbits)))
+                            (incf l)
+                            (setf room (ash room 1))))))
+                (declare (type (integer 1 14) sb))
+                (setf sub-off end sub-size (ash 1 sb))
+                (incf end sub-size)
+                (when (and table (< sub-off 4096))
+                  (setf (aref table (%reverse-bits p tbits))
+                        (logior (ash (the (integer 0 4095) sub-off) 4)
+                                (+ tbits sb)))))))
+          (when table
+            (let ((entry (logior (ash (aref sorted k) 4) rem)) (stride (ash 1 rem)))
+              (declare (type (unsigned-byte 16) entry) (type (integer 2 16384) stride))
+              (loop for base of-type fixnum
+                      from (%reverse-bits (logand code (1- stride)) rem) below sub-size by stride
+                    do (setf (aref table (+ sub-off base)) entry))
+              (incf k)))
+          (decf (aref left len))
+          (incf code))))
+    end))
+
+(defun build-huff (lengths n &optional count)
+  "Canonical Huffman from code LENGTHS[0:n-1] (0 = absent), C's table layout
+(BrotliBuildHuffmanTable): one (unsigned-byte 16) array holding a root table
+of 2^TABLE-BITS entries, then one second-level table per root prefix of the
+long codes, each just as wide as its longest code needs.  Entry = symbol << 4
+| length; a root entry whose length field exceeds TABLE-BITS marks a
+subtable: field - TABLE-BITS is its width, the symbol field its absolute
+offset.  COUNT, if given, is the histogram of LENGTHS (index = length).  The
+code must be complete (the readers reject anything else), so every entry is
+written."
+  (declare (type (simple-array (unsigned-byte 8) (*)) lengths)
+           (type (integer 0 1024) n)
+           (type (or null (simple-array fixnum (16))) count)
+           (optimize (speed 3) (safety 0)))
+  (unless count
+    (setf count (make-array (1+ +max-bits+) :element-type 'fixnum :initial-element 0))
     (dotimes (s n)
       (let ((l (aref lengths s)))
         (declare (type (integer 0 15) l))
-        (when (plusp l)
-          (incf (aref count l))
-          (incf nonzero)
-          (setf last s)
-          (when (> l maxlen) (setf maxlen l)))))
+        (incf (aref count l)))))
+  (setf (aref count 0) 0)
+  (let ((nonzero 0) (maxlen 0))
+    (declare (type fixnum nonzero) (type (integer 0 15) maxlen))
+    (loop for l of-type (integer 1 16) from 1 to +max-bits+ do
+      (let ((c (aref count l)))
+        (declare (type fixnum c))
+        (when (plusp c) (incf nonzero c) (setf maxlen l))))
     (when (<= nonzero 1)
       ;; A real table of zero-length entries (C does the same): readers need
       ;; no single-tree branch.  COUNT stays NIL, which READ-HUFF uses to
       ;; tell this case apart near the end of the input.
-      (return-from build-huff (make-single-huff last n)))
-    ;; Literal trees (n <= 256) always get exactly an 8-bit root - shorter
+      (return-from build-huff
+        (make-single-huff (or (position-if #'plusp lengths :end n) 0) n)))
+    ;; Literal trees (n = 256) always get exactly an 8-bit root - shorter
     ;; codes are replicated - so the literal loops can use constant mask
-    ;; and width.
-    (let* ((table-bits (if (<= n 256)
+    ;; and width.  Other trees get just what their longest code needs (a
+    ;; code-length code: 2^5 entries), at most 10 bits.
+    (let* ((table-bits (if (= n 256)
                            +lit-root-bits+
                            (min +other-root-bits+ maxlen)))
-           (sub-bits (max 0 (- maxlen table-bits)))
-           (sub-size (ash 1 sub-bits))
-           (tsize (ash 1 table-bits))
-           (table (make-array tsize :element-type '(unsigned-byte 16)
-                                    :initial-element 0))
-           ;; Each long code's 10-bit prefix owns at most one subtable, so
-           ;; the number of long codes bounds the subtable count: one
-           ;; allocation, no adjustable vector, no final COERCE.
-           (nlong (loop for l of-type fixnum from (1+ table-bits) to +max-bits+
-                        sum (aref count l) of-type fixnum))
-           (subtables (if (plusp nlong) (make-array (min nlong tsize)) #()))
-           (nsub 0)
            (next (make-array (1+ +max-bits+) :element-type 'fixnum
-                                             :initial-element 0)))
+                                             :initial-element 0))
+           (offs (make-array (1+ +max-bits+) :element-type 'fixnum
+                                             :initial-element 0))
+           (sorted (make-array nonzero :element-type '(unsigned-byte 16))))
       (declare (type (integer 1 10) table-bits)
-               (type (integer 0 14) sub-bits) (type (integer 1 16384) sub-size)
-               (type (integer 2 1024) tsize)
-               (type (simple-array (unsigned-byte 16) (*)) table)
-               (type fixnum nlong nsub)
-               (type simple-vector subtables)
-               (type (simple-array fixnum (16)) next))
-      (let ((code 0))
-        (declare (type fixnum code))
+               (type (simple-array fixnum (16)) next offs)
+               (type (simple-array (unsigned-byte 16) (*)) sorted)
+               (dynamic-extent next offs sorted))
+      (let ((code 0) (o 0))
+        (declare (type fixnum code o))
         (loop for bits of-type fixnum from 1 to +max-bits+ do
           (setf code (ash (+ code (aref count (1- bits))) 1)
-                (aref next bits) code)))
-      ;; Walk the symbols in input order: canonical codes for a given length
-      ;; increase with symbol number, so NEXT[LEN] assigns them directly.
-      (dotimes (sym n)
-        (let ((len (aref lengths sym)))
-          (declare (type (integer 0 15) len))
-          (when (plusp len)
-            (let ((code (aref next len)))
-              (declare (type (unsigned-byte 15) code))
-              (setf (aref next len) (1+ code))
-              (if (<= len table-bits)
-                  (let ((entry (logior (ash sym 4) len))
-                        (stride (ash 1 len)))
-                    (declare (type (unsigned-byte 16) entry) (type fixnum stride))
-                    (loop for base of-type fixnum
-                            from (%reverse-bits code len) below tsize by stride
-                          do (setf (aref table base) entry)))
-                  (let* ((rem (- len table-bits))
-                         (rev-prefix (%reverse-bits (ash code (- rem)) table-bits))
-                         (marker (aref table rev-prefix))
-                         (sub (if (zerop marker)
-                                  (let ((new (make-array
-                                              sub-size
-                                              :element-type '(unsigned-byte 16)
-                                              :initial-element 0)))
-                                    (setf (svref subtables nsub) new)
-                                    (incf nsub)
-                                    ;; marker: length field 15 (root
-                                    ;; lengths are <= 10, so 15 is free)
-                                    (setf (aref table rev-prefix)
-                                          (logior (ash nsub 4) 15))
-                                    new)
-                                  (svref subtables (1- (ash marker -4)))))
-                         (entry (logior (ash sym 4) rem))
-                         (stride (ash 1 rem)))
-                    (declare (type (integer 1 14) rem)
-                             (type (unsigned-byte 16) marker entry)
-                             (type (simple-array (unsigned-byte 16) (*)) sub)
-                             (type fixnum stride))
-                    (loop for base of-type fixnum
-                            from (%reverse-bits (logand code (1- (ash 1 rem))) rem)
-                            below sub-size by stride
-                          do (setf (aref sub base) entry))))))))
-      (make-huff :count count :lengths lengths :table table
-                 :table-bits table-bits
-                 :mask (1- tsize)
-                 :sub-bits sub-bits :sub-mask (1- sub-size)
-                 :subtables subtables))))
+                (aref next bits) code
+                (aref offs bits) o)
+          (incf o (aref count bits))))
+      (%huff-sort lengths n offs sorted)
+      (let* ((total (if (> maxlen table-bits)
+                        (%huff-long nil sorted next count table-bits maxlen 0)
+                        (ash 1 table-bits))))
+        (declare (type fixnum total))
+        (when (> total 4096)
+          ;; subtable offsets live in the 12-bit symbol field
+          (cl-brotli.lisp::berr "invalid prefix code"))
+        (let* ((table (make-array total :element-type '(unsigned-byte 16)
+                                        :initial-element 0))
+               (k (%huff-root table sorted next count table-bits maxlen)))
+          (when (> maxlen table-bits)
+            (%huff-long table sorted next count table-bits maxlen k))
+          (make-huff :count count :lengths lengths :table table
+                     :table-bits table-bits
+                     :mask (1- (ash 1 table-bits))
+                     :sub-bits (max 0 (- maxlen table-bits))))))))
 
 (defun huff-ensure-symbols (h)
   "Build H's length-sorted symbol permutation on demand (slow path only)."
@@ -236,26 +292,25 @@ redundant on the fast path."
                               (logand (b:brd-acc r) (huff-mask h))))))
           (declare (type fixnum entry))
           (cond
-            ((/= (logand entry 15) 15)            ; direct hit
+            ((<= (logand entry 15) table-bits)    ; direct hit
              (let ((len (logand entry 15)))
                (declare (type fixnum len))
                (consume-bits r len)
                (ash entry -4)))
-            (t                                    ; length 15: subtable marker
-             (if (or (>= (b:brd-nbits r) (+ table-bits (huff-sub-bits h)))
-                     (>= (b:bits-available r) (+ table-bits (huff-sub-bits h))))
-                 (progn
+            (t                                    ; subtable of width len - table-bits
+             (if (or (>= (b:brd-nbits r) (logand entry 15))
+                     (>= (b:bits-available r) (logand entry 15)))
+                 (let ((sb (- (logand entry 15) table-bits)))
+                   (declare (type (integer 1 14) sb))
                    (consume-bits r table-bits)
-                   (let* ((subs (huff-subtables h))
-                          (sub (aref subs (1- (ash entry -4))))
-                          (entry2 (aref sub
-                                          (progn
-                                            (unless (>= (b:brd-nbits r) (huff-sub-bits h))
-                                              (b::%fill-bits r (huff-sub-bits h)))
-                                            (logand (b:brd-acc r) (huff-sub-mask h))))))
-                     (declare (type simple-vector subs)
-                              (type (simple-array (unsigned-byte 16) (*)) sub)
-                              (type fixnum entry2))
+                   (let* ((sub-base (ash entry -4))
+                          (entry2 (aref table
+                                        (+ sub-base
+                                           (progn
+                                             (unless (>= (b:brd-nbits r) sb)
+                                               (b::%fill-bits r sb))
+                                             (logand (b:brd-acc r) (1- (ash 1 sb))))))))
+                     (declare (type fixnum sub-base entry2))
                      (if (plusp (logand entry2 15))
                          (let ((rem (logand entry2 15)))
                            (declare (type fixnum rem))
@@ -369,15 +424,13 @@ refill loop and a +WIDE-MASKS+ symbol-value fetch to every call site)."
                              (declare (type (integer 1 10) tbits)
                                       (type (unsigned-byte 16) entry)
                                       (type (integer 0 15) len))
-                             (when (/= len 15)            ; direct hit
+                             (when (<= len tbits)         ; direct hit
                                (setf ,',acc (ash ,',acc (- len)) ,',nb (- ,',nb len))
                                (return-from lsym (ash entry -4)))
                              (progn                       ; subtable marker
-                               (let* ((sub (svref (the simple-vector (huff-subtables ,tr))
-                                                  (1- (ash entry -4))))
-                                      (e2 (aref (the (simple-array (unsigned-byte 16) (*)) sub)
-                                                (logand (ash ,',acc (- tbits))
-                                                        (huff-sub-mask ,tr))))
+                               (let* ((e2 (aref ,tb (+ (ash entry -4)
+                                                       (logand (ash ,',acc (- tbits))
+                                                               (1- (ash 1 (- len tbits)))))))
                                       (rem (logand e2 15)))
                                  (declare (type (unsigned-byte 16) e2) (type (integer 0 15) rem))
                                  (when (plusp rem)
@@ -407,16 +460,14 @@ refill loop and a +WIDE-MASKS+ symbol-value fetch to every call site)."
                                  (declare (type (unsigned-byte 16) entry)
                                           (type (integer 0 15) len))
                                  (cond
-                                   ((/= len 15)                 ; direct hit
+                                   ((<= len tbits)              ; direct hit
                                     (setf ,',acc (ash ,',acc (- len))
                                           ,',nb (- ,',nb len))
                                     (return-from lsym (ash entry -4)))
-                                   ((>= ,',nb (+ tbits (huff-sub-bits ,tr)))  ; marker
-                                    (let* ((sub (svref (the simple-vector (huff-subtables ,tr))
-                                                       (1- (ash entry -4))))
-                                           (e2 (aref (the (simple-array (unsigned-byte 16) (*)) sub)
-                                                     (logand (ash ,',acc (- tbits))
-                                                             (huff-sub-mask ,tr))))
+                                   ((>= ,',nb len)              ; marker: len = tbits + width
+                                    (let* ((e2 (aref ,tb (+ (ash entry -4)
+                                                            (logand (ash ,',acc (- tbits))
+                                                                    (1- (ash 1 (- len tbits)))))))
                                            (rem (logand e2 15)))
                                       (declare (type (unsigned-byte 16) e2)
                                                (type (integer 0 15) rem))
@@ -469,16 +520,21 @@ refill loop and a +WIDE-MASKS+ symbol-value fetch to every call site)."
           (lengths (make-array alphabet-size
                                   :element-type '(unsigned-byte 8)
                                   :initial-element 0))
-          (symbol 0) (prev-code-len 8) (repeat 0) (repeat-code-len 0) (space 32768))
+          (symbol 0) (prev-code-len 8) (repeat 0) (repeat-code-len 0) (space 32768)
+          ;; length histogram for BUILD-HUFF (it would count them again)
+          (count (make-array (1+ +max-bits+) :element-type 'fixnum :initial-element 0)))
       (declare (type fixnum symbol repeat space)
-               (type (integer 0 15) prev-code-len repeat-code-len))
+               (type (integer 0 15) prev-code-len repeat-code-len)
+               (type (simple-array fixnum (16)) count))
       (with-local-bits (r)
       (loop while (and (< symbol alphabet-size) (> space 0)) do
         (let ((c (lsym clh)))
           (declare (type (integer 0 17) c))
           (if (< c 16)
               (progn (setf repeat 0 (aref lengths symbol) c) (incf symbol)
-                     (when (plusp c) (setf prev-code-len c) (decf space (ash 32768 (- c)))))
+                     (when (plusp c)
+                       (incf (aref count c))
+                       (setf prev-code-len c) (decf space (ash 32768 (- c)))))
               (let* ((extra-bits (- c 14))                  ; 16->2, 17->3
                      (new-len (if (= c 16) prev-code-len 0)))
                 (declare (type (integer 2 3) extra-bits) (type (integer 0 15) new-len))
@@ -489,13 +545,17 @@ refill loop and a +WIDE-MASKS+ symbol-value fetch to every call site)."
                   (let ((delta (- repeat old-repeat)))
                     (declare (type fixnum delta))
                     (when (plusp new-len) (decf space (ash delta (- 15 new-len))))
-                    (dotimes (k delta)
-                      (when (< symbol alphabet-size) (setf (aref lengths symbol) new-len) (incf symbol))))))))))
+                    (let ((written (min delta (- alphabet-size symbol))))
+                      (declare (type fixnum written))
+                      (when (plusp written)
+                        (incf (aref count new-len) written)
+                        (fill lengths new-len :start symbol :end (+ symbol written))
+                        (incf symbol written))))))))))
       ;; C: BROTLI_DECODER_ERROR_FORMAT_HUFFMAN_SPACE - the code must be
       ;; exactly complete.
       (unless (zerop space)
         (cl-brotli.lisp::berr "incomplete or oversubscribed prefix code"))
-      (build-huff lengths alphabet-size))))
+      (build-huff lengths alphabet-size count))))
 
 (defun read-prefix-code (r alphabet-size)
   "Read a prefix code (simple or complex); return a HUFF."

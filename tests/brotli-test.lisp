@@ -355,6 +355,32 @@ overlapping copies, the shapes that exercise the wide copy paths."
           (incf bad))))
     (is (zerop bad) "~D of 120 calls touched bytes past the returned end" bad)))
 
+(test decompress-into-context-starts-at-zero
+  ;; The bytes before START are the caller's, not stream history: the
+  ;; stream's first literals have context p1 = p2 = 0 (they were once read
+  ;; from OUT[START-1], OUT[START-2] - wrong output or a spurious error for
+  ;; context-modeled streams).
+  ;; Seed 1 includes streams the old code got wrong (C 1.2.0, q10: k 62
+  ;; and 195); only a few streams depend on the context of their first
+  ;; literals at all.
+  (let ((rnd (lcg-stream 1)) (bad 0) (runs 0))
+    (dotimes (k 200)
+      (let* ((n (+ 10 (funcall rnd 3000)))
+             (data (let ((v (make-array n :element-type '(unsigned-byte 8))))
+                     (dotimes (i n v)
+                       (setf (aref v i) (if (< (funcall rnd 3) 1)
+                                            (funcall rnd 256)
+                                            (+ 32 (funcall rnd 8)))))))
+             (c (cl-brotli.reference:compress data :quality (+ 5 (funcall rnd 7)))))
+        (dolist (fill '(0 127 200 255))
+          (let ((out (make-array (+ 2 n) :element-type '(unsigned-byte 8)
+                                         :initial-element fill)))
+            (incf runs)
+            (unless (and (ignore-errors (cl-brotli:decompress-into c out :start 2))
+                         (equalp (subseq out 2) data))
+              (incf bad))))))
+    (is (zerop bad) "~D of ~D decodes at :START 2 differ" bad runs)))
+
 (test corrupt-streams-signal-brotli-error
   ;; Mutated C and Lisp streams must decode or signal BROTLI-ERROR - never
   ;; another condition (at safety 0 that meant an out-of-bounds access).
