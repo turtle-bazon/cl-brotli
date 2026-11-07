@@ -3706,8 +3706,8 @@ so the result reads exactly like a fully zeroed table."
            (type (integer 1 24) bits) (type (integer 1 4) sweep)
            (type (integer 5 8) hash-len)
            (optimize (speed 3) (safety 0)))
-  (let ((n (length data)) (mask (1- (ash 1 bits))) (shift (- bits 64)))
-    (declare (type fixnum n mask) (type (integer -63 -40) shift))
+  (let ((n (length data)) (shift (- bits 64)))
+    (declare (type fixnum n) (type (integer -63 -40) shift))
     (with-ptrs ((sap data))
       (loop for i of-type fixnum from 0 to (- n 8) do
         (let* ((w (ptr-u64 sap i))
@@ -3717,7 +3717,7 @@ so the result reads exactly like a fully zeroed table."
                (key (ash (logand (* x #x1FE35A7BD3579BD3) #xFFFFFFFFFFFFFFFF) shift)))
           (declare (type (unsigned-byte 64) w x) (type fixnum key))
           (dotimes (j sweep)
-            (setf (aref buckets (logand (+ key (ash j 3)) mask)) 0)))))))
+            (setf (aref buckets (+ key j)) 0)))))))
 
 (defun acquire-quick-buckets (bits sweep &optional data (hash-len 5))
   "Zeroed bucket table for %LZ77-QUICK (2^BITS + SWEEP u32; C zeroes its
@@ -3769,9 +3769,11 @@ input <= 2^BITS / 32), a pooled table is cleared only where DATA hashes."
              (declare (type (unsigned-byte 64) w x) (type fixnum key))
              (setf (aref buckets ,(if (= sweep 1)
                                       'key
-                                      ;; C 1.2.0: slot (key + (j << 3)) & mask
-                                      `(logand (+ key (logand i ,(ash (1- sweep) 3)))
-                                               ,(1- (ash 1 bits)))))
+                                      ;; adjacent sweep slots (brotli 1.0's
+                                      ;; layout; C 1.2.0 spaces them 8 apart,
+                                      ;; same sizes, ~7% slower at q4: two
+                                      ;; cache lines per H54 probe)
+                                      `(+ key (logand (ash i -3) ,(1- sweep)))))
                    i))))
        (declaim (notinline ,sr))
        (defun ,name (data sap window)
@@ -3978,9 +3980,7 @@ insert) is added here.  Same commands, same (values CMDS USED)."
                  (declare (type fixnum key))
                  (setf (aref buckets (if (= sweep 1)
                                          key
-                                         ;; C 1.2.0: slot (key + (j << 3)) & mask
-                                         (logand (+ key (logand i (ash (1- sweep) 3)))
-                                                 (1- (ash 1 bits)))))
+                                         (+ key (logand (ash i -3) (1- sweep)))))
                        i)))
              (push-cmd (ins ls cpy dist dictp)
                (declare (type fixnum ins ls cpy dist dictp))
@@ -4055,8 +4055,7 @@ insert) is added here.  Same commands, same (values CMDS USED)."
                                (setf out-len len out-dist dist out-lcd lcd))))))
                      (progn
                        (loop for i of-type fixnum below sweep do
-                         (let* ((prev (aref buckets (logand (+ key (ash i 3))
-                                                            (1- (ash 1 bits)))))
+                         (let* ((prev (aref buckets (+ key i)))
                                 (backward (- cur prev)))
                            (declare (type fixnum prev backward))
                            (when (and (= compare (aref data (+ prev best-len)))
@@ -4077,8 +4076,7 @@ insert) is added here.  Same commands, same (values CMDS USED)."
                                               dlookups dmatches t)
                              out-score
                            (setf out-len len out-dist dist out-lcd lcd)))
-                       (setf (aref buckets (logand (+ key (logand cur (ash (1- sweep) 3)))
-                                                   (1- (ash 1 bits))))
+                       (setf (aref buckets (+ key (logand (ash cur -3) (1- sweep))))
                              cur)))
                  (values out-len out-dist out-score out-lcd))))
       (declare (inline hash store char-at find-longest))
@@ -5886,63 +5884,73 @@ header itself; the last meta-block is the stream's last."
   (let* ((n (length data))
          (ncmd (truncate n5 5))
          (ci 0) (lits 0) (cnt 0) (mb-start 0) (first-ci 0)
-         (head nil)                       ; (ins ls cpy dist dictp) for FIRST-CI
+         ;; the first command of a meta-block after a split insert: its
+         ;; insert length and literal start (copy fields are the original's)
+         (head nil) (h-ins 0) (h-ls 0)
          (b 16384))
-    (declare (type fixnum n ncmd ci lits cnt mb-start first-ci b))
-    (labels ((cmd (i k)
-               (declare (type fixnum i k))
-               (if (and head (= i first-ci))
-                   (the fixnum (nth k head))
-                   (aref cmds (+ (* 5 i) k))))
-             (emit (end last-ci tail lastp)
-               ;; commands FIRST-CI..LAST-CI-1 (+ an insert-only TAIL)
+    (declare (type fixnum n ncmd ci lits cnt mb-start first-ci b h-ins h-ls)
+             (type boolean head))
+    (macrolet ((ins (i) `(if (and head (= ,i first-ci)) h-ins (aref cmds (* 5 ,i))))
+               (ls (i) `(if (and head (= ,i first-ci)) h-ls (aref cmds (+ 1 (* 5 ,i)))))
+               (cpy (i) `(aref cmds (+ 2 (* 5 ,i)))))
+      (flet ((emit (end last-ci tail lastp)
+               ;; commands FIRST-CI..LAST-CI-1 (+ an insert-only TAIL), as a
+               ;; copy: the plan pass overwrites a command's code slots
+               (declare (type fixnum end last-ci) (type (or null fixnum) tail))
                (let* ((k (+ (- last-ci first-ci) (if tail 1 0)))
-                      (sub (make-array (* 5 k) :element-type 'fixnum)))
-                 (loop for i from first-ci below last-ci for o from 0 by 5 do
-                   (dotimes (j 5) (setf (aref sub (+ o j)) (cmd i j))))
+                      (sub (pooled-fixnums :q23-sub (* 5 k))))
+                 (declare (type fixnum k) (type (simple-array fixnum (*)) sub))
+                 (replace sub cmds :start2 (* 5 first-ci) :end2 (* 5 last-ci))
+                 (when head
+                   (setf (aref sub 0) h-ins (aref sub 1) h-ls))
                  (when tail
                    (let ((o (* 5 (- last-ci first-ci))))
+                     (declare (type fixnum o))
                      (setf (aref sub o) tail (aref sub (+ o 1)) (- end tail)
                            (aref sub (+ o 2)) 0 (aref sub (+ o 3)) 0
                            (aref sub (+ o 4)) 0)))
                  (write-mlen-header w (- end mb-start) lastp)
                  (write-trivial-block-body w data sub rb :short-dist short-dist
                                                          :max-lit-bits max-lit-bits
-                                                         :n5 (length sub)))))
-      (loop
-        (when (>= b n)
-          (if (zerop first-ci)
-              ;; one meta-block: the commands as they are, no copy
-              (progn
-                (write-mlen-header w n t)
-                (write-trivial-block-body w data cmds rb :short-dist short-dist
-                                                         :max-lit-bits max-lit-bits
-                                                         :n5 n5))
-              (emit n ncmd nil t))
-          (return))
-        ;; the commands C creates in this block: copy starting before B
-        (loop while (and (< ci ncmd) (plusp (cmd ci 2))
-                         (< (+ (cmd ci 1) (cmd ci 0)) b))
-              do (incf lits (cmd ci 0)) (incf cnt) (incf ci))
-        (if (< (+ lits cnt) #x2FFF)
-            (incf b 16384)
-            (let* ((last-end (if (> ci first-ci) (+ (cmd (1- ci) 1) (cmd (1- ci) 0) (cmd (1- ci) 2)) mb-start))
-                   (end (max b last-end))
-                   (tail nil) (next-head nil))
-              (declare (type fixnum last-end end))
-              (when (and (= end b) (< ci ncmd) (< (cmd ci 1) b))
-                ;; split the insert spanning B
-                (let ((ins (cmd ci 0)) (ls (cmd ci 1)))
-                  (setf tail (- b ls)
-                        next-head (list (- ins tail) b (cmd ci 2) (cmd ci 3) (cmd ci 4)))))
-              (when (>= end n)
-                ;; the boundary reached the end: one final meta-block
-                (emit n ncmd nil t)
-                (return))
-              (emit end ci tail nil)
-              (setf mb-start end first-ci ci head next-head lits 0 cnt 0)
+                                                         :n5 (* 5 k)))))
+        (loop
+          (when (>= b n)
+            (if (zerop first-ci)
+                ;; one meta-block: the commands as they are, no copy
+                (progn
+                  (write-mlen-header w n t)
+                  (write-trivial-block-body w data cmds rb :short-dist short-dist
+                                                           :max-lit-bits max-lit-bits
+                                                           :n5 n5))
+                (emit n ncmd nil t))
+            (return))
+          ;; the commands C creates in this block: copy starting before B
+          (loop while (and (< ci ncmd) (plusp (cpy ci))
+                           (< (+ (ls ci) (ins ci)) b))
+                do (incf lits (ins ci)) (incf cnt) (incf ci))
+          (if (< (+ lits cnt) #x2FFF)
               (incf b 16384)
-              (loop while (<= b end) do (incf b 16384))))))))
+              (let* ((last-end (if (> ci first-ci)
+                                   (+ (ls (1- ci)) (ins (1- ci)) (cpy (1- ci)))
+                                   mb-start))
+                     (end (max b last-end))
+                     (tail nil) (nh-ins 0))
+                (declare (type fixnum last-end end nh-ins) (type (or null fixnum) tail))
+                (when (and (= end b) (< ci ncmd) (< (ls ci) b))
+                  ;; split the insert spanning B
+                  (setf tail (- b (ls ci))
+                        nh-ins (- (ins ci) tail)))
+                (when (>= end n)
+                  ;; the boundary reached the end: one final meta-block
+                  (emit n ncmd nil t)
+                  (return))
+                (emit end ci tail nil)
+                (setf mb-start end first-ci ci lits 0 cnt 0)
+                (if tail
+                    (setf head t h-ins nh-ins h-ls b)
+                    (setf head nil))
+                (incf b 16384)
+                (loop while (<= b end) do (incf b 16384)))))))))
 
 (defun write-fast-block-body (w data cv nc litf cmdf distf)
   "Emit a q0/q1 meta-block body from the flat fast-fragment command vector,
